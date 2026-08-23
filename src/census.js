@@ -12,9 +12,15 @@ const OVERSIZED_TEXTURE_DIM = 4096;
 
 function triCount(geometry) {
   if (!geometry) return 0;
-  if (geometry.index) return Math.floor(geometry.index.count / 3);
-  const pos = geometry.attributes && geometry.attributes.position;
-  return pos ? Math.floor(pos.count / 3) : 0;
+  // drawRange first: a pooled/merged mesh trims what it actually submits via
+  // setDrawRange, and counting the full buffer bills the GPU for triangles it
+  // never sees — the first field census read a 2-mesh corpse pool as 524k
+  // tris this way. Infinity (the default) falls through to the buffer size.
+  const range = geometry.drawRange;
+  const full = geometry.index ? geometry.index.count
+    : (geometry.attributes && geometry.attributes.position ? geometry.attributes.position.count : 0);
+  const used = range && range.count !== Infinity ? Math.min(range.count, full) : full;
+  return Math.floor(used / 3);
 }
 
 function materialKey(m) {
@@ -49,6 +55,9 @@ function walkEntity(root) {
       out.meshes++;
       if (vis) out.visibleMeshes++;
       if (inst) out.instancedMeshes++;
+      // For InstancedMesh, .count IS the drawn instance count (the host's
+      // pools shrink it via setInstancedDrawCount), so an empty pool
+      // multiplies by ~0 rather than by its capacity.
       const tris = triCount(node.geometry) * (inst ? (node.count ?? 1) : 1);
       out.triangles += tris;
       if (vis) out.visibleTriangles += tris;

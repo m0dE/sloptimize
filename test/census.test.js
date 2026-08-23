@@ -79,3 +79,11 @@ test('visibility inherits — children of an invisible group never count as visi
   assert.equal(c.entities[0].visibleMeshes, 0);
   assert.ok(!c.hints.some((h) => h.kind === 'instancing-candidate'));
 });
+
+
+test('drawRange trims the triangle count — a merged pool bills only what it submits', () => {
+  const g = geo(1000);
+  g.drawRange = { start: 0, count: 60 };   // 20 triangles actually drawn
+  const c = buildCensus({ entities: [{ id: 'pool', root: group('pool', [mesh(g, mat())]) }] });
+  assert.equal(c.entities[0].triangles, 20);
+});
