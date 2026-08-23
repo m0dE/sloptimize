@@ -1,0 +1,39 @@
+{
+  "name": "sloptimize",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench — so a coding agent can measure, attribute, and verify instead of guessing.",
+  "license": "MIT",
+  "bin": {
+    "sloptimize": "bin/sloptimize.mjs"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./vite": "./vite/plugin.js"
+  },
+  "peerDependencies": {
+    "@slopjs/inspector": ">=0.1.0",
+    "three": ">=0.150.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright-core": {
+      "optional": true
+    },
+    "stats-gl": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "three.js",
+    "profiler",
+    "performance",
+    "claude-code",
+    "ai-agent",
+    "draw-calls",
+    "benchmark",
+    "slopjs"
+  ]
+}
