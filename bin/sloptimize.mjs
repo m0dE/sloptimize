@@ -109,5 +109,48 @@ if (cmd === 'doctor') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|check|census|doctor> [--json] [--dir <path>] [--counters-only]');
+if (cmd === 'hook-status') {
+  // ≤5 lines for a UserPromptSubmit hook, and SILENT (exit 0, no output)
+  // when nothing is new — ambient perf the way selection is ambient, and
+  // only when it matters (SPEC §8.1). Multi-dir: a game served from the main
+  // checkout and a worktree under active surgery both count.
+  const dirs = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === '--dir' && args[i + 1]) dirs.push(args[i + 1]);
+  if (dirs.length === 0) dirs.push('.sloptimize');
+  const stateP = join(dirs[0], '.hook-state.json');
+  let state = {};
+  try { state = JSON.parse(readFileSync(stateP, 'utf8')); } catch { /* first run */ }
+  const lines = [];
+  for (const dir of dirs) {
+    const read = (n) => { try { return JSON.parse(readFileSync(join(dir, n), 'utf8')); } catch { return null; } };
+    const readL = (n) => { try { return readFileSync(join(dir, n), 'utf8').trim().split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; } };
+    const profile = read('profile.json');
+    const recs = readL('perf.jsonl');
+    const marks = recs.filter((r) => r.type === 'usermark');
+    const lastMark = marks[marks.length - 1];
+    const seenKey = `mark:${dir}`;
+    if (lastMark && state[seenKey] !== lastMark.at) {
+      state[seenKey] = lastMark.at;
+      const w = lastMark.worstFrames && lastMark.worstFrames[0];
+      lines.push(`sloptimize ★ NEW perf keyframe (${lastMark.note ?? 'Ctrl+F11'}) @ ${lastMark.at}: window ${lastMark.window?.frames}f median ${lastMark.window?.medianMs}ms; worst ${w?.frameMs}ms → ${w?.classification?.[0]?.guess} (${w?.classification?.[0]?.evidence}) [${dir}/perf.jsonl]`);
+    }
+    const budgets = read('budgets.json');
+    if (profile && budgets) {
+      const countersOnly = profile.regime !== 'hardware';
+      const readV = { 'perf.budget.draw_calls': profile.render?.calls, 'perf.budget.triangles': profile.render?.triangles, 'perf.budget.frame_ms_p95': countersOnly ? undefined : profile.frame?.p95Ms, 'perf.budget.programs': profile.memory?.programs };
+      const over = Object.entries(budgets).filter(([k, b]) => readV[k] !== undefined && readV[k] > b);
+      const overKey = `over:${dir}`;
+      const sig = over.map(([k]) => k).join(',');
+      if (over.length && state[overKey] !== sig) {
+        state[overKey] = sig;
+        lines.push(`sloptimize ⚠ budget breach (${profile.regime}): ` + over.map(([k, b]) => `${k} ${readV[k]}/${b}`).join('  '));
+      } else if (!over.length) state[overKey] = '';
+    }
+  }
+  try { const { writeFileSync, mkdirSync } = await import('node:fs'); mkdirSync(dirs[0], { recursive: true }); writeFileSync(stateP, JSON.stringify(state)); } catch { /* stateless is only chattier */ }
+  if (lines.length) console.log(lines.slice(0, 5).join('\n'));
+  process.exit(0);
+}
+
+console.log('usage: sloptimize <report|check|census|doctor|hook-status> [--json] [--dir <path>] [--counters-only]');
 process.exit(2);
