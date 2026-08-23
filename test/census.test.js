@@ -32,7 +32,7 @@ test('instancing-candidate hint fires with an estimate, not a promise', () => {
   const c = buildCensus({ entities: [{ id: 'forest', root: forest }] });
   const hint = c.hints.find((h) => h.kind === 'instancing-candidate' && h.entity === 'forest');
   assert.ok(hint);
-  assert.match(hint.detail, /200 meshes/);
+  assert.match(hint.detail, /200 visible meshes/);
   assert.equal(hint.estimate.callsSavedAtLeast, 199);
 });
 
@@ -57,5 +57,25 @@ test('an InstancedMesh counts once and is not an instancing candidate', () => {
   const c = buildCensus({ entities: [{ id: 'rocks', root: group('rocks', [im]) }] });
   assert.equal(c.entities[0].meshes, 1);
   assert.equal(c.entities[0].instancedMeshes, 1);
+  assert.ok(!c.hints.some((h) => h.kind === 'instancing-candidate'));
+});
+
+
+test('a parked pool (invisible members) is counted but never an instancing candidate', () => {
+  const g = geo(10); const m = mat();
+  const kids = Array.from({ length: 200 }, (_, i) => { const me = mesh(g, m); me.visible = i < 5; return me; });
+  const pool = group('pool', kids);
+  const c = buildCensus({ entities: [{ id: 'pool', root: pool }] });
+  assert.equal(c.entities[0].meshes, 200);
+  assert.equal(c.entities[0].visibleMeshes, 5);
+  assert.ok(!c.hints.some((h) => h.kind === 'instancing-candidate'));
+});
+
+test('visibility inherits — children of an invisible group never count as visible', () => {
+  const g = geo(10); const m = mat();
+  const inner = group('inner', Array.from({ length: 30 }, () => mesh(g, m)));
+  inner.visible = false;
+  const c = buildCensus({ entities: [{ id: 'wrap', root: group('wrap', [inner]) }] });
+  assert.equal(c.entities[0].visibleMeshes, 0);
   assert.ok(!c.hints.some((h) => h.kind === 'instancing-candidate'));
 });

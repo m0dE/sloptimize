@@ -28,20 +28,30 @@ function materialKey(m) {
 
 function walkEntity(root) {
   const out = {
-    meshes: 0, instancedMeshes: 0, triangles: 0, castShadow: 0,
+    meshes: 0, visibleMeshes: 0, instancedMeshes: 0, triangles: 0,
+    visibleTriangles: 0, castShadow: 0,
     materials: new Map(), geometries: new Map(), pairs: new Map(),
     matParams: new Map(), textures: new Map(),
   };
-  const stack = [root];
+  // Visibility is INHERITED: an invisible group's children never draw
+  // whatever their own flag says, and a pooled mesh parked with
+  // visible=false costs no draw call. The census reports both counts —
+  // total (memory/census weight) and visible (draw weight) — and the
+  // instancing hint keys on the VISIBLE count, because sending an agent to
+  // instance a parked pool is a guess dressed as a measurement.
+  const stack = [[root, root.visible !== false]];
   while (stack.length) {
-    const node = stack.pop();
+    const [node, parentVisible] = stack.pop();
     if (!node) continue;
+    const vis = parentVisible && node.visible !== false;
     if (node.isMesh) {
       const inst = !!node.isInstancedMesh;
       out.meshes++;
+      if (vis) out.visibleMeshes++;
       if (inst) out.instancedMeshes++;
       const tris = triCount(node.geometry) * (inst ? (node.count ?? 1) : 1);
       out.triangles += tris;
+      if (vis) out.visibleTriangles += tris;
       if (node.castShadow) out.castShadow++;
       const mats = Array.isArray(node.material) ? node.material : [node.material];
       for (const m of mats) {
@@ -58,14 +68,15 @@ function walkEntity(root) {
         out.geometries.set(node.geometry.uuid, node.geometry);
         const m0 = mats[0];
         const pairKey = `${node.geometry.uuid}|${m0 ? m0.uuid : ''}`;
-        const p = out.pairs.get(pairKey) ?? { geometry: node.geometry.uuid, material: m0?.uuid ?? '', count: 0, instanced: false };
+        const p = out.pairs.get(pairKey) ?? { geometry: node.geometry.uuid, material: m0?.uuid ?? '', count: 0, visibleCount: 0, instanced: false };
         p.count += 1;
+        if (vis) p.visibleCount += 1;
         p.instanced = p.instanced || inst;
         out.pairs.set(pairKey, p);
       }
     }
     const kids = node.children;
-    if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
+    if (kids) for (let i = 0; i < kids.length; i++) stack.push([kids[i], vis]);
   }
   return out;
 }
@@ -98,8 +109,10 @@ export function buildCensus(opts) {
     const row = {
       id: ent.id,
       meshes: w.meshes,
+      visibleMeshes: w.visibleMeshes,
       instancedMeshes: w.instancedMeshes,
       triangles: w.triangles,
+      visibleTriangles: w.visibleTriangles,
       uniqueMaterials: w.materials.size,
       uniqueGeometries: w.geometries.size,
       sharedGeometryGroups: sharedGroups,
@@ -118,12 +131,15 @@ export function buildCensus(opts) {
 
     // ── hints (closed vocabulary, SPEC §4.1) ──
     for (const grp of sharedGroups) {
-      if (!grp.instanced && grp.count >= INSTANCING_MIN_COUNT) {
+      // Keyed on VISIBLE members: a parked pool (visible=false) draws
+      // nothing, and hinting it would send the loop after a non-cost. The
+      // pool still shows in the counts above; it is just not a draw-call fix.
+      if (!grp.instanced && (grp.visibleCount ?? grp.count) >= INSTANCING_MIN_COUNT) {
         hints.push({
           kind: 'instancing-candidate',
           entity: ent.id,
-          detail: `${grp.count} meshes share one geometry+material and are not instanced`,
-          estimate: { callsSavedAtLeast: grp.count - 1 },
+          detail: `${grp.visibleCount} visible meshes share one geometry+material and are not instanced (${grp.count} incl. pooled)`,
+          estimate: { callsSavedAtLeast: (grp.visibleCount ?? grp.count) - 1 },
           fix: `merge into one InstancedMesh at the construction site of ${ent.id}`,
         });
         break; // one per entity — the top group carries the point
