@@ -485,6 +485,26 @@ with a warning — budgets are opt-in, but their absence is said out loud.
    `attribute_cost`, `run_bench`, `get_ledger`, `repro_hitch`. Same
    structured-error-never-hang contract as the inspector's server.
 
+### 8.1.1 The push channel — auto mode
+
+The surfaces above are pull: the agent reads when it acts or when a prompt
+hook fires. The first field deployment closed the loop the other direction
+— "auto identifies bottleneck, sends signal to claude code, I just play":
+
+- The RECORDER is already the auto-detector (§3.3); no keypress is involved
+  in a hitch record existing.
+- A session-side WATCHER (Claude Code's Monitor primitive, a 20s poll over
+  `perf.jsonl` with a byte cursor) turns each new meaningful record — an
+  auto hitch ≥100ms, or any usermark — into an agent wake event carrying the
+  classification line. The agent starts the §8.2 playbook unprompted.
+- `perf.jsonl`'s record schema is therefore a PUSH CONTRACT, not just an
+  audit trail: fields added to records surface directly in wake events.
+
+Usermarks (§3.5) become the OPTIONAL manual channel of the same pipe:
+auto mode covers everything over the threshold; Ctrl+F11 covers what only a
+human can feel below it. Both arrive the same way and neither requires the
+operator to type anything.
+
 ### 8.2 Doctrine (SKILL.md + CLAUDE.md fragment)
 
 Ships in-package (`skills/sloptimize/SKILL.md`) and is scaffolded into
