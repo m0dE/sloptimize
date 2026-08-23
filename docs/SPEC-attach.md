@@ -1,112 +1,145 @@
-# sloptimize attach — v2 spec (the zero-setup tier), with its own critical review
+# sloptimize v2 — the incident pipeline (supersedes the first attach draft)
 
-Status: draft for approval. Amends SPEC.md; where they disagree on the
-recorder's delivery, this document wins. Written after one full field
-deployment (mecharoyale), so every claim below is checked against the
-bugs that deployment actually chased.
+Status: draft for approval. Amends SPEC.md. Rewritten after the operator
+corrected the frame twice, and both corrections are load-bearing:
+
+1. *"Your job is to report data to Claude Code so it can proceed with
+   optimization — remember which gaps you're filling."*
+2. *"It logs incidents automatically in the background; the debugger is
+   optional and shows the list; all of it is fed to Claude Code."*
 
 ---
 
-## 0. First principles
+## 0. Mission, restated as the contract
 
-A freeze is time spent somewhere the frame needed to be. There are only
-four somewheres, and each demands a different instrument:
+The agent cannot watch, cannot localize, cannot verify. sloptimize is the
+agent's senses and ruler — nothing more. Every feature below must resolve
+to one of the three gaps, or it is scope creep:
 
-| where the time went | example from the field | instrument that names it |
-|---|---|---|
-| main-thread JS | warm sweep blocking 165–305ms | a **sampling JS profile** covering the hitch (function names) |
-| GPU process | 8.4s page-load freeze: no rAF, no long task, no counter moved | **queue latency** (`onSubmittedWorkDone`) + a **creation ledger** with call stacks |
-| the pixels' meaning (logic) | launch playing invisibly under the battleground | game-state observability (beat trails) — **not a profiler's job** |
-| scene structure | 200 unbatched meshes | census + attribution (engine access required) |
-
-Principle: **instrument the layer that owns the answer, and own no layer
-you don't need.** Draw calls live in the graphics API. Function names
-live in the VM. Entity names live in the engine. A profiler that demands
-engine integration to count draw calls is charging the wrong toll.
-
-## 1. Critical review of the attach idea (what survives scrutiny)
-
-Claimed: attach over CDP → zero game code, works on any project.
-
-**Survives:**
-- Draw/triangle/pipeline/upload counting via API prototype wraps is
-  engine-free and exact. Verified in the field: our GPUDevice/GPUQueue
-  wrappers were already engine-free; only their *delivery* was coupled.
-- CDP gives the one thing our field deployment lacked and paid for in
-  probe rounds: a **continuous sampling JS profiler** (`Profiler.start`,
-  ~1–3% overhead in dev). Every `long-script` hitch we recorded said
-  "frame 4805ms, 14ms inside render" and stopped there; with a rolling
-  profile, the same record carries the top-of-stack function names for
-  its window. That is strictly better than our hand-planted
-  `noteStallActivity` tags — tags name what someone remembered to tag,
-  stacks name everything.
-- Creation-site attribution without the engine: capture `Error().stack`
-  inside the `createRenderPipeline`/`createShaderModule` wrap (creations
-  are rare; the cost is nil). Through sourcemaps, that names the caller —
-  which is what our descent fix needed a bespoke probe to learn.
-- The activation-bug class (hostname gates, ingest probes, arming
-  order — three real field bugs) disappears: attaching *is* activation.
-
-**Does not survive (stated, not papered over):**
-- **The operator's normal-play browser.** CDP needs a debug port. "I
-  just play" in the user's everyday Chrome does not include a debug
-  port. Mitigation, not solution: `sloptimize open <url>` launches their
-  normal profile with the port; the in-page tier (below) remains the
-  ambient always-on path. Attach is the *agent's* tier and the
-  *first-contact* tier, not the replacement for the ambient one.
-- **Correctness bugs.** Most of what this field deployment fixed (a
-  pixel race, a killed clock, a sea-level seed) no profiler finds. Those
-  needed game-state observability. sloptimize resolves *performance*
-  freezes; it must say so, or it will be blamed for the other kind.
-- **insideRenderMs** needs the engine's render call bracketed; tier 0
-  approximates it from the draw-call timestamps inside a frame and
-  labels it `approx`.
-- Chromium-only, dev-only. Already the spec's posture; unchanged.
-
-## 2. The tiers (progressive precision, none required to start)
-
-- **Tier 0 — attach.** `sloptimize attach [--launch <url>]`: CDP
-  session; injects the recorder (rAF timing + API wraps + rolling JS
-  profile); streams records back over a CDP binding; writes the same
-  `.sloptimize/` files. Zero game changes. Hitch records gain
-  `topFrames` (from the profile) and pipeline creations gain
-  `createdAt` stacks.
-- **Tier 1 — in-page feed.** What mecharoyale runs today: the game
-  calls `rec.frame(...)` with engine-true numbers (exact
-  insideRenderMs, renderer.info, spawn deltas) and ships ambient with
-  the game to every dev session. Highest fidelity, always-on, no
-  attach needed.
-- **Tier 2 — engine/slopjs.** Census, entity attribution, measured
-  bisection, snapshot repro. Unchanged from SPEC.md §4–5.
-
-Verdicts carry their tier; a tier-0 number never silently poses as a
-tier-1 one (the regime-labeling rule, extended).
-
-## 3. Packaging
-
-A Claude Code plugin: the skill (doctrine), the prompt hook, and an MCP
-server owning attach + the push channel (hitch → MCP notification →
-agent wakes; replaces the hand-rolled session Monitor). Install once per
-machine; per-project setup is zero (tier 0) or one frame-feed line
-(tier 1).
-
-## 4. Will this resolve the issues we actually dealt with?
-
-Checked against the ledger of this ticket, honestly:
-
-| issue | would attach-tier sloptimize have resolved it? |
+| gap | what fills it |
 |---|---|
-| random in-match freezes (`long-script`, unattributed) | **Yes** — the rolling JS profile names the functions in the hitch window; this is the class the current tooling still cannot attribute. |
-| 8.4s page-load freeze (off-loop, invisible to JS) | **Yes, the diagnosis** — queueDone latency + creation ledger with stacks discriminates GPU-compile vs upload vs other; the fix still depends on what it names. |
-| descent-entry compile stutters | **Yes** — creation stacks would have named the shadow-pass site without the bespoke attribution probe. |
-| warm-sweep stalls | **Yes** — profile stacks ≥ hand tags. |
-| launch sequence broken (race/choreo/seed) | **No.** Logic bugs. Game-state observability found them and remains outside a profiler's honest scope. |
-| profiler dark on the operator's machine | **Yes by construction** for attach; tier 1 keeps the server-probe activation fix. |
+| MEASURE — the agent will never feel a hitch | incidents recorded automatically, before anyone asks |
+| ATTRIBUTE — "it stutters" is not a work item | every incident carries its classification, evidence, and (by tier) stacks/entities |
+| VERIFY — an unmeasured fix is a hypothesis | exact counters, before/after windows, budgets with exit codes |
 
-## 5. Milestone
+The tool decides what is true; the agent decides what to try; the human
+plays. Any design that asks the human to operate instruments, or asks the
+agent to trust prose, violates the contract.
 
-**M-A0**: `attach` MVP — CDP connect/launch, injected recorder, API
-wraps + rolling profiler, `.sloptimize/` output, `topFrames` in hitch
-records, creation stacks. Exit criterion: on a game with ZERO
-integration, a seeded `long-script` freeze is attributed to its function
-by file:line from the written record alone.
+## 1. First principles: the incident
+
+An **incident** is a frame (or run of frames) where time went somewhere
+the frame needed. There are only four somewheres, each with the one
+instrument that names it:
+
+| where | field example | naming instrument | tier |
+|---|---|---|---|
+| main-thread JS | warm sweep, 165–305ms | sampling JS profile over the window → function names | 0 |
+| GPU process | 8.4s page-load freeze (no rAF, no long task, no counter) | queue latency + creation ledger with call stacks | 0 |
+| scene structure | uninstanced 200-mesh group | census / measured bisection → entity names | 1–2 |
+| game logic | launch playing under the battleground | NOT an incident — a correctness bug; out of scope, said out loud | — |
+
+Corollary: **detection is threshold math; attribution is per-somewhere.**
+A pipeline that detects everything but attributes nothing (our first
+field build: `long-script`, 14ms inside render, full stop) makes the
+agent guess — the exact failure this product exists to end.
+
+## 2. The pipeline
+
+```
+detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake with evidence; pull: files/CLI)
+                                                   └→ human   (OPTIONAL debugger: the incident list + one-line annotation)
+→ agent changes ONE thing → verify (counters/bench) → ledger
+```
+
+- **Detect**: relative + absolute thresholds (2× median, 1.5× budget),
+  rate-limited with loud drop counts. No keypress anywhere in this stage.
+- **Deliver to the agent** is the primary edge. Push: incident → agent
+  wakeup with the classification attached (MCP notification when
+  packaged; a session Monitor until then). Pull: `.sloptimize/` files +
+  CLI with exit codes — works headless, in CI, and after the fact.
+- **Deliver to the human** is a MIRROR, not a transport: opening the
+  debugger shows what already shipped (list: when, how long, why;
+  manual keyframes starred) and offers one text line — semantics only a
+  human has. The mirror must never claim more than the pipe did: rows
+  read "sent", meaning *landed in the sink*; whether an agent session is
+  currently consuming the sink is not the page's claim to make.
+- **Verify** closes the loop: counters compare exactly on any renderer;
+  timing only within its regime; verdicts land in the append-only ledger
+  so a reverted strategy is never retried.
+
+## 3. Tiers of sensing (progressive precision, none required to start)
+
+- **Tier 0 — attach** (`sloptimize attach [--launch <url>]`): CDP;
+  injected recorder; rAF timing; graphics-API wraps (draws, triangles,
+  pipeline creations WITH `Error().stack`, uploads, queue latency);
+  rolling sampling profiler (~1–3% dev overhead) so every `long-script`
+  incident carries `topFrames`. Zero game code. Chromium-only, dev-only.
+- **Tier 1 — in-page feed**: the game hands engine-true numbers
+  (`rec.frame(...)` at its stats site — one line) and ships the recorder
+  ambient with every dev session, no attach needed. Exact
+  insideRenderMs, spawn deltas, engine tags.
+- **Tier 2 — engine/slopjs**: census, entity attribution, measured
+  bisection, snapshot repro of a keyframe's workload.
+
+Every number carries its tier and regime; a tier-0 approximation never
+poses as a tier-1 measurement.
+
+## 4. Critical review (of this spec, including against its own drafts)
+
+**Fixed since draft 1:**
+- Draw-call counting was the wrong headline; the rolling profiler is the
+  prize — it attributes the class of freeze (`long-script`,
+  unexplained) that the field deployment recorded a dozen times and
+  could never name.
+- The human's role was over-weighted (Ctrl+F11 as a pillar). Corrected:
+  auto-first; the debugger is an optional mirror + annotation channel.
+- "Sent to Claude Code" is now specified as *sink-landed*, because the
+  UI must not assert a live consumer it cannot see.
+
+**Standing weaknesses, stated:**
+- **Operator's everyday browser**: attach needs a debug port; ambient
+  always-on coverage of the human's normal play is tier 1's job, which
+  costs one line of game code. Zero-code AND ambient-for-the-human is
+  not achievable simultaneously; the spec stops pretending otherwise.
+- **Correctness bugs** (most of what the field ticket actually fixed)
+  are invisible to every tier. The doctrine must route "it looks/behaves
+  wrong" reports away from the profiler before anyone burns a loop on it.
+- **Incident flooding / identity**: a recurring root cause fires
+  incidents forever. Rate limits bound volume but not repetition;
+  clustering (same classification + same top frame ⇒ same incident id,
+  count incremented) is REQUIRED in v2 so the agent investigates a cause
+  once, not per occurrence. New in this draft; unimplemented.
+- **Profiler observer effect**: 1–3% steady overhead plus GC from stack
+  sampling. Bounded and labeled (`profiled: true` on the window) so a
+  profiled p95 is never compared against an unprofiled one.
+- **Attribution ceiling at tier 0**: draw calls cannot be attributed to
+  entities from the API (in three, every draw shares one internal call
+  site). Entity work items require tier ≥1. The table in §1 is honest
+  about which somewhere needs which tier.
+- **Trust**: an injected recorder and a writable sink are spoofable by
+  anything local. Unchanged posture from SPEC §9 — price and expose,
+  don't pretend to prevent.
+
+**Will it resolve the issues this ticket actually dealt with?**
+
+| issue | verdict |
+|---|---|
+| random unattributed freezes | YES — this spec's center of mass; profile stacks name the function |
+| 8.4s page-load freeze | YES (diagnosis) — queue latency + creation stacks discriminate; the fix follows what they name |
+| descent-entry compile stutters | YES — creation stacks replace the bespoke attribution probe |
+| warm-sweep stalls | YES — stacks ≥ hand tags |
+| launch logic bugs | NO — out of scope by principle, forever |
+
+## 5. Milestones
+
+- **M-A0 attach MVP**: CDP connect/launch, injected recorder, API wraps
+  + rolling profiler, `.sloptimize/` output, `topFrames` + creation
+  stacks in incident records. *Exit: a seeded freeze in a game with ZERO
+  integration is attributed to file:line from the written record alone.*
+- **M-A1 incident identity**: clustering, per-cluster counts, cluster id
+  in push events. *Exit: a cause firing 100× wakes the agent meaningfully
+  once.*
+- **M-A2 plugin packaging**: skill + hook + MCP server (attach + push).
+  *Exit: a new project goes from nothing to agent-woken-by-incident with
+  zero project files changed.*
