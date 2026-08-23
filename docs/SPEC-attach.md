@@ -131,6 +131,24 @@ poses as a tier-1 measurement.
 | warm-sweep stalls | YES — stacks ≥ hand tags |
 | launch logic bugs | NO — out of scope by principle, forever |
 
+## 4.1 Dogfood verdict (tier 0 against the real game, zero integration)
+
+`sloptimize attach --launch http://127.0.0.1:4477/?play&launch --headless`
+against mecharoyale (1.4MB minified bundle, WebGL2 fallback on the QA
+box): 35 hitches recorded, every one attributed and clustered — the
+software rasterizer's real costs by name (`bufferSubData` ×7,
+`getUniformBlockIndex` ×6), three.js internals (`_setupBindings`,
+`update`), and one game function. Two limits surfaced and kept:
+
+- **Minified names**: the game frame arrived as `O_e@game.min.js` — the
+  pipeline works, but human-readable attribution in bundled games needs
+  sourcemaps served with the dev build. Doctrine: turn sourcemaps on in
+  dev, or accept minified names as cluster keys (they are stable per
+  build, so clustering still holds).
+- **API coverage follows the backend**: `gpu-create` records require
+  WebGPU; on a WebGL2-fallback page the WebGL draw wraps carry the
+  counters and creation stacks are absent (honestly, not silently).
+
 ## 5. Milestones
 
 - **M-A0 attach MVP** — **SHIPPED, exit criterion measured**: on the
