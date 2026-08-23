@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/bin/sloptimize.mjs hook-status --dir .sloptimize 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "sloptimize perf check"
+          }
+        ]
+      }
+    ]
+  }
+}

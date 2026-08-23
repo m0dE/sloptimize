@@ -1,0 +1,8 @@
+{
+  "name": "sloptimize",
+  "displayName": "sloptimize",
+  "version": "0.2.0",
+  "description": "The agent-native profiler for browser games: always-on incident recording, zero-setup attach with file:line attribution, budgets with exit codes — the agent's senses and ruler for performance work.",
+  "license": "MIT",
+  "keywords": ["profiler", "three.js", "webgpu", "performance", "draw-calls"]
+}

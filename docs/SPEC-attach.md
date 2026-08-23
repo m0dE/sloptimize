@@ -163,6 +163,14 @@ software rasterizer's real costs by name (`bufferSubData` ×7,
   arrived as its caller), so a cause can still split across an
   optimization boundary. Deopt-aware matching is deferred until a real
   case demands it.
-- **M-A2 plugin packaging**: skill + hook + MCP server (attach + push).
-  *Exit: a new project goes from nothing to agent-woken-by-incident with
-  zero project files changed.*
+- **M-A2 plugin packaging** — **SHIPPED (structure + live tier)**: the
+  repo IS the plugin (`.claude-plugin/plugin.json` at root, so `bin/` and
+  `src/` travel with any install), carrying the doctrine skill, the
+  silent-by-default UserPromptSubmit hook via `${CLAUDE_PLUGIN_ROOT}`,
+  and a dependency-free stdio MCP server (`get_report`, `check_budgets`,
+  `attach_start`, `attach_stop`) protocol-smoked over real JSON-RPC.
+  Install: `claude --plugin-dir <path-to-sloptimize>` in dev; marketplace
+  add once published. The exit criterion's PUSH half (agent woken by
+  incident with zero project files) still rides the session Monitor —
+  server-initiated MCP wakeups are not yet a documented host contract,
+  recorded here as the remaining gap rather than claimed.*
