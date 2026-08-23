@@ -2,7 +2,7 @@
   "name": "sloptimize",
   "version": "0.0.0",
   "type": "module",
-  "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench — so a coding agent can measure, attribute, and verify instead of guessing.",
+  "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench \u2014 so a coding agent can measure, attribute, and verify instead of guessing.",
   "license": "MIT",
   "bin": {
     "sloptimize": "bin/sloptimize.mjs"
@@ -24,7 +24,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test './test/**/*.test.js'"
   },
   "keywords": [
     "three.js",

@@ -192,6 +192,30 @@ truncates, the *last* record of the session says how many were dropped
 (silence must mean nothing was dropped — the inspector's selection-block
 rule, inherited).
 
+### 3.5 Usermarks — the human's half of hitch detection
+
+The automatic threshold cannot see "it feels wrong": steady-but-low fps,
+micro-stutter under the hitch bar, jitter that only a hand on the mouse
+notices. So the recorder exposes one more verb:
+
+- `usermark({ windowMs = 5000, note, inputsHeld, world })` — freeze the
+  trailing window of the ring into one appended record: window frame count,
+  median/p95 over the window, and the **five worst frames ranked**, each with
+  its counter deltas and the same closed-vocabulary classification an
+  automatic hitch gets.
+- The host binds it to a chord (the reference integration uses
+  **Ctrl+F11**) and shows a one-line confirmation. The press is the
+  human's timestamp; the ring is the evidence; the record is the labeled
+  training example an agent can read cold.
+- Usermarks share `perf.jsonl` (type `"usermark"`), bypass the 1/s hitch
+  rate limit (a human press is already rate-limited by a human), and count
+  against the 500/session cap.
+
+This section exists because the product's first field deployment asked for
+exactly this, in the operator's words: "whenever a bottleneck or jitter is
+detected, I can press a unique shortcut which will save the keyframe and use
+all data recorded from the last 5 seconds to identify the bottleneck."
+
 ### 3.4 What the recorder does not do
 
 No JS stack sampling (DevTools' job), no per-frame heap snapshots (cost), no
