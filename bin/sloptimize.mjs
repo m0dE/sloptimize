@@ -105,6 +105,7 @@ if (cmd === 'doctor') {
   console.log(`  profile.json: ${profile ? `fresh as of ${profile.at}` : 'absent'}`);
   console.log(`  regime: ${profile?.regime ?? 'unknown'} — timing numbers from a software regime are flagged and never compared`);
   console.log('  stated limits: no per-draw GPU timing; bisection ranks, never sums; workload repro not trajectory repro;');
+  console.log('  gpu:* instruments fire only under a real WebGPU backend — a WebGL2-fallback session reads them as zeros, honestly;');
   console.log('  bench/gate (M3) not built yet in this install — verify fixes with counters (exact grade) + real-hardware sessions.');
   process.exit(0);
 }
