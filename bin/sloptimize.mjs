@@ -153,5 +153,21 @@ if (cmd === 'hook-status') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|check|census|doctor|hook-status> [--json] [--dir <path>] [--counters-only]');
+if (cmd === 'attach') {
+  // Tier 0 (SPEC-attach): zero-integration attach. --launch <url> spawns a
+  // browser; bare attach uses an existing --remote-debugging-port session.
+  const { attach } = await import('../src/attach.mjs');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const session = await attach({
+    launch: get('--launch'),
+    port: get('--port') ? Number(get('--port')) : undefined,
+    dir: get('--dir') ?? '.sloptimize',
+    headless: args.includes('--headless'),
+  });
+  console.log('[attach] recording — Ctrl+C to stop');
+  process.on('SIGINT', async () => { await session.close(); process.exit(0); });
+  await new Promise(() => {});
+}
+
+console.log('usage: sloptimize <report|check|census|doctor|hook-status|attach> [--json] [--dir <path>] [--counters-only] [--launch <url>] [--port N] [--headless]');
 process.exit(2);

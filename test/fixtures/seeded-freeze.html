@@ -1,0 +1,18 @@
+<!doctype html><title>seeded freeze</title><body>
+<script>
+// A page with ZERO sloptimize integration. Steady 60fps rAF loop, then a
+// seeded main-thread freeze — the M-A0 exit test's subject.
+function seededFreezeWork() {                 // the function the record must name
+  const until = performance.now() + 900;
+  let x = 0;
+  while (performance.now() < until) x += Math.sqrt(x + 1);
+  return x;
+}
+let frames = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  frames++;
+  if (frames === 240 || frames === 400 || frames === 560) seededFreezeWork();
+}
+requestAnimationFrame(loop);
+</script></body>
