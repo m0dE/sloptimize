@@ -92,3 +92,12 @@ test('usermark captures the trailing window with worst offenders ranked', () => 
   assert.ok(m.worstFrames[0].classification.length >= 1);
   assert.ok(m.window.medianMs < 10);
 });
+
+
+test('a usermark over a healthy window says NOMINAL, not a forced guess', () => {
+  let t = 0;
+  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => (t += 16) });
+  feed(rec, 120, 16);
+  const m = rec.usermark({ windowMs: 5000 });
+  assert.equal(m.worstFrames[0].classification[0].guess, 'nominal');
+});

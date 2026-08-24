@@ -180,16 +180,24 @@ export function createRecorder(opts = {}) {
           for (const f of ['calls', 'triangles', 'programs', 'textures', 'geometries']) {
             delta[f] = lanes[f][i] - lanes[f][prev];
           }
+          const median = pct(ms, 0.5) ?? 0;
+          // A worst frame UNDER the hitch bar is a healthy window, and saying
+          // so beats forcing the classifier to name a culprit for a 17.8ms
+          // frame (field capture: a perfect 300-frame window labeled
+          // long-script — a guess with no incident under it).
+          const nominal = lanes.frameMs[i] <= Math.max(2 * median, 25);
           return {
             agoMs: Math.round(tNow - atLane[i]),
             frameMs: +lanes.frameMs[i].toFixed(1),
             insideRenderMs: +lanes.insideRenderMs[i].toFixed(1),
             delta,
-            classification: classifyHitch({
-              frameMs: lanes.frameMs[i], medianMs: pct(ms, 0.5) ?? 0,
-              insideRenderMs: lanes.insideRenderMs[i], delta,
-              spawned: lanes.spawned[i],
-            }),
+            classification: nominal
+              ? [{ guess: 'nominal', confidence: 'high', evidence: `worst frame ${lanes.frameMs[i].toFixed(1)}ms is inside the hitch bar — a healthy window` }]
+              : classifyHitch({
+                frameMs: lanes.frameMs[i], medianMs: median,
+                insideRenderMs: lanes.insideRenderMs[i], delta,
+                spawned: lanes.spawned[i],
+              }),
           };
         });
       const mark = {
