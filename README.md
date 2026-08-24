@@ -103,7 +103,13 @@ their own:
   (`sloptimize hook-status` warns when the ledger goes stale);
 - **gpu-settle records** report how long a boot/reveal gate actually waited
   on `onSubmittedWorkDone` — the on-hardware verification channel for
-  compile-stall fixes.
+  compile-stall fixes;
+- **a hitch that overlapped pipeline/shader creates carries `createStacks`**
+  — the top 3 deduped `Error().stack` tails from the create wrappers (~2KB
+  cap), so a `programs +N` hitch from a machine you cannot profile names its
+  own call sites. The positions are minified (`bundle.js:L:C`); keep an
+  unreferenced sourcemap at build time and decode locally (the game repo's
+  `tools/decode-perf-stack.mjs` is a dependency-free reference decoder).
 
 Tier 2 (scene census, per-entity attribution, measured bisection) layers on
 top where the engine grants scene access — see `docs/SPEC.md` §4.

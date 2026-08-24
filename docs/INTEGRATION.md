@@ -72,6 +72,13 @@ if (ctrlF11) { const mark = rec.usermark({ windowMs: 5000, note, world }); }
   `{type:'gpu-settle', tag, ms, settled}` when the wait was real (>50ms or
   capped). That record is the on-hardware proof the freeze moved behind the
   cover.
+- **createStacks** (optional, on hitch records): capture `new Error().stack`
+  in your createRenderPipeline/createComputePipeline/createShaderModule
+  wrappers into a small ring (creates are rare — never do this per draw or
+  per write), and attach the top ~3 deduped tails to any hitch whose frame
+  window overlaps them, byte-capped (~2KB). Ship an UNREFERENCED external
+  sourcemap from the same build so the minified positions decode to source
+  file:line on the dev side without ever serving the map to players.
 
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.
