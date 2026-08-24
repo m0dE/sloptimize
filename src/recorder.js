@@ -115,6 +115,11 @@ export function createRecorder(opts = {}) {
         }),
       };
       if (s.world) rec.world = s.world;
+      // Phase is a string the HOST passes per frame (menu/boot/launch/match…)
+      // — stamped at mint time so the record names the moment the hitch
+      // happened, not the moment it was drained/posted (drains run on a 2s
+      // cadence, and a launch is over in less).
+      if (s.phase) rec.phase = s.phase;
       if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
       records.push(rec);
     },
@@ -213,6 +218,7 @@ export function createRecorder(opts = {}) {
         worstFrames: worst,
       };
       if (meta.note) mark.note = meta.note;
+      if (meta.phase) mark.phase = meta.phase;
       if (meta.inputsHeld) mark.inputsHeld = meta.inputsHeld;
       if (meta.world) mark.world = meta.world;
       records.push(mark);

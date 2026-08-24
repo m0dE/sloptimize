@@ -101,3 +101,27 @@ test('a usermark over a healthy window says NOMINAL, not a forced guess', () => 
   const m = rec.usermark({ windowMs: 5000 });
   assert.equal(m.worstFrames[0].classification[0].guess, 'nominal');
 });
+
+test('a hitch carries the phase the HOST fed on that frame — mint time, not drain time', () => {
+  const rec = createRecorder({ budgetFrameMs: 16.7 });
+  feed(rec, 100, 8);
+  rec.frame({ frameMs: 90, insideRenderMs: 8, calls: 100, triangles: 50000,
+    programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0,
+    phase: 'launch' });
+  const recs = rec.drainRecords();
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].phase, 'launch');
+});
+
+test('a usermark carries meta.phase; records without a phase stay clean', () => {
+  const rec = createRecorder({ budgetFrameMs: 16.7 });
+  feed(rec, 100, 8);
+  const m = rec.usermark({ windowMs: 5000, phase: 'menu' });
+  assert.equal(m.phase, 'menu');
+  rec.drainRecords();
+  rec.frame({ frameMs: 90, insideRenderMs: 8, calls: 100, triangles: 50000,
+    programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 });
+  const recs = rec.drainRecords();
+  assert.equal(recs.length, 1);
+  assert.equal('phase' in recs[0], false);
+});

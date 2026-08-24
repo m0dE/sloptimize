@@ -29,13 +29,18 @@ function out(obj, human) { console.log(json ? JSON.stringify(obj, null, 2) : hum
 
 if (cmd === 'report') {
   const profile = readJson('profile.json');
-  const hitches = readJsonl('perf.jsonl', 20);
+  // 80 lines, not 20: heartbeats (1/min while a session is armed) share the
+  // ledger and must not crowd the actual incidents out of the report window.
+  const hitches = readJsonl('perf.jsonl', 80);
   const marks = hitches.filter((h) => h.type === 'usermark');
   const auto = hitches.filter((h) => h.type === 'hitch');
   const census = readJson('census.json');
   if (json) { out({ profile, hitches: auto, usermarks: marks, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
   console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}`);
+  const beats = hitches.filter((h) => h.type === 'heartbeat');
+  const lastBeat = beats[beats.length - 1];
+  if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${lastBeat.medianFrameMs}ms p95 ${lastBeat.p95Ms}ms`);
   if (profile.frame?.medianMs !== undefined) {
     console.log(`  frame median ${profile.frame.medianMs}ms  p95 ${profile.frame.p95Ms}ms  (~${profile.frame.fps}fps)  inside-render ${profile.frame.insideRenderMs}ms`);
   }
@@ -146,6 +151,22 @@ if (cmd === 'hook-status') {
         state[overKey] = sig;
         lines.push(`sloptimize ⚠ budget breach (${profile.regime}): ` + over.map(([k, b]) => `${k} ${readV[k]}/${b}`).join('  '));
       } else if (!over.length) state[overKey] = '';
+    }
+    // Liveness: heartbeats keep perf.jsonl fresh while a session is armed, so
+    // a stale ledger MEANS the feed is dark or the session is over — not
+    // merely idle. Said once per distinct last-record (state-deduped): the
+    // instrument going silently dark cost an hour of debugging blind
+    // (2026-08-24 — a runner restart dropped the ingest and nobody was told).
+    const lastRec = recs[recs.length - 1];
+    if (lastRec && lastRec.at) {
+      const ageMin = (Date.now() - Date.parse(lastRec.at)) / 60000;
+      const staleKey = `stale:${dir}`;
+      if (ageMin > 45) {
+        if (state[staleKey] !== lastRec.at) {
+          state[staleKey] = lastRec.at;
+          lines.push(`sloptimize ◌ feed quiet ${Math.round(ageMin)}min (last: ${lastRec.type} @ ${lastRec.at}) [${dir}] — session over, or the feed went dark (ingest disarmed?)`);
+        }
+      } else state[staleKey] = '';
     }
   }
   try { const { writeFileSync, mkdirSync } = await import('node:fs'); mkdirSync(dirs[0], { recursive: true }); writeFileSync(stateP, JSON.stringify(state)); } catch { /* stateless is only chattier */ }

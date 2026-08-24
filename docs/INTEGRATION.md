@@ -46,8 +46,32 @@ if (ctrlF11) { const mark = rec.usermark({ windowMs: 5000, note, world }); }
   routes otherwise (mecharoyale: `server/admin/sloptimize-ingest.ts`, ~100
   lines + tests).
 - **Activation**: don't gate the client on `location.hostname` — a dev
-  preview proxy looks like production. Probe the ingest endpoint once at
-  boot; a 204 arms everything, anything else stays dark.
+  preview proxy looks like production. Probe the ingest endpoint at boot;
+  a 204 arms everything, anything else stays dark — and RETRY the probe on
+  a backoff (5s/30s/2min, then every 5min): an ingest that comes back
+  mid-session must re-light the instrument without a hard refresh.
+- **Transport state, never silent**: once armed, a refused or failed post
+  flips the feed DARK — buffer outgoing posts (bounded, count drops), retry
+  on the same backoff, and SHOW the state (the reference runtime renders it
+  on its PERF chip and in the debugger header, with the reason). The first
+  deployment's "first 404 disables posting for the session" contract lost an
+  hour of real freezes to a server restart that dropped the ingest.
+- **Self-sufficient records**: stamp `build` (the tab's bundle identity) and
+  `phase` (menu/boot/launch/match…) on every ledger line. The recorder
+  accepts `phase` per `frame()` sample and stamps hitches at mint time;
+  backfill the rest at post time. A record read in isolation weeks later
+  should not depend on the arm-probe that happened to precede it.
+- **Heartbeat**: post a tiny `{type:'heartbeat', medianFrameMs, p95Ms}`
+  ledger line once a minute while armed (directly — never through the
+  recorder, so it costs none of the incident budget). It makes a quiet file
+  MEAN dark-or-closed instead of idle; `sloptimize hook-status` warns once
+  when the ledger goes stale (>45min).
+- **GPU-settle verdicts**: if your boot holds its reveal on
+  `queue.onSubmittedWorkDone()` (it should — pipeline compiles bill the
+  first submit that uses them, invisibly to every CPU-side recorder), post
+  `{type:'gpu-settle', tag, ms, settled}` when the wait was real (>50ms or
+  capped). That record is the on-hardware proof the freeze moved behind the
+  cover.
 
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.

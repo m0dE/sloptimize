@@ -84,11 +84,26 @@ rec.usermark({ windowMs: 5000, note, inputsHeld, world });
 Ship the records to `.sloptimize/` however your stack likes — a vite host
 gets a plugin (planned); any other host adds one dev-gated POST endpoint
 (~100 lines; see `docs/INTEGRATION.md` for the reference implementation,
-including the three traps that cost the first deployment real time:
+including the four traps that cost the first deployment real time:
 **don't gate activation on hostname** (probe your dev endpoint instead),
 **give the recorder its own rAF clock** (a game-loop-fed clock is blind to
-boot/launch — exactly the windows you care about), and **frameMs must bound
-insideRenderMs**.
+boot/launch — exactly the windows you care about), **frameMs must bound
+insideRenderMs**, and **never let the feed die silently** (retry the probe
+and the posts on a backoff, buffer while dark, and SHOW the state — the
+first deployment lost an hour of real freezes to a server restart that
+dropped the ingest with no indication anywhere).
+
+The wire contract the reference runtime keeps, so the files are useful on
+their own:
+- **every record is self-sufficient** — `build` (which bundle the tab runs)
+  and `phase` (menu/boot/launch/match…) ride each ledger line; hitches are
+  stamped at mint time, not post time;
+- **a heartbeat record lands once a minute while armed**, so a quiet
+  `perf.jsonl` means "no session, or the feed is dark" — never just "idle"
+  (`sloptimize hook-status` warns when the ledger goes stale);
+- **gpu-settle records** report how long a boot/reveal gate actually waited
+  on `onSubmittedWorkDone` — the on-hardware verification channel for
+  compile-stall fixes.
 
 Tier 2 (scene census, per-entity attribution, measured bisection) layers on
 top where the engine grants scene access — see `docs/SPEC.md` §4.
