@@ -1,7 +1,9 @@
 # Integrating sloptimize into a game (and its Claude Code session)
 
 What the mecharoyale deployment wired, generalized. Five pieces; each is
-small, and the first three are enough to be useful.
+small, and the first three are enough to be useful. This doc is the ONE-TIME
+wiring; for how to use the result day to day (the operator's verbs, how new
+and concurrent Claude Code sessions pick up the feed), see USAGE.md.
 
 ## 1. The in-page runtime (the game feeds the recorder)
 

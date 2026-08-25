@@ -45,14 +45,24 @@ game/browser ──► incidents (auto-detected, classified, clustered)
    reads, fixes, verifies   happened" notes, forwarded to the agent
 ```
 
+## Install
+
+```bash
+npm i -D sloptimize        # in your game repo
+# or one-off: npx sloptimize attach --launch http://localhost:3000
+# or from a checkout: node sloptimize/bin/sloptimize.mjs … (bare Node, no install)
+```
+
+Zero dependencies, no postinstall, no supply chain — npm is delivery only.
+
 ## Quickest start: zero integration (tier 0)
 
 Requires only Node 22+ and a Chromium. No game changes, no build changes:
 
 ```bash
-node bin/sloptimize.mjs attach --launch http://localhost:3000 --headless
+npx sloptimize attach --launch http://localhost:3000 --headless
 # play / drive the game …then:
-node bin/sloptimize.mjs report
+npx sloptimize report
 ```
 
 Attach connects over the Chrome DevTools Protocol, injects a recorder before
@@ -119,9 +129,14 @@ top where the engine grants scene access — see `docs/SPEC.md` §4.
 This repo IS a Claude Code plugin. One install:
 
 ```bash
-claude --plugin-dir /path/to/sloptimize        # dev / local
-# or once published: /plugin marketplace add <repo> && /plugin install sloptimize
+claude --plugin-dir node_modules/sloptimize    # after npm i -D sloptimize
+claude --plugin-dir /path/to/sloptimize        # from a checkout
+# or via marketplace: /plugin marketplace add m0dE/sloptimize && /plugin install sloptimize
 ```
+
+Then let the agent wire your game: `/sloptimize:install` walks it through
+the tier-1 integration (runtime, sink, budgets, hooks) and refuses to call
+itself done until the feed is proven live end-to-end.
 
 That carries three surfaces into every session:
 - **Skill** — the doctrine: read → classify → census → ONE change → verify
@@ -145,7 +160,7 @@ recipe is in `docs/INTEGRATION.md` §5.
 ```
 
 ```bash
-node bin/sloptimize.mjs check     # exit 0 inside · 1 breached · 4 unmeasured
+npx sloptimize check              # exit 0 inside · 1 breached · 4 unmeasured
 ```
 
 That exit code is what lets an agent self-iterate in a loop that terminates.
@@ -173,6 +188,7 @@ burns a loop on them.
 
 ## Docs
 
+- `docs/USAGE.md` — day-to-day use once wired: the operator's verbs, new-session pickup, multi-session semantics, monitoring options
 - `docs/SPEC.md` — the founding specification (recorder, census, bench, anti-gaming posture)
 - `docs/SPEC-attach.md` — v2: the incident pipeline, tier-0 attach, measured exit criteria
 - `docs/INTEGRATION.md` — wiring a real game + Claude Code session, with the reference deployment's traps
