@@ -12,6 +12,9 @@
 // in-page panel folds the same bytes in the browser, and a test folds a
 // fixture — one implementation, three readers.
 
+/** A date as ms — a number passes through, a string parses; NaN for junk. */
+function asMs(v) { return typeof v === 'number' ? v : Date.parse(v); }
+
 /** Median of a numeric array (undefined for empty). */
 function median(vals) {
   if (vals.length === 0) return undefined;
@@ -102,10 +105,20 @@ export function latestBuilds(records) {
  */
 export function buildHistory(records, opts = {}) {
   const n = opts.buckets ?? 48;
+  // A date range (ms or ISO; either end open) scopes EVERYTHING below —
+  // buckets, per-build windows and the fix list — so "how much did we gain
+  // between these dates" is the same fold over fewer records.
+  const lo = opts.from !== undefined && opts.from !== null && opts.from !== '' ? asMs(opts.from) : -Infinity;
+  const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
+  if (lo !== -Infinity || hi !== Infinity) {
+    records = records.filter((r) => { const t = Date.parse(r.at); return !Number.isFinite(t) || (t >= lo && t <= hi); });
+  }
   // Sorted: the sink appends per post, and a post can carry a settle that
   // was measured before the beat ahead of it in the file.
   const measured = stamped(records).filter(({ r }) => EVIDENCE.has(r.type)).sort((a, b) => a.t - b.t);
-  const fixes = [...(opts.fixes ?? [])].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const fixes = [...(opts.fixes ?? [])]
+    .filter((f) => { const t = Date.parse(f.at); return !Number.isFinite(t) || (t >= lo && t <= hi); })
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   if (measured.length === 0) return { span: null, buckets: [], builds: [], fixes };
   const fromMs = measured[0].t, toMs = measured[measured.length - 1].t;
   const width = Math.max(toMs - fromMs, 1) / n;

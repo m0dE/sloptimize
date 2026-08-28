@@ -142,14 +142,67 @@ export function proposeFix(repoDir, dir, opts) {
   return fix;
 }
 
+// ── pull requests, from git alone ───────────────────────────────────────────
+// GitHub publishes every PR's head as `refs/pull/<n>/head`, readable with a
+// plain `git ls-remote` and no token. A fix whose branch head (or recorded
+// commit) is one of those heads IS that PR; the panel gets a link. Any other
+// forge, or no match: no `pr`, nothing else changes.
+
+/** {owner, repo, url} when origin is on github.com, else null. */
+export function githubOrigin(remoteUrl) {
+  const m = /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(remoteUrl ?? '');
+  return m ? { owner: m[1], repo: m[2], url: `https://github.com/${m[1]}/${m[2]}` } : null;
+}
+
+/** Parse `git ls-remote` output into [{number, sha}] for pull heads. */
+export function parsePullRefs(text) {
+  const out = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const m = /^([0-9a-f]{40})\s+refs\/pull\/(\d+)\/head$/.exec(line.trim());
+    if (m) out.push({ number: Number(m[2]), sha: m[1] });
+  }
+  return out;
+}
+
+/** The PR a fix corresponds to — by its branch head, else its recorded
+ *  commit (a short sha is a prefix of the head). Highest number wins when a
+ *  head was reused. */
+export function matchPR(fix, refs, origin) {
+  if (!origin || !refs?.length) return null;
+  const heads = [fix.head, fix.commit].filter(Boolean);
+  let best = null;
+  for (const r of refs) {
+    if (heads.some((h) => r.sha.startsWith(h) || h.startsWith(r.sha))) { if (!best || r.number > best.number) best = r; }
+  }
+  return best ? { number: best.number, url: `${origin.url}/pull/${best.number}` } : null;
+}
+
+const PULL_REFS_TTL_MS = 60_000;
+const _pullRefsCache = new Map();   // repoDir → { at, refs, origin }
+function pullRefs(repoDir) {
+  const hit = _pullRefsCache.get(repoDir);
+  if (hit && Date.now() - hit.at < PULL_REFS_TTL_MS) return hit;
+  const origin = githubOrigin(tryGit(repoDir, ['remote', 'get-url', 'origin']));
+  let refs = [];
+  if (origin) {
+    try { refs = parsePullRefs(execFileSync('git', ['ls-remote', 'origin', 'refs/pull/*/head'], { cwd: repoDir, stdio: ['ignore', 'pipe', 'ignore'], timeout: 8_000 }).toString()); }
+    catch { refs = []; }
+  }
+  const entry = { at: Date.now(), refs, origin };
+  _pullRefsCache.set(repoDir, entry);
+  return entry;
+}
+
 // ── list ────────────────────────────────────────────────────────────────────
 /** Every proposal with its status as git sees it now. */
 export function listFixes(repoDir, dir) {
   if (!isGitRepo(repoDir)) return { repo: false, error: NOT_A_REPO, fixes: [] };
   const main = mainBranch(repoDir);
   const mainHead = git(repoDir, ['rev-parse', main]);
+  const { refs, origin } = pullRefs(repoDir);
+  const withPR = (f) => { const pr = matchPR(f, refs, origin); return pr ? { ...f, pr } : f; };
   const fixes = foldFixes(dir).map((f) => {
-    if (!f.branch || !f.commit) return { ...f, status: f.status ?? 'recorded' };
+    if (!f.branch || !f.commit) return withPR({ ...f, status: f.status ?? 'recorded' });
     const branchHead = tryGit(repoDir, ['rev-parse', '--verify', '-q', `refs/heads/${f.branch}`]);
     const merged = tryGit(repoDir, ['merge-base', '--is-ancestor', f.commit, main]) !== null;
     let status = f.status;
@@ -158,9 +211,9 @@ export function listFixes(repoDir, dir) {
     else status = 'proposed';
     const mergeBase = branchHead ? tryGit(repoDir, ['merge-base', main, branchHead]) : null;
     const ahead = branchHead ? Number(tryGit(repoDir, ['rev-list', '--count', `${main}..${branchHead}`]) ?? 0) : 0;
-    return { ...f, status, ahead, upToDate: mergeBase !== null && mergeBase === mainHead, head: branchHead ? short(branchHead) : null };
+    return withPR({ ...f, status, ahead, upToDate: mergeBase !== null && mergeBase === mainHead, head: branchHead ? short(branchHead) : null });
   }).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  return { repo: true, main, fixes };
+  return { repo: true, main, ...(origin ? { origin: origin.url } : {}), fixes };
 }
 
 // ── merge / reject ──────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 // ============================================================
-// panel.js — the in-game perf debugger (SPEC §8.5): Session · Timeline · Fixes
+// panel.js — the in-game perf debugger (SPEC §8.5): Session · Optimizations · Settings
 // ============================================================
 // The human's face of the ledger. The host (the game's dev runtime) owns the
 // evidence and the transport; this module owns only the view:
@@ -34,7 +34,7 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 // font proportions rather than scaling a small drawing up.
 const PANEL_W = 1100, PANEL_H = 720;
 const W = 1000, STRIP_H = 96, PAD_L = 52, PAD_R = 10;
-const TABS = [['session', 'Session'], ['timeline', 'Timeline'], ['fixes', 'Fixes'], ['settings', 'Settings']];
+const TABS = [['session', 'Current Session'], ['optimizations', 'Optimizations'], ['settings', 'Settings']];
 /** The Fixes badge remembers what you have seen per browser. */
 const SEEN_KEY = 'sloptimize.fixes.seen';
 
@@ -106,8 +106,9 @@ function delta(b, a, unit) {
   return `${num(a, unit)} <span style="color:${col};font-size:10px">${arrow}${pct === null ? '' : `${Math.abs(pct)}%`}</span>`;
 }
 
-function renderTimeline(h) {
-  if (!h || !h.span) return `<div style="color:${C.dim};padding:12px 0">No history yet — the timeline fills as the recorder posts heartbeats and hitches. Play for a minute.</div>`;
+/** The three strips over `h` (a folded history), or a one-line reason. */
+function stripsSvg(h) {
+  if (!h || !h.span) return { svg: `<div style="color:${C.dim};padding:12px 0">No measured records in this range — the timeline fills as the recorder posts heartbeats and hitches.</div>`, ticks: [] };
   const b = h.buckets;
   // Build boundaries as dashed hairlines — but a dev day ships thirty
   // bundles, and thirty hairlines is texture, not information: past 12 the
@@ -122,28 +123,46 @@ function renderTimeline(h) {
     <line id="sl-x" x1="0" x2="0" y1="4" y2="${STRIP_H * 3 - 6}" stroke="${C.ink}" stroke-opacity="0.5" visibility="hidden"/>
     <text x="${PAD_L}" y="${STRIP_H * 3 + 10}" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.from))}</text>
     <text x="${W - PAD_R}" y="${STRIP_H * 3 + 10}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.to))}</text>
-  </svg>`;
-  const last = h.builds[h.builds.length - 1], first = h.builds[0];
-  const summary = last ? `<div style="display:flex;gap:18px;font-family:${MONO};font-size:11px;color:${C.dim};margin-top:4px">
-      <span>now <b style="color:${C.ink}">${esc(last.build)}</b></span>
-      <span>p95 ${delta(first?.p95Ms, last.p95Ms, 'ms')}</span>
-      <span>calls ${delta(first?.calls, last.calls)}</span>
-      <span>hitches/h ${delta(first?.hitchesPerHour, last.hitchesPerHour)}</span>
-      <span style="color:${C.mute}">vs first build in window · ${h.builds.length} builds${ticks.length ? ' · dashed = new build' : ''}</span></div>` : '';
-  // ONE line, fixed height, clipped: the readout under the cursor must never
-  // change the layout above it, or the crosshair chases a moving target.
-  return `${svg}<div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>${summary}`;
+  </svg>
+  <div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>`;
+  return { svg, ticks };
 }
 
-function renderFixes(h, list) {
+/** "How much did we gain between these dates": the first build in range
+ *  against the last, every number a measured window of the ledger. */
+function improvementLine(h, fixCount) {
+  if (!h || !h.span || h.builds.length === 0) return '';
+  const first = h.builds[0], last = h.builds[h.builds.length - 1];
+  const one = h.builds.length === 1;
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px 18px;font-family:${MONO};font-size:11px;color:${C.dim};margin:4px 0 2px;align-items:baseline">
+      <span style="color:${C.accent};letter-spacing:1px;text-transform:uppercase;font-size:10px">Improvement in range</span>
+      <span>p95 ${one ? num(last.p95Ms, 'ms') : delta(first.p95Ms, last.p95Ms, 'ms')}</span>
+      <span>draw calls ${one ? num(last.calls) : delta(first.calls, last.calls)}</span>
+      <span>hitches/h ${one ? num(last.hitchesPerHour) : delta(first.hitchesPerHour, last.hitchesPerHour)}</span>
+      <span>worst frame ${one ? num(last.worstMs, 'ms') : delta(first.worstMs, last.worstMs, 'ms')}</span>
+      <span style="color:${C.mute}">${one ? `one build (${esc(first.build)})` : `${esc(first.build)} → ${esc(last.build)} · ${h.builds.length} builds`} · ${fixCount} fix${fixCount === 1 ? '' : 'es'}</span></div>`;
+}
+
+/** The date filter bar. `range` = {from, to} as datetime-local strings ('' = open). */
+function filterBar(range) {
+  const inp = (id, v) => `<input id="${id}" type="datetime-local" value="${esc(v ?? '')}" style="background:${C.field};border:1px solid rgba(120,150,190,0.4);border-radius:4px;color:#e8f0ff;padding:3px 6px;font:11px ${MONO};outline:none">`;
+  return `<div style="display:flex;gap:10px;align-items:center;font-size:11px;color:${C.dim};margin:2px 0 8px">
+    <span style="color:${C.accent};letter-spacing:1px;text-transform:uppercase;font-size:10px">Range</span>
+    <label>from ${inp('sl-from', range.from)}</label><span style="color:${C.mute}">(empty = since the beginning)</span>
+    <label>to ${inp('sl-to', range.to)}</label><span style="color:${C.mute}">(empty = now)</span>
+    <button id="sl-range-clear" type="button" style="background:none;border:1px solid ${C.rule};color:${C.mute};border-radius:4px;padding:2px 8px;font:inherit;font-size:10px;cursor:pointer">clear</button></div>`;
+}
+
+function renderFixRows(h, list) {
   // `list` is the git-backed proposal list (host.fixes): status per fix as
   // git sees it, merge/reject verbs. `h.fixes` is the measured ledger the
   // timeline folds; the two meet on `id` / commit.
   if (list && list.repo === false) {
     return `<div style="color:${C.warn};padding:12px 0;line-height:1.5">${esc(list.error || "this project isn't a git repo")}</div>`;
   }
-  const fixes = list?.fixes?.length ? list.fixes : (h?.fixes ?? []);
-  if (fixes.length === 0) return `<div style="color:${C.dim};padding:12px 0;line-height:1.5">No fixes proposed yet. When a Claude Code session has a fix, it proposes it as a branch and records it here with the measured before/after:<br><code style="font-family:${MONO};color:${C.ink}">sloptimize fix propose --title "…" --issue "…" --solution "…"</code></div>`;
+  const inRange = (f) => !h?.rangeLo || !Number.isFinite(Date.parse(f.at)) || (Date.parse(f.at) >= h.rangeLo && Date.parse(f.at) <= h.rangeHi);
+  const fixes = (list?.fixes?.length ? list.fixes : (h?.fixes ?? [])).filter(inRange);
+  if (fixes.length === 0) return `<div style="color:${C.dim};padding:12px 0;line-height:1.5">No fixes in this range. When a Claude Code session has a fix, it proposes it as a branch and records it here with the measured before/after:<br><code style="font-family:${MONO};color:${C.ink}">sloptimize fix propose --title "…" --issue "…" --solution "…"</code></div>`;
   const row = (label, b, a, unit) => `<tr><td style="color:${C.mute};padding:1px 8px 1px 0">${label}</td><td style="text-align:right;padding:1px 8px">${num(b, unit)}</td><td style="text-align:right">${delta(b, a, unit)}</td></tr>`;
   const badge = (st) => {
     const col = st === 'merged' ? C.good : st === 'proposed' ? C.accent : st === 'rejected' ? C.mute : C.warn;
@@ -153,7 +172,8 @@ function renderFixes(h, list) {
   return fixes.map((f) => `<div style="border-top:1px solid ${C.rule};padding:10px 0" data-fix-row="${esc(f.id ?? '')}">
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
       <div style="color:${C.ink};font-size:13px;display:flex;gap:10px;align-items:baseline">${badge(f.status ?? 'recorded')} ${esc(f.title)}</div>
-      <div style="font-family:${MONO};font-size:10px;color:${C.mute};white-space:nowrap">${esc(when(f.at))}${f.branch ? ` · ${esc(f.branch)}` : ''}${f.commit ? ` @ <span style="color:${C.ink}">${esc(f.commit)}</span>` : ''}${f.mergeCommit ? ` → ${esc(f.mergeCommit)}` : ''}</div>
+      <div style="font-family:${MONO};font-size:10px;color:${C.mute};white-space:nowrap;display:flex;gap:8px;align-items:center">${esc(when(f.at))}${f.branch ? ` · ${esc(f.branch)}` : ''}${f.commit ? ` @ <span style="color:${C.ink}">${esc(f.commit)}</span>` : ''}${f.mergeCommit ? ` → ${esc(f.mergeCommit)}` : ''}
+        ${f.pr?.url ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener" style="color:${C.accent};border:1px solid ${C.accent};border-radius:3px;padding:1px 6px;text-decoration:none;font-size:10px">PR #${esc(String(f.pr.number))} ↗</a>` : ''}</div>
     </div>
     ${f.issue ? `<div style="color:${C.dim};margin-top:4px"><span style="color:${C.warn}">was</span> ${esc(f.issue)}</div>` : ''}
     ${f.solution ? `<div style="color:${C.dim};margin-top:2px"><span style="color:${C.good}">now</span> ${esc(f.solution)}</div>` : ''}
@@ -173,6 +193,14 @@ function renderFixes(h, list) {
       ${btn(f.id, 'reject', 'Reject', C.mute)}
       <span data-fix-msg="${esc(f.id)}" style="font-size:10px;color:${C.warn}"></span></div>` : ''}
   </div>`).join('');
+}
+
+function renderOptimizations(h, list, range) {
+  const notRepo = list && list.repo === false ? `<div style="color:${C.warn};padding:0 0 8px;line-height:1.5">${esc(list.error || "this project isn't a git repo")}</div>` : '';
+  const { svg } = stripsSvg(h);
+  const rows = renderFixRows(h, list);
+  const fixCount = (rows.match(/data-fix-row=/g) || []).length;
+  return `${filterBar(range)}${notRepo}${svg}${improvementLine(h, fixCount)}${H('Fixes in range')}${rows}`;
 }
 
 function renderSettings(settings, list) {
@@ -254,12 +282,24 @@ export function createPanel(host) {
       });
       return;
     }
-    Promise.all([loadHistory(), tab === 'fixes' ? loadFixes() : null]).then(([h, list]) => {
+    Promise.all([loadHistory(), loadFixes()]).then(([h, list]) => {
       if (!root || (tab !== next)) return;
-      body.innerHTML = tab === 'timeline' ? renderTimeline(h) : renderFixes(h, list);
-      if (tab === 'timeline') wireCrosshair(h);
-      if (tab === 'fixes') { wireFixButtons(); markSeen(list); }
+      body.innerHTML = renderOptimizations(h, list, range);
+      wireCrosshair(h);
+      wireFixButtons();
+      wireRange();
+      markSeen(list);
     });
+  }
+
+  // ── the date range: re-fold the same bytes over fewer records ──
+  let range = { from: '', to: '' };
+  function wireRange() {
+    const from = body.querySelector('#sl-from'), to = body.querySelector('#sl-to'), clear = body.querySelector('#sl-range-clear');
+    const apply = () => { range = { from: from?.value ?? '', to: to?.value ?? '' }; histCache = null; show('optimizations'); };
+    if (from) from.onchange = apply;
+    if (to) to.onchange = apply;
+    if (clear) clear.onclick = () => { range = { from: '', to: '' }; histCache = null; show('optimizations'); };
   }
 
   let fixesCache = null, settingsCache = null;
@@ -281,7 +321,7 @@ export function createPanel(host) {
     updateBadge(list);
   }
   function updateBadge(list) {
-    const b = root?.querySelector('[data-tab="fixes"] [data-badge]');
+    const b = root?.querySelector('[data-tab="optimizations"] [data-badge]');
     if (!b) return;
     const seen = seenIds();
     const fresh = (list?.fixes ?? []).filter((f) => f.status === 'proposed' && !seen.has(f.id)).length;
@@ -299,7 +339,7 @@ export function createPanel(host) {
         Promise.resolve().then(() => host.fixAction(id, action)).then((r) => {
           fixesCache = null; histCache = null;
           if (r && r.error) { if (msg) { msg.style.color = C.warn; msg.textContent = r.error; } for (const x of body.querySelectorAll(`button[data-fix="${CSS.escape(id)}"]`)) x.disabled = false; return; }
-          show('fixes');
+          show('optimizations');
         }).catch((e) => { if (msg) { msg.style.color = C.warn; msg.textContent = String(e?.message ?? e); } });
       };
     }
@@ -317,14 +357,20 @@ export function createPanel(host) {
     }
   }
 
+  let rawCache = null;
   function loadHistory() {
     if (histCache) return Promise.resolve(histCache);
     if (!host.history) return Promise.resolve(null);
-    return Promise.resolve().then(() => host.history()).then((raw) => {
+    const fold = (raw) => {
       if (!raw) return null;
-      histCache = raw.buckets ? raw : buildHistory(raw.records ?? [], { fixes: raw.fixes ?? [], buckets: 72 });
-      return histCache;
-    }).catch(() => null);
+      const lo = range.from ? Date.parse(range.from) : -Infinity, hi = range.to ? Date.parse(range.to) : Infinity;
+      const h = raw.buckets ? raw : buildHistory(raw.records ?? [], { fixes: raw.fixes ?? [], buckets: 72, from: range.from || undefined, to: range.to || undefined });
+      h.rangeLo = lo === -Infinity ? undefined : lo; h.rangeHi = hi;
+      histCache = h;
+      return h;
+    };
+    if (rawCache) return Promise.resolve(fold(rawCache));
+    return Promise.resolve().then(() => host.history()).then((raw) => { rawCache = raw; return fold(raw); }).catch(() => null);
   }
 
   function wireCrosshair(h) {
@@ -354,7 +400,7 @@ export function createPanel(host) {
       tabs.setAttribute('role', 'tablist');
       for (const [k, label] of TABS) {
         const b = el('button', `background:none;border:0;border-bottom:2px solid transparent;color:${C.mute};font:inherit;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px 6px;cursor:pointer;margin-bottom:-1px`,
-          k === 'fixes' ? `${label} <span data-badge style="display:none;background:${C.accent};color:#06101a;border-radius:9px;padding:0 6px;font-size:10px;letter-spacing:0;vertical-align:1px"></span>` : label);
+          k === 'optimizations' ? `${label} <span data-badge style="display:none;background:${C.accent};color:#06101a;border-radius:9px;padding:0 6px;font-size:10px;letter-spacing:0;vertical-align:1px"></span>` : label);
         b.dataset.tab = k; b.setAttribute('role', 'tab'); b.type = 'button';
         b.onclick = () => show(k);
         b.onfocus = () => { b.style.outline = `1px solid ${C.accent}`; b.style.outlineOffset = '-1px'; };
@@ -383,6 +429,6 @@ export function createPanel(host) {
     submit,
     isOpen: () => root !== null,
     /** Forget the folded ledger so the next open re-fetches it. */
-    refresh() { histCache = null; fixesCache = null; settingsCache = null; },
+    refresh() { histCache = null; rawCache = null; fixesCache = null; settingsCache = null; },
   };
 }

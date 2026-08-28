@@ -164,3 +164,18 @@ test('settings: default automation is propose; a saved level reads back', () => 
   assert.throws(() => writeSettings(ledger, { automation: 'yolo' }), /automation/);
   assert.ok(existsSync(join(ledger, 'settings.json')));
 });
+
+test('PR discovery from git alone: github origin parsed, pull heads matched by branch head or recorded commit', async () => {
+  const { githubOrigin, parsePullRefs, matchPR } = await import('../src/proposals.mjs');
+  assert.deepEqual(githubOrigin('git@github.com:m0dE/mecharoyale.git'), { owner: 'm0dE', repo: 'mecharoyale', url: 'https://github.com/m0dE/mecharoyale' });
+  assert.deepEqual(githubOrigin('https://github.com/m0dE/mecharoyale'), { owner: 'm0dE', repo: 'mecharoyale', url: 'https://github.com/m0dE/mecharoyale' });
+  assert.equal(githubOrigin('https://gitlab.com/x/y.git'), null);
+  assert.equal(githubOrigin(null), null);
+  const refs = parsePullRefs('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/pull/12/head\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/pull/650/head\nccc\trefs/heads/main\n');
+  assert.deepEqual(refs, [{ number: 12, sha: 'a'.repeat(40) }, { number: 650, sha: 'b'.repeat(40) }]);
+  const origin = githubOrigin('git@github.com:m0dE/mecharoyale.git');
+  assert.deepEqual(matchPR({ commit: 'bbbbbbbbbbbb' }, refs, origin), { number: 650, url: 'https://github.com/m0dE/mecharoyale/pull/650' });
+  assert.deepEqual(matchPR({ head: 'aaaaaaaaaaaa', commit: 'zzz' }, refs, origin), { number: 12, url: 'https://github.com/m0dE/mecharoyale/pull/12' });
+  assert.equal(matchPR({ commit: 'ffffffffffff' }, refs, origin), null);
+  assert.equal(matchPR({ commit: 'bbbbbbbbbbbb' }, refs, null), null);
+});
