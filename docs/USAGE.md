@@ -91,12 +91,15 @@ Consequences worth knowing:
 
 **No** for the normal loop above — the hook makes every session ambient.
 
-**Yes, one, if you want unprompted reaction** — an agent that starts
+**Yes, one, if you want unprompted reaction** (or none, if the
+`SessionStart` hook arms the watcher for you) — an agent that starts
 investigating while you keep playing and never type. Two recipes:
 
-- **Monitor / push channel** (INTEGRATION.md §5): a persistent watcher
-  polling `perf.jsonl` with a byte cursor (~20s), waking the agent with
-  one line per new usermark or ≥100ms hitch.
+- **`sloptimize watch` as a Monitor** (INTEGRATION.md §5): the shipped
+  watcher polls `perf.jsonl` with a byte cursor (~20s) and wakes the
+  agent with one line per new usermark, ≥100ms hitch, gpu cap-hit or
+  feed-dark edge. A `SessionStart` hook can arm it in every session
+  automatically — then nobody types anything, ever.
 - **`/loop` in one session**: e.g.
   `/loop check <game>/.sloptimize for new keyframes or budget breaches; investigate any new incident`
   — that session self-paces polls and works incidents autonomously.

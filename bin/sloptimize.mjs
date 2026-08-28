@@ -174,6 +174,18 @@ if (cmd === 'hook-status') {
   process.exit(0);
 }
 
+if (cmd === 'watch') {
+  // The push channel (SPEC §8.1.1): tail every --dir's perf.jsonl and print
+  // one line per record an agent should wake for. Never exits — arm it as a
+  // Claude Code Monitor (INTEGRATION.md §5) and just play.
+  const { runWatch } = await import('../src/watch.mjs');
+  const dirs = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === '--dir' && args[i + 1]) dirs.push(args[i + 1]);
+  if (dirs.length === 0) dirs.push('.sloptimize');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? Number(args[i + 1]) : undefined; };
+  await runWatch(dirs, { intervalMs: get('--interval') ? get('--interval') * 1000 : undefined, minHitchMs: get('--min-hitch-ms') });
+}
+
 if (cmd === 'attach') {
   // Tier 0 (SPEC-attach): zero-integration attach. --launch <url> spawns a
   // browser; bare attach uses an existing --remote-debugging-port session.
@@ -190,5 +202,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|check|census|doctor|hook-status|attach> [--json] [--dir <path>] [--counters-only] [--launch <url>] [--port N] [--headless]');
+console.log('usage: sloptimize <report|check|census|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]');
 process.exit(2);

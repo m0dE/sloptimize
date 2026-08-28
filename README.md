@@ -148,8 +148,9 @@ That carries three surfaces into every session:
   `attach_stop` for the live tier.
 
 For instant wakeups (the agent starts fixing ~20s after the stutter, no
-prompt needed), arm a session Monitor over `perf.jsonl` — the ~30-line
-recipe is in `docs/INTEGRATION.md` §5.
+prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
+`docs/INTEGRATION.md` §5. Wire it into a `SessionStart` hook and every
+session arms it by itself.
 
 ## Budgets: "fast enough" as an exit code
 
@@ -173,6 +174,8 @@ sloptimize check         budgets → exit code (--counters-only for CI)
 sloptimize census        per-entity costs + closed-vocabulary hints
 sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
+sloptimize watch         the push channel: one stdout line per usermark /
+                         ≥100ms hitch / gpu cap-hit / feed dark; never exits
 sloptimize doctor        what is wired, what is degraded, stated limits
 ```
 

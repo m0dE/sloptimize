@@ -25,6 +25,10 @@ The playbook, in order:
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
 
+Push channel: if a `sloptimize watch` Monitor is armed in this session,
+its lines (★ usermark / ⚡ hitch / ⏳ gpu / ◌ feed quiet) arrive as
+notifications; each one starts this playbook unprompted at step 1.
+
 Trust rules: census estimates are estimates (the field names say so); an
 absent field means unmeasured, never zero; `long-script` hitches escalate to
 a CPU profiler (Chrome DevTools), per-draw GL state to Spector — sloptimize

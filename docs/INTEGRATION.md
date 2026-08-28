@@ -115,11 +115,27 @@ change → verify with counters; never claim a fix without a before/after).
 
 ## 5. The push channel (auto mode: the agent is woken, nobody types)
 
-In the session, arm a persistent Monitor polling `perf.jsonl` with a byte
-cursor (~20s), emitting one line per new usermark or ≥100ms auto-hitch
-(SPEC §8.1.1; mecharoyale's exact script is in its session history — 30
-lines of python). The operator then just plays: auto-detected hitches and
-Ctrl+F11 notes wake the agent with the classification attached.
+`sloptimize watch` is the watcher (SPEC §8.1.1): a byte cursor over each
+`--dir`'s `perf.jsonl`, polled every 20s, printing ONE line per record an
+agent should act on — every usermark, every auto hitch ≥100ms
+(`--min-hitch-ms`), a gpu-settle that hit its cap, any gpu-stall, and the
+feed going quiet / coming back. Heartbeats, arm-probes and small hitches
+stay silent. It starts at EOF (history is `report`'s job) and never exits.
+
+Arm it as a Claude Code Monitor — stdout lines become wake events:
+
+```
+Monitor({ command: 'node <path-to>/sloptimize/bin/sloptimize.mjs watch --dir .sloptimize',
+          description: 'sloptimize perf incidents', persistent: true })
+```
+
+To make every session arm it WITHOUT anyone asking, add a `SessionStart`
+hook that prints the instruction into the agent's context (mecharoyale's
+`.claude/settings.json` is the reference; it skips ticket-runner jobs so a
+session working an unrelated task is not pulled off it, unless
+`SLOPTIMIZE_WATCH=1` says otherwise). The operator then just plays:
+auto-detected hitches and Ctrl+F12 notes wake the agent with the
+classification attached, and it starts the §8.2 playbook unprompted.
 
 ## Porting cost, measured once
 
