@@ -147,6 +147,15 @@ test('with a remote, propose pushes the branch and merge pushes main', () => {
   assert.equal(git(dir, 'rev-parse', 'origin/main'), git(dir, 'rev-parse', 'main'));
 });
 
+test('a record-only fix (no branch, no id) still lists — as recorded, with a derived id', () => {
+  const { dir, ledger } = repo();
+  writeFileSync(join(ledger, 'fixes.jsonl'), JSON.stringify({ type: 'fix', at: '2026-08-28T10:00:00.000Z', title: 'Backfilled fix', commit: 'abc1234' }) + '\n');
+  const l = listFixes(dir, ledger);
+  assert.equal(l.fixes.length, 1);
+  assert.equal(l.fixes[0].status, 'recorded');
+  assert.match(l.fixes[0].id, /^rec-20260828100000000-backfilled-fix$/);
+});
+
 test('settings: default automation is propose; a saved level reads back', () => {
   const { ledger } = repo();
   assert.deepEqual(readSettings(ledger), { automation: 'propose' });

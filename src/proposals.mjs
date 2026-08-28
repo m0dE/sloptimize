@@ -56,7 +56,9 @@ function append(dir, rec) {
 function foldFixes(dir) {
   const byId = new Map();
   for (const r of readJsonl(join(dir, 'fixes.jsonl'))) {
-    if (r.type === 'fix' && r.id) byId.set(r.id, { ...r });
+    // A record-only entry (`sloptimize fix --title …`, or an older ledger)
+    // has no id: derive a stable one so it lists beside the proposals.
+    if (r.type === 'fix') { const id = r.id ?? `rec-${(r.at ?? '').replace(/[^0-9]/g, '')}-${slugOf(r.title ?? '').slice(0, 24)}`; byId.set(id, { ...r, id }); }
     else if (r.type === 'fix-status' && byId.has(r.id)) Object.assign(byId.get(r.id), { status: r.status, statusAt: r.at, ...(r.mergeCommit ? { mergeCommit: r.mergeCommit } : {}) });
   }
   return [...byId.values()];
