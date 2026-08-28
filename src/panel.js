@@ -26,7 +26,14 @@ const C = {
 };
 const FONT = '12px system-ui, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
-const W = 600, STRIP_H = 54, PAD_L = 44, PAD_R = 8;
+// The panel is a FIXED-size window (PANEL_W × PANEL_H, clamped to the
+// viewport) and its body scrolls: a panel sized to its content moved every
+// time the content did — the timeline readout wrapping to a second line
+// under the cursor shifted the strips the cursor was over (field, 2026-08-28).
+// The strips' viewBox is drawn wide so the SVG fills the window at the same
+// font proportions rather than scaling a small drawing up.
+const PANEL_W = 1100, PANEL_H = 720;
+const W = 1000, STRIP_H = 96, PAD_L = 52, PAD_R = 10;
 const TABS = [['session', 'Session'], ['timeline', 'Timeline'], ['fixes', 'Fixes']];
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -121,7 +128,9 @@ function renderTimeline(h) {
       <span>calls ${delta(first?.calls, last.calls)}</span>
       <span>hitches/h ${delta(first?.hitchesPerHour, last.hitchesPerHour)}</span>
       <span style="color:${C.mute}">vs first build in window · ${h.builds.length} builds${ticks.length ? ' · dashed = new build' : ''}</span></div>` : '';
-  return `${svg}<div id="sl-read" style="min-height:16px;font-family:${MONO};font-size:11px;color:${C.dim};padding:2px 0 0 ${PAD_L * 100 / W}%">hover the strips</div>${summary}`;
+  // ONE line, fixed height, clipped: the readout under the cursor must never
+  // change the layout above it, or the crosshair chases a moving target.
+  return `${svg}<div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>${summary}`;
 }
 
 function renderFixes(h) {
@@ -162,7 +171,7 @@ function renderSession(host) {
     ? `<div style="font-size:10px;color:${C.good}">feed: live — incidents reach Claude Code as they happen</div>`
     : `<div style="font-size:10px;color:${C.warn}">feed: DARK ${feed.darkForS !== undefined ? `${feed.darkForS}s` : ''} — ${esc(feed.reason)}; recording continues, ${feed.buffered ?? 0} post(s) buffered for retry</div>`;
   return `${feedLine}${H(`incidents this session (${inc.length} logged${feed.state === 'ok' ? ', all already sent to Claude Code' : ' — feed dark, buffered'})`)}
-    <div id="sl-list" style="max-height:170px;overflow-y:auto;font-size:11.5px;font-variant-numeric:tabular-nums">${rows || `<div style="color:${C.dim}">none yet — the recorder is watching</div>`}</div>`;
+    <div id="sl-list" style="font-size:11.5px;font-variant-numeric:tabular-nums">${rows || `<div style="color:${C.dim}">none yet — the recorder is watching</div>`}</div>`;
 }
 
 /**
@@ -243,8 +252,9 @@ export function createPanel(host) {
   return {
     open() {
       if (root) return;
-      root = el('div', `position:fixed;left:50%;bottom:12%;transform:translateX(-50%);z-index:99999;width:640px;max-width:calc(100vw - 24px);max-height:76vh;display:flex;flex-direction:column;`
-        + `background:${C.bg};border:1px solid ${C.line};border-radius:8px;padding:10px 14px;font:${FONT};color:${C.ink};box-shadow:0 4px 24px rgba(0,0,0,0.6);box-sizing:border-box`);
+      root = el('div', `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:99999;`
+        + `width:${PANEL_W}px;max-width:calc(100vw - 24px);height:${PANEL_H}px;max-height:calc(100vh - 24px);display:flex;flex-direction:column;`
+        + `background:${C.bg};border:1px solid ${C.line};border-radius:8px;padding:12px 18px;font:${FONT};color:${C.ink};box-shadow:0 4px 24px rgba(0,0,0,0.6);box-sizing:border-box`);
       root.setAttribute('role', 'dialog'); root.setAttribute('aria-label', 'sloptimize perf debugger');
       const tabs = el('div', `display:flex;gap:2px;border-bottom:1px solid ${C.rule};margin:0 0 6px`);
       tabs.setAttribute('role', 'tablist');
@@ -258,7 +268,9 @@ export function createPanel(host) {
       }
       const brand = el('span', `margin-left:auto;align-self:center;font-size:10px;letter-spacing:1px;color:${C.mute}`, 'SLOPTIMIZE');
       tabs.appendChild(brand);
-      body = el('div', 'overflow-y:auto;flex:1 1 auto;min-height:60px');
+      // The body is the ONLY thing that scrolls; the tabs above and the
+      // keyframe prompt below hold their place whatever the tab contains.
+      body = el('div', 'overflow-y:auto;overflow-x:hidden;flex:1 1 auto;min-height:0;padding-right:6px');
       const ask = el('div', '', H('Describe what you just saw to save a keyframe <span style="color:' + C.dim + ';text-transform:none;letter-spacing:0">(Enter sends · Esc just closes)</span>'));
       input = el('input', `width:100%;box-sizing:border-box;background:${C.field};border:1px solid rgba(120,150,190,0.4);border-radius:4px;color:#e8f0ff;padding:6px 8px;font:13px system-ui,sans-serif;outline:none`);
       input.type = 'text'; input.maxLength = 200; input.placeholder = 'e.g. huge stutter when the buildings loaded';
