@@ -89,8 +89,13 @@ export function proposeFix(repoDir, dir, opts) {
   requireRepo(repoDir);
   if (!opts?.title) throw new Error('a proposal needs a title');
   const main = mainBranch(repoDir);
+  // Dirty = anything outside the ledger dir itself. Match on the directory
+  // boundary: a sibling file whose NAME starts with the dir's (".sloptimize-x")
+  // is a change to propose, not the ledger.
+  const ledgerRel = relative(repoDir, dir);
+  const inLedger = (path) => !!ledgerRel && !ledgerRel.startsWith('..') && (path === ledgerRel || path.startsWith(ledgerRel + '/'));
   const dirty = git(repoDir, ['status', '--porcelain', '--untracked-files=all']).split('\n').filter(Boolean)
-    .some((l) => { const rel = relative(repoDir, dir); return !(rel && !rel.startsWith('..') && l.slice(3).startsWith(rel)); });
+    .some((l) => !inLedger(l.slice(3).replace(/^"|"$/g, '')));
   const current = git(repoDir, ['branch', '--show-current']);
   let branch = opts.branch ?? (current.startsWith('sloptimize/') ? current : `sloptimize/${slugOf(opts.title)}`);
   if (!dirty) {
@@ -111,8 +116,13 @@ export function proposeFix(repoDir, dir, opts) {
     if (rel && !rel.startsWith('..') && !isAbsolute(rel)) tryGit(repoDir, ['reset', '-q', '--', rel]);
     git(repoDir, ['commit', '-q', '-m', opts.message ?? opts.title]);
   }
-  const commit = short(git(repoDir, ['rev-parse', 'HEAD']));
-  const base = short(git(repoDir, ['merge-base', main, 'HEAD']));
+  const commit = short(git(repoDir, ['rev-parse', branch]));
+  const base = short(git(repoDir, ['merge-base', main, branch]));
+  // The proposal lives on its branch; the checkout goes back to where the
+  // agent was working. Its change has MOVED to the branch, so the tree is
+  // clean on return — a session mid-ticket is not left parked on a
+  // sloptimize/ branch it never asked for.
+  if (dirty && current !== branch) git(repoDir, ['checkout', '-q', current]);
   let pushed = false;
   if (hasRemote(repoDir) && opts.push !== false) {
     try { git(repoDir, ['push', '-q', '-u', 'origin', branch]); pushed = true; } catch { pushed = false; }
@@ -124,7 +134,7 @@ export function proposeFix(repoDir, dir, opts) {
     at: new Date().toISOString(), title: opts.title,
     ...(opts.issue ? { issue: opts.issue } : {}), ...(opts.solution ? { solution: opts.solution } : {}),
     ...(opts.files ? { files: opts.files } : {}),
-    branch, commit, base, main, pushed, status: 'proposed', before, after,
+    branch, commit, base, main, from: current, pushed, status: 'proposed', before, after,
   };
   append(dir, fix);
   return fix;
@@ -193,7 +203,7 @@ export function rejectFix(repoDir, dir, id) {
   const main = mainBranch(repoDir);
   if (tryGit(repoDir, ['merge-base', '--is-ancestor', f.commit, main]) !== null) throw new Error(`already merged: ${f.title}`);
   const current = git(repoDir, ['branch', '--show-current']);
-  if (current === f.branch) git(repoDir, ['checkout', '-q', main]);
+  if (current === f.branch) git(repoDir, ['checkout', '-q', f.from && f.from !== f.branch ? f.from : main]);
   tryGit(repoDir, ['branch', '-D', f.branch]);
   if (hasRemote(repoDir)) tryGit(repoDir, ['push', '-q', 'origin', '--delete', f.branch]);
   const status = { type: 'fix-status', id, at: new Date().toISOString(), status: 'rejected' };

@@ -47,8 +47,13 @@ test('propose: current changes become a sloptimize/<slug> branch, a commit, and 
   assert.equal(fix.status, 'proposed');
   assert.equal(fix.branch, 'sloptimize/key-batcher-priced-per-build');
   assert.match(fix.commit, /^[0-9a-f]{7,}$/);
-  assert.equal(git(dir, 'branch', '--show-current'), fix.branch);
+  // The change moved to the proposal branch; the checkout is back where it
+  // was, clean.
+  assert.equal(git(dir, 'branch', '--show-current'), 'main');
+  assert.equal(fix.from, 'main');
   assert.equal(git(dir, 'status', '--porcelain'), '');
+  assert.equal(readFileSync(join(dir, 'a.txt'), 'utf8'), 'a\n');
+  assert.equal(git(dir, 'show', `${fix.branch}:a.txt`), 'fixed');
   assert.equal(fix.before, null, 'no ledger evidence yet → no before window, and that is not an error');
   const lines = readFileSync(join(ledger, 'fixes.jsonl'), 'utf8').trim().split('\n');
   assert.equal(lines.length, 1);
@@ -60,6 +65,28 @@ test('propose: current changes become a sloptimize/<slug> branch, a commit, and 
   assert.equal(l.fixes[0].status, 'proposed');
   assert.equal(l.fixes[0].ahead, 1);
   assert.equal(l.fixes[0].upToDate, true);
+});
+
+test('a sibling file whose name merely starts with the ledger dir\'s is a change, not the ledger', () => {
+  // Caught live: `.sloptimize-demo.txt` matched `.sloptimize` by prefix, the
+  // tree read clean, and the proposal recorded the wrong branch.
+  const { dir, ledger } = repo();
+  writeFileSync(join(dir, '.sloptimize-demo.txt'), 'demo\n');
+  const fix = proposeFix(dir, ledger, { title: 'Sibling' });
+  assert.equal(fix.branch, 'sloptimize/sibling');
+  assert.equal(git(dir, 'show', '--stat', '--format=', fix.branch).includes('.sloptimize-demo.txt'), true);
+});
+
+test('proposing from a ticket branch returns to that branch, and reject does too', () => {
+  const { dir, ledger } = repo();
+  git(dir, 'checkout', '-q', '-b', 'ticket-1');
+  writeFileSync(join(dir, 'a.txt'), 'fixed\n');
+  const fix = proposeFix(dir, ledger, { title: 'From a ticket' });
+  assert.equal(fix.from, 'ticket-1');
+  assert.equal(git(dir, 'branch', '--show-current'), 'ticket-1');
+  git(dir, 'checkout', '-q', fix.branch);
+  rejectFix(dir, ledger, fix.id);
+  assert.equal(git(dir, 'branch', '--show-current'), 'ticket-1');
 });
 
 test('propose refuses with nothing to propose', () => {
