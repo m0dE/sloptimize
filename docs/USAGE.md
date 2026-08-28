@@ -172,3 +172,23 @@ attribution).
 - **Ctrl+F12 does nothing**: click the chip instead (keyboard geography
   is why it exists); failures log `[sloptimize]` lines to the console
   rather than dying silently.
+
+## The fix loop (git only)
+
+A fix is a PROPOSAL: a `sloptimize/<slug>` branch and one entry in
+`.sloptimize/fixes.jsonl`. No forge, no API, no token — a repo with no remote
+works the same; with a remote the branch and `main` are pushed.
+
+```bash
+sloptimize fix propose --title "…" --issue "…" --solution "…"   # branch + commit + ledger entry
+sloptimize fixes                       # every proposal, status as git sees it
+sloptimize fix merge <id>              # merge commit into main (+ push); refuses a stale branch
+sloptimize fix reject <id>             # delete the branch, keep the entry
+sloptimize policy                      # automation: propose | merge
+sloptimize settings --automation merge
+```
+
+The debugger's **Fixes** tab lists proposals with Merge / Reject and a badge
+counting the ones you have not looked at; **Settings** holds the automation
+level (server-side, `.sloptimize/settings.json`). A project that is not a
+git repo is told so in both places.

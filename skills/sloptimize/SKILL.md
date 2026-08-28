@@ -31,6 +31,14 @@ The playbook, in order:
    type. `sloptimize history` and the debugger's Fixes tab show it; that is
    how the human sees what the loop bought.
 
+The fix loop (git only): a verified fix is PROPOSED, never pushed to main —
+`sloptimize fix propose --title "…" --issue "…" --solution "…"` turns the
+working tree (or the current branch) into a `sloptimize/<slug>` branch plus
+a ledger entry the debugger's Fixes tab lists with merge/reject. Read
+`sloptimize policy` first: `propose` means stop there; `merge` means
+`sloptimize fix merge <id>` yourself once the tests are green. A repo
+without git says so — nothing to do until `git init`.
+
 Push channel: if a `sloptimize watch` Monitor is armed in this session,
 its lines (★ usermark / ⚡ hitch / ⏳ gpu / ◌ feed quiet) arrive as
 notifications; each one starts this playbook unprompted at step 1.

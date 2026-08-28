@@ -34,7 +34,9 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 // font proportions rather than scaling a small drawing up.
 const PANEL_W = 1100, PANEL_H = 720;
 const W = 1000, STRIP_H = 96, PAD_L = 52, PAD_R = 10;
-const TABS = [['session', 'Session'], ['timeline', 'Timeline'], ['fixes', 'Fixes']];
+const TABS = [['session', 'Session'], ['timeline', 'Timeline'], ['fixes', 'Fixes'], ['settings', 'Settings']];
+/** The Fixes badge remembers what you have seen per browser. */
+const SEEN_KEY = 'sloptimize.fixes.seen';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const num = (v, unit = '') => (v === undefined || v === null ? '—' : `${typeof v === 'number' ? +v.toFixed(v >= 100 ? 0 : 1) : v}${unit}`);
@@ -133,20 +135,31 @@ function renderTimeline(h) {
   return `${svg}<div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>${summary}`;
 }
 
-function renderFixes(h) {
-  const fixes = h?.fixes ?? [];
-  if (fixes.length === 0) return `<div style="color:${C.dim};padding:12px 0;line-height:1.5">No fixes recorded yet. After a Claude Code session verifies a fix, it records it here with the measured before/after:<br><code style="font-family:${MONO};color:${C.ink}">sloptimize fix --title "…" --issue "…" --solution "…" --commit &lt;sha&gt;</code></div>`;
+function renderFixes(h, list) {
+  // `list` is the git-backed proposal list (host.fixes): status per fix as
+  // git sees it, merge/reject verbs. `h.fixes` is the measured ledger the
+  // timeline folds; the two meet on `id` / commit.
+  if (list && list.repo === false) {
+    return `<div style="color:${C.warn};padding:12px 0;line-height:1.5">${esc(list.error || "this project isn't a git repo")}</div>`;
+  }
+  const fixes = list?.fixes?.length ? list.fixes : (h?.fixes ?? []);
+  if (fixes.length === 0) return `<div style="color:${C.dim};padding:12px 0;line-height:1.5">No fixes proposed yet. When a Claude Code session has a fix, it proposes it as a branch and records it here with the measured before/after:<br><code style="font-family:${MONO};color:${C.ink}">sloptimize fix propose --title "…" --issue "…" --solution "…"</code></div>`;
   const row = (label, b, a, unit) => `<tr><td style="color:${C.mute};padding:1px 8px 1px 0">${label}</td><td style="text-align:right;padding:1px 8px">${num(b, unit)}</td><td style="text-align:right">${delta(b, a, unit)}</td></tr>`;
-  return fixes.map((f) => `<div style="border-top:1px solid ${C.rule};padding:10px 0">
+  const badge = (st) => {
+    const col = st === 'merged' ? C.good : st === 'proposed' ? C.accent : st === 'rejected' ? C.mute : C.warn;
+    return `<span style="font-family:${MONO};font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${col};border:1px solid ${col};border-radius:3px;padding:1px 6px">${esc(st)}</span>`;
+  };
+  const btn = (id, action, label, color) => `<button data-fix="${esc(id)}" data-action="${action}" type="button" style="background:none;border:1px solid ${color};color:${color};border-radius:4px;padding:3px 10px;font:inherit;font-size:11px;cursor:pointer">${label}</button>`;
+  return fixes.map((f) => `<div style="border-top:1px solid ${C.rule};padding:10px 0" data-fix-row="${esc(f.id ?? '')}">
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
-      <div style="color:${C.ink};font-size:13px"><span style="color:${C.good}">✔</span> ${esc(f.title)}</div>
-      <div style="font-family:${MONO};font-size:10px;color:${C.mute};white-space:nowrap">${esc(when(f.at))}${f.commit ? ` · <span style="color:${C.ink}">${esc(f.commit)}</span>` : ''}</div>
+      <div style="color:${C.ink};font-size:13px;display:flex;gap:10px;align-items:baseline">${badge(f.status ?? 'recorded')} ${esc(f.title)}</div>
+      <div style="font-family:${MONO};font-size:10px;color:${C.mute};white-space:nowrap">${esc(when(f.at))}${f.branch ? ` · ${esc(f.branch)}` : ''}${f.commit ? ` @ <span style="color:${C.ink}">${esc(f.commit)}</span>` : ''}${f.mergeCommit ? ` → ${esc(f.mergeCommit)}` : ''}</div>
     </div>
     ${f.issue ? `<div style="color:${C.dim};margin-top:4px"><span style="color:${C.warn}">was</span> ${esc(f.issue)}</div>` : ''}
     ${f.solution ? `<div style="color:${C.dim};margin-top:2px"><span style="color:${C.good}">now</span> ${esc(f.solution)}</div>` : ''}
     <div style="display:flex;gap:18px;margin-top:8px;align-items:flex-start">
-      <div style="font-family:${MONO};font-size:10px;color:${C.mute}">before<br>${spark(f.before?.series, C.warn)}<br>${esc(f.before?.build ?? when(f.before?.from))}</div>
-      <div style="font-family:${MONO};font-size:10px;color:${C.mute}">after<br>${spark(f.after?.series, C.good)}<br>${esc(f.after?.build ?? when(f.after?.from))}</div>
+      <div style="font-family:${MONO};font-size:10px;color:${C.mute}">before<br>${spark(f.before?.series, C.warn)}<br>${esc(f.before?.build ?? (f.before ? when(f.before.from) : 'not measured yet'))}</div>
+      <div style="font-family:${MONO};font-size:10px;color:${C.mute}">after<br>${spark(f.after?.series, C.good)}<br>${esc(f.after?.build ?? (f.after ? when(f.after.from) : 'not measured yet'))}</div>
       <table style="font-family:${MONO};font-size:11px;color:${C.ink};border-collapse:collapse;margin-left:auto">
         <tr style="color:${C.mute};font-size:10px"><td></td><td style="text-align:right;padding:0 8px">before</td><td style="text-align:right">after</td></tr>
         ${row('frame p95', f.before?.p95Ms, f.after?.p95Ms, 'ms')}
@@ -154,7 +167,24 @@ function renderFixes(h) {
         ${row('hitches/h', f.before?.hitchesPerHour, f.after?.hitchesPerHour)}
         ${row('worst frame', f.before?.worstMs, f.after?.worstMs, 'ms')}
       </table>
-    </div></div>`).join('');
+    </div>
+    ${f.status === 'proposed' ? `<div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+      ${f.upToDate === false ? `<span style="font-size:10px;color:${C.warn}">behind ${esc(list?.main ?? 'main')} — rebase before merging</span>` : btn(f.id, 'merge', 'Merge', C.good)}
+      ${btn(f.id, 'reject', 'Reject', C.mute)}
+      <span data-fix-msg="${esc(f.id)}" style="font-size:10px;color:${C.warn}"></span></div>` : ''}
+  </div>`).join('');
+}
+
+function renderSettings(settings, list) {
+  const s = settings ?? { automation: 'propose' };
+  const opt = (v, label, help) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;cursor:pointer">
+      <input type="radio" name="sl-automation" value="${v}" ${s.automation === v ? 'checked' : ''} style="margin-top:3px">
+      <span><b style="color:${C.ink}">${label}</b><br><span style="color:${C.dim}">${help}</span></span></label>`;
+  return `${H('Automation')}
+    <div style="color:${C.dim};margin-bottom:6px">How far a Claude Code session goes on its own when it has a verified fix. Saved server-side in <code style="font-family:${MONO}">.sloptimize/settings.json</code>; sessions read it before acting.</div>
+    ${opt('propose', 'Propose', 'Branch + commit + ledger entry. You merge or reject from the Fixes tab.')}
+    ${opt('merge', 'Merge', 'Propose, then merge into main itself once its tests are green. A merge is always a merge commit of a branch based on current main — never a rewritten tree.')}
+    <div id="sl-settings-msg" style="font-size:11px;color:${C.mute};min-height:16px;margin-top:6px">${list && list.repo === false ? esc(list.error) : ''}</div>`;
 }
 
 function renderSession(host) {
@@ -216,11 +246,75 @@ export function createPanel(host) {
     }
     if (tab === 'session') { body.innerHTML = renderSession(host); const l = body.querySelector('#sl-list'); if (l) l.scrollTop = l.scrollHeight; return; }
     body.innerHTML = `<div style="color:${C.dim};padding:12px 0">loading the ledger…</div>`;
-    loadHistory().then((h) => {
+    if (tab === 'settings') {
+      Promise.all([loadSettings(), loadFixes()]).then(([st, list]) => {
+        if (!root || tab !== next) return;
+        body.innerHTML = renderSettings(st, list);
+        wireSettings();
+      });
+      return;
+    }
+    Promise.all([loadHistory(), tab === 'fixes' ? loadFixes() : null]).then(([h, list]) => {
       if (!root || (tab !== next)) return;
-      body.innerHTML = tab === 'timeline' ? renderTimeline(h) : renderFixes(h);
+      body.innerHTML = tab === 'timeline' ? renderTimeline(h) : renderFixes(h, list);
       if (tab === 'timeline') wireCrosshair(h);
+      if (tab === 'fixes') { wireFixButtons(); markSeen(list); }
     });
+  }
+
+  let fixesCache = null, settingsCache = null;
+  function loadFixes() {
+    if (fixesCache) return Promise.resolve(fixesCache);
+    if (!host.fixes) return Promise.resolve(null);
+    return Promise.resolve().then(() => host.fixes()).then((l) => { fixesCache = l; updateBadge(l); return l; }).catch(() => null);
+  }
+  function loadSettings() {
+    if (settingsCache) return Promise.resolve(settingsCache);
+    if (!host.settings) return Promise.resolve(null);
+    return Promise.resolve().then(() => host.settings()).then((s) => { settingsCache = s; return s; }).catch(() => null);
+  }
+  // ── the Fixes badge: proposals you have not looked at yet ──
+  function seenIds() { try { return new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch { return new Set(); } }
+  function markSeen(list) {
+    if (!list?.fixes) return;
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(list.fixes.map((f) => f.id).filter(Boolean).slice(0, 500))); } catch { /* storage may be unavailable */ }
+    updateBadge(list);
+  }
+  function updateBadge(list) {
+    const b = root?.querySelector('[data-tab="fixes"] [data-badge]');
+    if (!b) return;
+    const seen = seenIds();
+    const fresh = (list?.fixes ?? []).filter((f) => f.status === 'proposed' && !seen.has(f.id)).length;
+    b.textContent = fresh ? String(fresh) : '';
+    b.style.display = fresh ? 'inline-block' : 'none';
+  }
+  function wireFixButtons() {
+    for (const b of body.querySelectorAll('button[data-fix]')) {
+      b.onclick = () => {
+        const id = b.dataset.fix, action = b.dataset.action;
+        if (action === 'merge' && !window.confirm('Merge this fix into main?')) return;
+        const msg = body.querySelector(`[data-fix-msg="${CSS.escape(id)}"]`);
+        for (const x of body.querySelectorAll(`button[data-fix="${CSS.escape(id)}"]`)) x.disabled = true;
+        if (msg) { msg.style.color = C.dim; msg.textContent = `${action === 'merge' ? 'merging' : 'rejecting'}…`; }
+        Promise.resolve().then(() => host.fixAction(id, action)).then((r) => {
+          fixesCache = null; histCache = null;
+          if (r && r.error) { if (msg) { msg.style.color = C.warn; msg.textContent = r.error; } for (const x of body.querySelectorAll(`button[data-fix="${CSS.escape(id)}"]`)) x.disabled = false; return; }
+          show('fixes');
+        }).catch((e) => { if (msg) { msg.style.color = C.warn; msg.textContent = String(e?.message ?? e); } });
+      };
+    }
+  }
+  function wireSettings() {
+    for (const r of body.querySelectorAll('input[name="sl-automation"]')) {
+      r.onchange = () => {
+        const msg = body.querySelector('#sl-settings-msg');
+        if (msg) { msg.style.color = C.dim; msg.textContent = 'saving…'; }
+        Promise.resolve().then(() => host.saveSettings({ automation: r.value })).then((s) => {
+          settingsCache = s && !s.error ? s : null;
+          if (msg) { msg.style.color = s?.error ? C.warn : C.good; msg.textContent = s?.error ? s.error : `saved — automation: ${s.automation}`; }
+        }).catch((e) => { if (msg) { msg.style.color = C.warn; msg.textContent = String(e?.message ?? e); } });
+      };
+    }
   }
 
   function loadHistory() {
@@ -259,7 +353,8 @@ export function createPanel(host) {
       const tabs = el('div', `display:flex;gap:2px;border-bottom:1px solid ${C.rule};margin:0 0 6px`);
       tabs.setAttribute('role', 'tablist');
       for (const [k, label] of TABS) {
-        const b = el('button', `background:none;border:0;border-bottom:2px solid transparent;color:${C.mute};font:inherit;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px 6px;cursor:pointer;margin-bottom:-1px`, label);
+        const b = el('button', `background:none;border:0;border-bottom:2px solid transparent;color:${C.mute};font:inherit;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px 6px;cursor:pointer;margin-bottom:-1px`,
+          k === 'fixes' ? `${label} <span data-badge style="display:none;background:${C.accent};color:#06101a;border-radius:9px;padding:0 6px;font-size:10px;letter-spacing:0;vertical-align:1px"></span>` : label);
         b.dataset.tab = k; b.setAttribute('role', 'tab'); b.type = 'button';
         b.onclick = () => show(k);
         b.onfocus = () => { b.style.outline = `1px solid ${C.accent}`; b.style.outlineOffset = '-1px'; };
@@ -281,12 +376,13 @@ export function createPanel(host) {
       document.addEventListener('keydown', onKey, true);
       document.addEventListener('keyup', swallow, true);
       show(tab);
+      loadFixes();   // the badge counts unseen proposals whichever tab is open
       input.focus();
     },
     close: () => close(null),
     submit,
     isOpen: () => root !== null,
     /** Forget the folded ledger so the next open re-fetches it. */
-    refresh() { histCache = null; },
+    refresh() { histCache = null; fixesCache = null; settingsCache = null; },
   };
 }

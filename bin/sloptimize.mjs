@@ -174,6 +174,55 @@ if (cmd === 'hook-status') {
   process.exit(0);
 }
 
+// ── The fix loop, git only (src/proposals.mjs) ──────────────────────────────
+//   fix propose --title … [--issue … --solution … --files a,b --branch … --no-push]
+//   fix merge <id> · fix reject <id> · fixes [--json] · policy · settings --automation propose|merge
+const sub = args[1];
+if ((cmd === 'fix' && ['propose', 'merge', 'reject', 'list'].includes(sub)) || cmd === 'fixes' || cmd === 'policy' || cmd === 'settings') {
+  const P = await import('../src/proposals.mjs');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const REPO = get('--repo') ?? process.cwd();
+  const fail = (e) => { console.error(`sloptimize ${cmd}${sub ? ` ${sub}` : ''}: ${e.message}`); process.exit(e.message === P.NOT_A_REPO ? 3 : 1); };
+  try {
+    if (cmd === 'policy') {
+      const s = P.readSettings(DIR);
+      out({ ...s, repo: P.isGitRepo(REPO) }, `automation: ${s.automation}${P.isGitRepo(REPO) ? '' : `\n${P.NOT_A_REPO}`}`);
+      process.exit(0);
+    }
+    if (cmd === 'settings') {
+      const level = get('--automation');
+      const s = level ? P.writeSettings(DIR, { automation: level }) : P.readSettings(DIR);
+      out(s, `automation: ${s.automation}`);
+      process.exit(0);
+    }
+    if (cmd === 'fixes' || sub === 'list') {
+      const l = P.listFixes(REPO, DIR);
+      if (json) { out(l); process.exit(0); }
+      if (!l.repo) { console.log(l.error); process.exit(3); }
+      if (l.fixes.length === 0) { console.log('no proposals yet — `sloptimize fix propose --title "…"` records one'); process.exit(0); }
+      for (const f of l.fixes) console.log(`  ${f.status.padEnd(9)} ${f.at.slice(0, 16)}  ${f.title}${f.branch ? `  [${f.branch} @ ${f.commit}${f.upToDate === false ? ', behind main' : ''}]` : ''}  id=${f.id}`);
+      process.exit(0);
+    }
+    if (sub === 'propose') {
+      if (!get('--title')) { console.error('sloptimize fix propose: --title is required'); process.exit(2); }
+      const { buildFix } = await import('../src/history.js');
+      const records = readJsonl('perf.jsonl', Infinity);
+      const fix = P.proposeFix(REPO, DIR, {
+        title: get('--title'), issue: get('--issue'), solution: get('--solution'), branch: get('--branch'),
+        files: get('--files')?.split(','), push: !args.includes('--no-push'),
+        measure: () => { const f = buildFix(records, { title: get('--title'), before: get('--before'), after: get('--after') }); return { before: f.before, after: f.after }; },
+      });
+      out(fix, `proposed: ${fix.title}\n  branch ${fix.branch} @ ${fix.commit}${fix.pushed ? ' (pushed)' : ''}\n  id ${fix.id}${fix.before ? '' : '\n  (no measured before/after yet — the numbers land when it is played)'}`);
+      process.exit(0);
+    }
+    const id = args[2];
+    if (!id) { console.error(`sloptimize fix ${sub}: <id> is required (see \`sloptimize fixes\`)`); process.exit(2); }
+    const r = sub === 'merge' ? P.mergeFix(REPO, DIR, id) : P.rejectFix(REPO, DIR, id);
+    out(r, `${r.status}: ${id}${r.mergeCommit ? ` → ${r.mergeCommit}` : ''}${r.pushed ? ' (pushed)' : ''}`);
+    process.exit(0);
+  } catch (e) { fail(e); }
+}
+
 if (cmd === 'history' || cmd === 'fix') {
   // The timeline and the fix ledger (SPEC §8.5). `history` folds perf.jsonl
   // into buckets + per-build windows; `fix` appends one report to
