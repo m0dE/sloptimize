@@ -1,5 +1,9 @@
 # sloptimize
 
+sloptimize optimizes your game's rendering performance by finding the
+bottlenecks and reporting them to Claude Code to fix — all while you just play
+the game. No action is required on your end.
+
 **The agent-native profiler for browser games.** Your coding agent cannot
 watch a game run — it will never feel a hitch, cannot screenshot 60 times a
 second, and cannot verify a "fix" it cannot measure. sloptimize gives the
@@ -36,14 +40,22 @@ game/browser ──► incidents (auto-detected, classified, clustered)
               perf.jsonl              incident records, append-only
               clusters.json           one cause = one cluster
               census.json             per-entity cost census (tier 1+)
+              fixes.jsonl             the fix ledger: issue → solution, commit, MEASURED before/after
               budgets.json            YOUR limits (the one human-authored file)
                     │
         ┌───────────┴───────────┐
         ▼                       ▼
-   Claude Code (agent)     debugger overlay (human, OPTIONAL)
-   woken on new incidents;  incident list + one-line "what
-   reads, fixes, verifies   happened" notes, forwarded to the agent
+   Claude Code (agent)     in-game debugger (human, OPTIONAL)
+   woken on new incidents;  Session · Timeline · Fixes — this tab's
+   reads, fixes, verifies,  incidents + a note box; p95/draw calls/
+   records each fix         hitches over time; every fix's before/after
 ```
+
+Showing the work is part of the loop: after a verified fix the agent runs
+`sloptimize fix --title … --issue … --solution … --commit <sha>`, and the
+record's before/after are two **measured** windows of the ledger (previous
+build vs new build) — not numbers the agent typed. The debugger's Fixes tab
+and `sloptimize history` read that ledger back.
 
 ## Install
 
@@ -144,8 +156,8 @@ That carries three surfaces into every session:
   never quote timing from a software regime.
 - **Prompt hook** — silent by default; when a NEW keyframe or budget breach
   exists, up to five lines land in the agent's context on your next prompt.
-- **MCP server** — `get_report`, `check_budgets`, `attach_start`,
-  `attach_stop` for the live tier.
+- **MCP server** — `get_report`, `check_budgets`, `get_history`,
+  `record_fix`, and `attach_start` / `attach_stop` for the live tier.
 
 For instant wakeups (the agent starts fixing ~20s after the stutter, no
 prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
@@ -172,6 +184,10 @@ That exit code is what lets an agent self-iterate in a loop that terminates.
 sloptimize report        current profile + incidents + census hints
 sloptimize check         budgets → exit code (--counters-only for CI)
 sloptimize census        per-entity costs + closed-vocabulary hints
+sloptimize history       the timeline: p95 / draw calls / hitches per time
+                         bucket and per build, plus the fix ledger
+sloptimize fix           record a verified fix (title, issue, solution,
+                         commit) with MEASURED before/after windows
 sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize watch         the push channel: one stdout line per usermark /

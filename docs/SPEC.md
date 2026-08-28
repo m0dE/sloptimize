@@ -560,6 +560,40 @@ skill forbids the agent from re-recording a golden to make a failure pass,
 and a re-recorded golden is a loud artifact in any review of `.sloptimize/`
 timestamps. The gate complements — never replaces — the project's own tests.
 
+### 8.5 The timeline and the fix ledger — showing the work
+
+The ledger already holds the whole history of a deployment (every line
+self-sufficient: `build`, `phase`, timestamp), so "has sloptimize actually
+made the game faster" must be answerable by FOLDING it, never by a number
+someone typed. Three surfaces, one fold (`src/history.js`, pure, shared by
+node and the page):
+
+- **Timeline** — `perf.jsonl` in equal time buckets: frame p95 and median,
+  draw calls / triangles / programs (medians of the heartbeats, which carry
+  the counters for this reason), hitch count and worst frame per bucket,
+  and the build that ran. Plus one measured window per build. CLI:
+  `sloptimize history [--json] [--buckets N]`; MCP: `get_history`.
+- **Fix ledger** — `.sloptimize/fixes.jsonl`, append-only, one record per
+  verified fix: `title`, `issue`, `solution`, `commit`, `files`, `at`, and
+  `before`/`after` — each a **measured window** of the ledger (the previous
+  build vs the latest build with evidence by default; or any build name or
+  `<ISO>..<ISO>` range) carrying the window summary and a p95 series. CLI:
+  `sloptimize fix --title … [--issue … --solution … --commit … --before …
+  --after …]`; MCP: `record_fix`. The doctrine's last step.
+- **The in-game debugger** (`src/panel.js`, `createPanel`) — the human's
+  Ctrl+F12 modal, three tabs: **Session** (this tab's incidents + the note
+  box), **Timeline** (the strips above on one time axis, build boundaries
+  marked, a shared crosshair), **Fixes** (one card per fix: date, commit,
+  was → now, before/after sparklines and deltas). The host serves the ledger
+  back over a dev-gated GET (the reference: `/api/sloptimize/ledger`, the
+  2MB tail of `perf.jsonl` + `fixes.jsonl`); the page folds it.
+
+Honesty rules, inherited: a bucket with no evidence draws a gap, never a
+zero; a spike past a strip's ceiling (1.5 × p90) is drawn at the ceiling
+with a caret and read out at its real value; one series per strip, never a
+dual axis; every metric shown is lower-is-better and the delta is colored
+by direction only.
+
 ---
 
 ## 9. Anti-gaming posture

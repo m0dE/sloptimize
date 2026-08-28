@@ -1,0 +1,127 @@
+// The timeline and the fix ledger (SPEC §8.5): perf.jsonl folded into time
+// buckets and per-build windows, and a fix record whose before/after are
+// MEASURED windows of that same ledger — never a typed-in number.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildHistory, summarizeWindow, buildFix, latestBuilds } from '../src/history.js';
+
+const T0 = Date.parse('2026-01-01T00:00:00.000Z');
+const iso = (min) => new Date(T0 + min * 60_000).toISOString();
+const beat = (min, p95, extra = {}) => ({ type: 'heartbeat', at: iso(min), medianFrameMs: 8, p95Ms: p95, regime: 'hardware', ...extra });
+const hitch = (min, ms, guess = 'long-script', build) => ({
+  type: 'hitch', at: iso(min), frameMs: ms, medianMs: 8, insideRenderMs: 0,
+  classification: [{ guess, confidence: 'low', evidence: 'e' }], build,
+});
+
+// Two builds: v1 for the first hour (bad: p95 120, four hitches, worst 900ms),
+// v2 for the second hour (good: p95 12, one small hitch).
+function ledger() {
+  const recs = [];
+  for (let m = 0; m < 60; m += 1) recs.push(beat(m, 120, { build: 'v1', calls: 900, triangles: 1e6, programs: 40 }));
+  recs.push(hitch(5, 300, 'shader-compile', 'v1'), hitch(20, 900, 'long-script', 'v1'), hitch(21, 400, 'long-script', 'v1'), hitch(50, 150, 'long-script', 'v1'));
+  for (let m = 60; m < 120; m += 1) recs.push(beat(m, 12, { build: 'v2', calls: 300, triangles: 6e5, programs: 41 }));
+  recs.push(hitch(90, 40, 'long-script', 'v2'));
+  recs.push({ type: 'arm-probe', at: iso(60), build: 'v2' });
+  return recs;
+}
+
+test('summarizeWindow: medians of the heartbeats, hitch count/rate/worst, top guess; absent when unmeasured', () => {
+  const s = summarizeWindow(ledger(), T0, T0 + 60 * 60_000 - 1);   // bounds are inclusive
+  assert.equal(s.beats, 60);
+  assert.equal(s.p95Ms, 120);
+  assert.equal(s.medianMs, 8);
+  assert.equal(s.calls, 900);
+  assert.equal(s.programs, 40);
+  assert.equal(s.hitches, 4);
+  assert.equal(s.hitchesPerHour, 4);
+  assert.equal(s.worstMs, 900);
+  assert.equal(s.topGuess, 'long-script');
+  assert.equal(s.regime, 'hardware');
+  // A window with beats that carry no counters says nothing about counters.
+  const bare = summarizeWindow([beat(0, 10), beat(1, 10)], T0, T0 + 120_000);
+  assert.equal(bare.calls, undefined);
+  assert.equal(bare.hitches, 0);
+  assert.equal(bare.worstMs, undefined);
+  // An empty window is not zeros.
+  const empty = summarizeWindow([], T0, T0 + 1);
+  assert.equal(empty.beats, 0);
+  assert.equal(empty.p95Ms, undefined);
+});
+
+test('buildHistory: equal time buckets carry frame/counter medians, hitch spikes and the build that ran', () => {
+  const h = buildHistory(ledger(), { buckets: 12 });
+  assert.equal(h.buckets.length, 12);
+  assert.equal(h.span.from, iso(0));
+  assert.equal(h.span.to, iso(119));
+  const b0 = h.buckets[0], b2 = h.buckets[2], b6 = h.buckets[6];
+  assert.equal(b0.build, 'v1');
+  assert.equal(b0.p95Ms, 120);
+  assert.equal(b0.calls, 900);
+  assert.equal(b0.hitches, 1);
+  assert.equal(b0.worstMs, 300);
+  assert.equal(b0.worstGuess, 'shader-compile');
+  assert.equal(b2.hitches, 2);       // minutes 20 and 21
+  assert.equal(b2.worstMs, 900);
+  assert.equal(b6.build, 'v2');
+  assert.equal(b6.p95Ms, 12);
+  assert.equal(b6.calls, 300);
+  assert.equal(b6.hitches, 0);
+  assert.equal(b6.worstMs, undefined);
+  // Builds, in order of first appearance, each with its measured window.
+  assert.deepEqual(h.builds.map((b) => b.build), ['v1', 'v2']);
+  assert.equal(h.builds[0].hitches, 4);
+  assert.equal(h.builds[1].p95Ms, 12);
+  assert.equal(h.builds[0].from, iso(0));
+  assert.equal(h.builds[1].to, iso(119));
+});
+
+test('buildHistory: an empty or beat-less ledger yields an empty timeline, not a crash', () => {
+  assert.deepEqual(buildHistory([]).buckets, []);
+  const h = buildHistory([{ type: 'arm-probe', at: iso(0) }]);
+  assert.equal(h.buckets.length, 0);
+  assert.equal(h.builds.length, 0);
+});
+
+test('latestBuilds: the newest build with evidence and the one before it, oldest first', () => {
+  assert.deepEqual(latestBuilds(ledger()), ['v1', 'v2']);
+  // A build seen only through an arm-probe (a tab that never fed) does not count.
+  assert.deepEqual(latestBuilds([...ledger(), { type: 'arm-probe', at: iso(130), build: 'v3' }]), ['v1', 'v2']);
+  assert.deepEqual(latestBuilds([beat(0, 1, { build: 'only' })]), ['only']);
+  assert.deepEqual(latestBuilds([]), []);
+});
+
+test('buildFix: before/after default to the previous vs latest build, measured from the ledger', () => {
+  const fix = buildFix(ledger(), { title: 'Instance the town', issue: 'programs +40 on launch', solution: 'one InstancedMesh', commit: 'abc1234', now: iso(130) });
+  assert.equal(fix.type, 'fix');
+  assert.equal(fix.at, iso(130));
+  assert.equal(fix.commit, 'abc1234');
+  assert.equal(fix.before.build, 'v1');
+  assert.equal(fix.after.build, 'v2');
+  assert.equal(fix.before.p95Ms, 120);
+  assert.equal(fix.after.p95Ms, 12);
+  assert.equal(fix.before.calls, 900);
+  assert.equal(fix.after.calls, 300);
+  // A build's window runs first-evidence..last-evidence (59 min here).
+  assert.equal(fix.before.hitchesPerHour, 4.1);
+  assert.equal(fix.after.hitchesPerHour, 1);
+  // The sparkline the card draws: p95 per bucket inside each window.
+  assert.ok(fix.before.series.length > 0 && fix.after.series.length > 0);
+  assert.ok(Math.max(...fix.before.series) > Math.max(...fix.after.series));
+});
+
+test('buildFix: explicit windows by build name or by time; a window with no evidence is refused', () => {
+  const byBuild = buildFix(ledger(), { title: 't', before: 'v1', after: 'v2', now: iso(130) });
+  assert.equal(byBuild.before.build, 'v1');
+  const byTime = buildFix(ledger(), { title: 't', before: `${iso(0)}..${iso(30)}`, after: `${iso(60)}..${iso(120)}`, now: iso(130) });
+  assert.equal(byTime.before.build, undefined);
+  assert.equal(byTime.before.from, iso(0));
+  assert.equal(byTime.before.hitches, 3);
+  assert.throws(() => buildFix(ledger(), { title: 't', before: 'nope', after: 'v2' }), /no evidence for before window "nope"/);
+  assert.throws(() => buildFix([beat(0, 1, { build: 'x' })], { title: 't' }), /needs two builds/);
+});
+
+test('buildHistory carries fixes through, newest first, clipped to their own fields', () => {
+  const fix = buildFix(ledger(), { title: 'a', now: iso(130) });
+  const h = buildHistory(ledger(), { fixes: [fix, { ...fix, at: iso(140), title: 'b' }] });
+  assert.deepEqual(h.fixes.map((f) => f.title), ['b', 'a']);
+});

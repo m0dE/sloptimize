@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ============================================================
-// sloptimize CLI — report | check | census | doctor  (SPEC §8.1)
+// sloptimize CLI — report | check | census | history | fix | doctor  (SPEC §8.1)
 // ============================================================
 // Files-first: every verb reads `.sloptimize/` in the cwd (or --dir) and
 // says what it cannot know instead of guessing. Exit codes are API:
@@ -174,6 +174,46 @@ if (cmd === 'hook-status') {
   process.exit(0);
 }
 
+if (cmd === 'history' || cmd === 'fix') {
+  // The timeline and the fix ledger (SPEC §8.5). `history` folds perf.jsonl
+  // into buckets + per-build windows; `fix` appends one report to
+  // fixes.jsonl whose before/after are MEASURED windows of that ledger —
+  // the agent names the issue, the solution and the commit; the numbers
+  // come from the recorder, never from the agent.
+  const { buildHistory, buildFix } = await import('../src/history.js');
+  const records = readJsonl('perf.jsonl', Infinity);
+  const fixes = readJsonl('fixes.jsonl', Infinity);
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const fmt = (v, unit = '') => (v === undefined ? '—' : `${v}${unit}`);
+  const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${fmt(s.hitchesPerHour)}/h, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
+  if (cmd === 'fix') {
+    let commit = get('--commit');
+    if (!commit) {
+      try { const { execSync } = await import('node:child_process'); commit = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { /* not a repo */ }
+    }
+    if (!get('--title')) { console.error('sloptimize fix: --title is required'); process.exit(2); }
+    let fix;
+    try {
+      fix = buildFix(records, { title: get('--title'), issue: get('--issue'), solution: get('--solution'), commit,
+        files: get('--files')?.split(','), before: get('--before'), after: get('--after') });
+    } catch (e) { console.error(`sloptimize fix: ${e.message}`); process.exit(4); }
+    const { appendFileSync, mkdirSync } = await import('node:fs');
+    mkdirSync(DIR, { recursive: true });
+    appendFileSync(join(DIR, 'fixes.jsonl'), JSON.stringify(fix) + '\n');
+    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}`);
+    process.exit(0);
+  }
+  const h = buildHistory(records, { fixes, buckets: Number(get('--buckets')) || 24 });
+  if (json) { out(h); process.exit(0); }
+  if (!h.span) { console.log('no measured records in perf.jsonl yet'); process.exit(4); }
+  console.log(`history ${h.span.from} → ${h.span.to}  (${h.builds.length} builds, ${h.fixes.length} fixes)`);
+  for (const b of h.builds) console.log(`  build ${b.build.padEnd(16)} ${b.from.slice(0, 16)}  ${line(b)}`);
+  console.log('  buckets:');
+  for (const b of h.buckets) console.log(`  ${b.from.slice(5, 16)}  p95 ${String(fmt(b.p95Ms)).padStart(7)}  calls ${String(fmt(b.calls)).padStart(5)}  hitches ${String(b.hitches).padStart(3)}  ${b.worstMs ? `worst ${b.worstMs}ms ${b.worstGuess ?? ''}` : ''}`);
+  for (const f of h.fixes) console.log(`  ✔ ${f.at.slice(0, 10)} ${f.title}${f.commit ? ` (${f.commit})` : ''}: p95 ${fmt(f.before.p95Ms, 'ms')} → ${fmt(f.after.p95Ms, 'ms')}, hitches/h ${fmt(f.before.hitchesPerHour)} → ${fmt(f.after.hitchesPerHour)}`);
+  process.exit(0);
+}
+
 if (cmd === 'watch') {
   // The push channel (SPEC §8.1.1): tail every --dir's perf.jsonl and print
   // one line per record an agent should wake for. Never exits — arm it as a
@@ -202,5 +242,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|check|census|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]');
+console.log('usage: sloptimize <report|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>]');
 process.exit(2);

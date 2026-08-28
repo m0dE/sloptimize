@@ -24,6 +24,12 @@ The playbook, in order:
    `regime: hardware`; never quote a timing from a `software` regime.
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
+7. Record the fix once the new build has ledger evidence:
+   `sloptimize fix --title "…" --issue "…" --solution "…" --commit <sha>`
+   (MCP: `record_fix`). The before/after are measured windows of the
+   ledger — previous build vs new build by default — never numbers you
+   type. `sloptimize history` and the debugger's Fixes tab show it; that is
+   how the human sees what the loop bought.
 
 Push channel: if a `sloptimize watch` Monitor is armed in this session,
 its lines (★ usermark / ⚡ hitch / ⏳ gpu / ◌ feed quiet) arrive as

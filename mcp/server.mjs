@@ -24,6 +24,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'max incident records (default 20)' } } } },
   { name: 'check_budgets', description: 'Check the measured profile against .sloptimize/budgets.json. Returns per-budget verdicts; "fast enough" as data.',
     inputSchema: { type: 'object', properties: {} } },
+  { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
+    inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
+  { name: 'record_fix', description: 'Append a fix report to .sloptimize/fixes.jsonl: title, issue, solution, commit, and MEASURED before/after windows of the ledger (default: the previous build vs the latest build with evidence; or name a build / an <ISO>..<ISO> range). Call this after verifying a perf fix — never with numbers of your own.',
+    inputSchema: { type: 'object', properties: { title: { type: 'string' }, issue: { type: 'string' }, solution: { type: 'string' }, commit: { type: 'string' },
+      files: { type: 'array', items: { type: 'string' } }, before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
@@ -56,6 +61,18 @@ async function callTool(name, args = {}) {
       verdict: read[k] === undefined ? 'unmeasured' : read[k] > b ? `over by ${(read[k] / b).toFixed(1)}x` : 'inside' }));
     return { regime: profile.regime, results, breached: results.filter((r) => String(r.verdict).startsWith('over')).length };
   }
+  if (name === 'get_history') {
+    const { buildHistory } = await import('../src/history.js');
+    return buildHistory(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), buckets: args.buckets ?? 24 });
+  }
+  if (name === 'record_fix') {
+    const { buildFix } = await import('../src/history.js');
+    const { appendFileSync, mkdirSync } = await import('node:fs');
+    const fix = buildFix(readJsonl('perf.jsonl', Infinity), args);
+    mkdirSync(DIR(), { recursive: true });
+    appendFileSync(join(DIR(), 'fixes.jsonl'), JSON.stringify(fix) + '\n');
+    return { ok: true, fix };
+  }
   if (name === 'attach_start') {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
@@ -85,7 +102,7 @@ rl.on('line', (line) => {
     try {
       if (msg.method === 'initialize') {
         reply(msg.id, { protocolVersion: msg.params?.protocolVersion ?? '2024-11-05',
-          capabilities: { tools: {} }, serverInfo: { name: 'sloptimize', version: '0.2.0' } });
+          capabilities: { tools: {} }, serverInfo: { name: 'sloptimize', version: '0.3.0' } });
       } else if (msg.method === 'tools/list') {
         reply(msg.id, { tools: TOOLS });
       } else if (msg.method === 'tools/call') {

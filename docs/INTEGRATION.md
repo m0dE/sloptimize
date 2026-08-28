@@ -38,6 +38,23 @@ GPU-process wrappers):
 if (ctrlF11) { const mark = rec.usermark({ windowMs: 5000, note, world }); }
 ```
 
+The debugger itself ships in the package — `createPanel` (Session ·
+Timeline · Fixes + the note box), dependency-free, inline-styled. Capture
+first, then open it; it swallows every key at capture phase while open and
+calls `onNote` exactly once on close:
+
+```js
+import { createPanel } from 'sloptimize';
+const panel = createPanel({
+  incidents: () => sessionIncidents,               // rows the recorder drained this tab
+  feed: () => ({ state: 'ok' }),                   // or { state: 'dark', reason, buffered }
+  history: () => fetch('/api/sloptimize/ledger').then((r) => r.json())
+    .then(({ perf, fixes }) => ({ records: parseJsonl(perf), fixes: parseJsonl(fixes) })),
+  onNote: (note) => { if (note) { mark.note = `f12: ${note}`; post('records', [mark]); } },
+});
+panel.open();
+```
+
 ## 2. The sink (files on disk)
 
 - **Vite host**: the plugin (planned surface) lands payloads in `.sloptimize/`.
@@ -63,11 +80,21 @@ if (ctrlF11) { const mark = rec.usermark({ windowMs: 5000, note, world }); }
   accepts `phase` per `frame()` sample and stamps hitches at mint time;
   backfill the rest at post time. A record read in isolation weeks later
   should not depend on the arm-probe that happened to precede it.
-- **Heartbeat**: post a tiny `{type:'heartbeat', medianFrameMs, p95Ms}`
-  ledger line once a minute while armed (directly — never through the
-  recorder, so it costs none of the incident budget). It makes a quiet file
-  MEAN dark-or-closed instead of idle; `sloptimize hook-status` warns once
-  when the ledger goes stale (>45min).
+- **Heartbeat**: post a tiny `{type:'heartbeat', medianFrameMs, p95Ms,
+  calls, triangles, programs}` ledger line once a minute while armed
+  (directly — never through the recorder, so it costs none of the incident
+  budget). It makes a quiet file MEAN dark-or-closed instead of idle;
+  `sloptimize hook-status` warns once when the ledger goes stale (>45min).
+  The counters ride the beat because `profile.json` is overwritten every
+  2s — without them the ledger has no draw-call HISTORY, and the debugger's
+  Timeline cannot draw "calls over time".
+- **Ledger read-back** (for the debugger's Timeline/Fixes tabs): one
+  dev-gated `GET /api/sloptimize/ledger` → `{ perf, fixes }` — the last
+  ~2MB of `perf.jsonl` (first partial line dropped) and all of
+  `fixes.jsonl`, as raw JSONL strings. Same gate as the ingest, 404
+  otherwise. The page folds it with sloptimize's own `history.js`; the
+  server stays a file reader (mecharoyale: `readSloptimizeLedger`, ~20
+  lines + tests).
 - **GPU-settle verdicts**: if your boot holds its reveal on
   `queue.onSubmittedWorkDone()` (it should — pipeline compiles bill the
   first submit that uses them, invisibly to every CPU-side recorder), post

@@ -37,9 +37,13 @@ that:
   first frame after refocus) — throttled-tab gaps must never classify as
   hitches.
 - Bind a keyframe chord (Ctrl+F12 recommended) AND a small clickable chip:
-  capture the trailing 5s FIRST, then ask for the one-line note.
+  capture the trailing 5s FIRST, then open the package's debugger
+  (`createPanel` — Session · Timeline · Fixes + the note box) and post the
+  keyframe only if a note comes back.
 - Stamp `build` and `phase` on every posted record.
-- Post a `{type:'heartbeat'}` ledger line once a minute while armed.
+- Post a `{type:'heartbeat', medianFrameMs, p95Ms, calls, triangles,
+  programs}` ledger line once a minute while armed — the counters are the
+  Timeline's draw-call history.
 
 ## 3. Activation — MUST NOT gate on hostname
 
@@ -56,7 +60,9 @@ knows what it is.
   `{kind: 'profile'|'records'|'census', payload}` → writes
   `.sloptimize/profile.json`, appends `perf.jsonl`, writes `census.json`.
   Refuse with a plain 404 when the dev switch is off — identical to an
-  unknown route. Prefer arming by topology (the presence of
+  unknown route. Beside it, one dev-gated `GET /api/sloptimize/ledger` →
+  `{perf, fixes}` (the ~2MB tail of `perf.jsonl` + all of `fixes.jsonl`,
+  raw JSONL) for the debugger's history tabs. Prefer arming by topology (the presence of
   `.sloptimize/budgets.json` in the server cwd) with env overrides, over
   a bare env flag someone must remember.
 - **MUST NOT die silently**: once armed, a refused or failed post flips

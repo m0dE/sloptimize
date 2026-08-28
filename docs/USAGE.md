@@ -41,8 +41,17 @@ game tab ──POST──► game server ──writes──► .sloptimize/{prof
    - type one line ("huge stutter when the buildings loaded") + Enter →
      keyframe + note land in the ledger;
    - Esc or just closing → you were only looking; nothing is minted.
-   The overlay also shows the session's incident list — every row already
-   reached the ledger when it happened.
+   The debugger has three tabs (← → switch them):
+   - **Session** — this tab's incident list; every row already reached the
+     ledger when it happened.
+   - **Timeline** — the deployment's history: frame p95, draw calls and
+     hitch spikes on one time axis, build boundaries dashed, and a
+     "now vs first build" line. Hover a bucket for its numbers. A gap is
+     "nothing measured then", never zero; a caret is a spike past the
+     strip's ceiling (hover reads the real value).
+   - **Fixes** — what sloptimize + Claude Code changed and what it bought:
+     one card per recorded fix — date, commit, was → now, and the measured
+     before/after (p95, draw calls, hitches/h, worst frame) sparklined.
 4. **Go to a Claude Code session and type anything.** The evidence arrives
    attached to that prompt. That's the whole handoff.
 
@@ -114,8 +123,29 @@ anyone else.
 npx sloptimize report --dir <game>/.sloptimize   # profile + incidents
 npx sloptimize check  --dir <game>/.sloptimize   # budgets → exit 0/1/4
 npx sloptimize census --dir <game>/.sloptimize   # per-entity costs
+npx sloptimize history --dir <game>/.sloptimize  # p95/calls/hitches over time, per build + fixes
 npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 ```
+
+## Recording a fix (the agent's last step)
+
+Once a fix is verified — the new build is live and the ledger has evidence
+from it — the session records it:
+
+```bash
+npx sloptimize fix --dir <game>/.sloptimize \
+  --title "Launch: pipelines pre-warmed behind the reveal cover" \
+  --issue "programs +4 mid-launch, 1.4s freeze on first draw" \
+  --solution "compile the launch material set inside the hangar settle gate" \
+  --commit $(git rev-parse --short HEAD)
+```
+
+The before/after are **measured**: by default the previous build's window
+vs the latest build's (a fix ships as a build), or name them —
+`--before v1787863993876 --after v1787881270783`, or a range
+`--before 2026-08-27T20:00Z..2026-08-27T22:00Z`. The record lands in
+`fixes.jsonl`; the Fixes tab and `sloptimize history` read it back. From
+Claude Code the same verb is the MCP tool `record_fix`.
 
 Rules that keep the numbers honest (the doctrine skill enforces them):
 counters (calls/triangles/programs) compare exactly on any renderer;
