@@ -9,7 +9,8 @@
 // (Claude Code's Monitor primitive, INTEGRATION.md §5).
 //
 // Wakes: any usermark · an auto hitch ≥ minHitchMs (default 100) · a
-// gpu-settle that hit its cap without settling · any gpu-stall
+// gpu-settle that hit its cap without settling · a warm run whose worst
+// batch ≥ minHitchMs (with its per-batch builds) · any gpu-stall
 // record · the feed going quiet (> staleMin without a record) and coming
 // back. Silent: heartbeats, arm-probes, sub-threshold hitches.
 //
@@ -44,6 +45,14 @@ export function wakeLine(rec, dir, opts = {}) {
       // the cover) — the report's business. Only a cap hit is an incident.
       if (rec.settled) return null;
       return `sloptimize ⏳ gpu-settle ${rec.tag} ${rec.ms}ms NOT settled (cap hit) @ ${rec.at} ${ctx} ${where}`;
+    case 'warm': {
+      // A warm run whose worst batch crossed the hitch bar: the sweep IS the
+      // freeze, and the per-batch builds say whether one build cost that or
+      // the batcher packed many into one task.
+      if (!(rec.worstBatchMs >= minHitchMs)) return null;
+      const built = Array.isArray(rec.batchBuilt) && rec.batchBuilt.length ? ` builds/batch=[${rec.batchBuilt.join(',')}]` : '';
+      return `sloptimize 🔥 warm ${rec.tag} (${rec.kind}, budget ${rec.budgetMs ?? 'atomic'}ms): ${rec.keys} key(s) in ${rec.batches} batch(es), worst ${round(rec.worstBatchMs)}ms${built}${rec.costliest ? ` — ${rec.costliest}` : ''} @ ${rec.at} ${ctx} ${where}`;
+    }
     case 'gpu-stall':
       return `sloptimize ⏳ gpu-stall ${rec.queueDoneMs}ms @ ${rec.at} → ${cls(rec.classification)} ${ctx} ${where}`;
     default:
