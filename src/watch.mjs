@@ -50,6 +50,9 @@ export function wakeLine(rec, dir, opts = {}) {
       // freeze, and the per-batch builds say whether one build cost that or
       // the batcher packed many into one task.
       if (!(rec.worstBatchMs >= minHitchMs)) return null;
+      // A warm in a hidden/unfocused tab is not an incident: no frame was
+      // drawn around it, and its wall clock is the browser's throttling.
+      if (rec.hidden === true) return null;
       const built = Array.isArray(rec.batchBuilt) && rec.batchBuilt.length ? ` builds/batch=[${rec.batchBuilt.join(',')}]` : '';
       return `sloptimize 🔥 warm ${rec.tag} (${rec.kind}, budget ${rec.budgetMs ?? 'atomic'}ms): ${rec.keys} key(s) in ${rec.batches} batch(es), worst ${round(rec.worstBatchMs)}ms${built}${rec.costliest ? ` — ${rec.costliest}` : ''} @ ${rec.at} ${ctx} ${where}`;
     }

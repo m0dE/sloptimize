@@ -44,6 +44,7 @@ test('wakeLine: usermark, big hitch, capped gpu-settle, gpu-stall wake; heartbea
   const warm = { type: 'warm', at: 'T', kind: 'batched', tag: 'post', budgetMs: 8, keys: 12, batches: 5, worstBatchMs: 706, batchBuilt: [0, 1, 4, 4, 3], costliest: '706ms entity-pool-blend', phase: 'launch:depart' };
   assert.match(wakeLine(warm, 'D'), /🔥 warm post \(batched, budget 8ms\): 12 key\(s\) in 5 batch\(es\), worst 706ms builds\/batch=\[0,1,4,4,3\] — 706ms entity-pool-blend/);
   assert.equal(wakeLine({ ...warm, worstBatchMs: 40 }, 'D'), null);
+  assert.equal(wakeLine({ ...warm, worstBatchMs: 9049, hidden: true }, 'D'), null);   // background tab: nobody watched
   assert.equal(wakeLine({ type: 'heartbeat', at: 'T' }, 'D'), null);
   assert.equal(wakeLine({ type: 'arm-probe', at: 'T' }, 'D'), null);
 });
