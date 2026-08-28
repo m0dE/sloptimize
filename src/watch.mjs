@@ -38,7 +38,7 @@ export function wakeLine(rec, dir, opts = {}) {
     }
     case 'hitch':
       if (!(rec.frameMs >= minHitchMs)) return null;
-      return `sloptimize ⚡ hitch ${round(rec.frameMs)}ms (median ${rec.medianMs}ms, ${round(rec.insideRenderMs)}ms in render) @ ${rec.at} → ${cls(rec.classification)} ${ctx} ${where}`;
+      return `sloptimize ⚡ hitch ${round(rec.frameMs)}ms (median ${rec.medianMs}ms, ${round(rec.insideRenderMs)}ms in render) @ ${rec.at} → ${cls(rec.classification)}${mints(rec)} ${ctx} ${where}`;
     case 'gpu-settle':
       // A settled wait is the verification channel (the freeze stayed behind
       // the cover) — the report's business. Only a cap hit is an incident.
@@ -49,6 +49,18 @@ export function wakeLine(rec, dir, opts = {}) {
     default:
       return null;
   }
+}
+
+/** The mints a hitch carries, each with WHY it minted when the record says
+ *  (`changed`: the cache-key parts that moved since that material's previous
+ *  mint; `[]` = same key compiled again; absent = first mint). */
+function mints(rec) {
+  if (!Array.isArray(rec.mints) || rec.mints.length === 0) return '';
+  const one = (m) => {
+    const why = Array.isArray(m.changed) ? (m.changed.length ? ` changed:${m.changed.join(',')}` : ' re-minted:same-key') : '';
+    return `${m.material}@${m.object}${why}`;
+  };
+  return ` mints=[${rec.mints.map(one).join('; ')}]`;
 }
 
 function round(n) { return typeof n === 'number' ? +n.toFixed(1) : n; }

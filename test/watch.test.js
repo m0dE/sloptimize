@@ -30,6 +30,12 @@ test('wakeLine: usermark, big hitch, capped gpu-settle, gpu-stall wake; heartbea
   assert.match(wakeLine(mark, 'D'), /★ usermark "huge stutter".*725ms → long-script/);
   assert.match(wakeLine(hitch(120), 'D'), /hitch 120ms.*long-script/);
   assert.equal(wakeLine(hitch(99), 'D'), null);
+  const minted = { ...hitch(300), mints: [
+    { material: 'house-dark', object: 'Mesh', ms: 0.3, changed: ['env', 'ctx'] },
+    { material: 'launch-booster-lamp', object: 'Mesh', ms: 0.2, changed: [] },
+    { material: 'rig-kit-solid', object: 'Mesh', ms: 0.1 },
+  ] };
+  assert.match(wakeLine(minted, 'D'), /mints=\[house-dark@Mesh changed:env,ctx; launch-booster-lamp@Mesh re-minted:same-key; rig-kit-solid@Mesh\]/);
   assert.equal(wakeLine(hitch(120), 'D', { minHitchMs: 200 }), null);
   assert.match(wakeLine({ type: 'gpu-settle', at: 'T', tag: 'hangar-reveal', ms: 3000, settled: false }, 'D'), /gpu-settle hangar-reveal 3000ms NOT settled/);
   // A settled wait — however long — is verification evidence, not an incident.
