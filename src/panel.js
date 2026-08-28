@@ -266,8 +266,9 @@ export function createPanel(host) {
         b.onblur = () => { b.style.outline = 'none'; };
         tabs.appendChild(b);
       }
-      const brand = el('span', `margin-left:auto;align-self:center;font-size:10px;letter-spacing:1px;color:${C.mute}`, 'SLOPTIMIZE');
-      tabs.appendChild(brand);
+      // The title leads, top-left, ahead of the tabs (admin, 2026-08-28).
+      const brand = el('span', `align-self:center;margin-right:14px;font-size:11px;letter-spacing:2px;color:${C.accent}`, 'SLOPTIMIZE');
+      tabs.prepend(brand);
       // The body is the ONLY thing that scrolls; the tabs above and the
       // keyframe prompt below hold their place whatever the tab contains.
       body = el('div', 'overflow-y:auto;overflow-x:hidden;flex:1 1 auto;min-height:0;padding-right:6px');
