@@ -45,6 +45,8 @@ test('wakeLine: usermark, big hitch, capped gpu-settle, gpu-stall wake; heartbea
   assert.match(wakeLine(warm, 'D'), /🔥 warm post \(batched, budget 8ms\): 12 key\(s\) in 5 batch\(es\), worst 706ms builds\/batch=\[0,1,4,4,3\] — 706ms entity-pool-blend/);
   assert.equal(wakeLine({ ...warm, worstBatchMs: 40 }, 'D'), null);
   assert.equal(wakeLine({ ...warm, worstBatchMs: 9049, hidden: true }, 'D'), null);   // background tab: nobody watched
+  assert.equal(wakeLine({ ...hitch(900), automated: true }, 'D'), null);        // a robot's session: not an incident
+  assert.equal(wakeLine({ ...mark, automated: true }, 'D'), null);
   assert.equal(wakeLine({ type: 'heartbeat', at: 'T' }, 'D'), null);
   assert.equal(wakeLine({ type: 'arm-probe', at: 'T' }, 'D'), null);
 });

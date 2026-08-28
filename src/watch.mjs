@@ -28,6 +28,11 @@ const DEFAULTS = { minHitchMs: 100, staleMin: 45, now: () => Date.now() };
  *  recorder's own, forwarded verbatim (SPEC §8.1.1: the schema is a PUSH
  *  CONTRACT, fields surface directly). */
 export function wakeLine(rec, dir, opts = {}) {
+  // A robot's session is not an incident: headless verifies and preview
+  // health checks arm the recorder and post real-looking records, and a
+  // 16-minute cadence of them woke the agent all day (2026-08-28). The
+  // report still lists them; the wake channel is for a human's session.
+  if (rec.automated === true) return null;
   const minHitchMs = opts.minHitchMs ?? DEFAULTS.minHitchMs;
   const where = `[${dir}]`;
   const ctx = [rec.phase && `phase=${rec.phase}`, rec.build && `build=${rec.build}`].filter(Boolean).join(' ');
