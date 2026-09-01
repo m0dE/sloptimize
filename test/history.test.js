@@ -25,6 +25,26 @@ function ledger() {
   return recs;
 }
 
+test('summarizeWindow: jitters are counted with a rate, absent when there were none, and count as build evidence', () => {
+  const recs = ledger();
+  const jit = (min, build) => ({ type: 'jitter', at: iso(min), track: 'unit', kind: 'snap', units: 0.5, build,
+    classification: [{ guess: 'snap', confidence: 'high', evidence: 'e' }] });
+  recs.push(jit(10, 'v1'), jit(11, 'v1'), jit(12, 'v1'));
+  const before = summarizeWindow(recs, T0, T0 + 60 * 60_000 - 1);
+  assert.equal(before.jitters, 3);
+  assert.equal(before.jittersPerHour, 3);
+  assert.equal(before.hitches, 4);                 // a jitter is not a hitch
+  const after = summarizeWindow(recs, T0 + 60 * 60_000, T0 + 120 * 60_000);
+  assert.equal(after.jitters, undefined);
+  assert.equal(after.jittersPerHour, undefined);
+  // A build whose only records are jitters still has a measured window.
+  recs.push(jit(130, 'v3'));
+  assert.deepEqual(latestBuilds(recs), ['v2', 'v3']);
+  const h = buildHistory(recs, { buckets: 4 });
+  assert.equal(h.buckets[0].jitters, 3);
+  assert.equal(h.buckets[0].jittersPerHour, undefined);   // a bucket is a slice, not a rate
+});
+
 test('summarizeWindow: medians of the heartbeats, hitch count/rate/worst, top guess; absent when unmeasured', () => {
   const s = summarizeWindow(ledger(), T0, T0 + 60 * 60_000 - 1);   // bounds are inclusive
   assert.equal(s.beats, 60);

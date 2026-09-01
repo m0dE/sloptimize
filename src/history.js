@@ -47,7 +47,7 @@ const BEAT_COUNTERS = ['calls', 'triangles', 'programs'];
 export function summarizeWindow(records, from, to) {
   const beats = [], counters = Object.fromEntries(BEAT_COUNTERS.map((k) => [k, []]));
   const p95s = [], meds = [], guesses = new Map();
-  let hitches = 0, worstMs, worstGuess, regime;
+  let hitches = 0, jitters = 0, worstMs, worstGuess, regime;
   for (const { t, r } of stamped(records)) {
     if (t < from || t > to) continue;
     if (r.type === 'heartbeat') {
@@ -61,6 +61,10 @@ export function summarizeWindow(records, from, to) {
       const g = r.classification?.[0]?.guess;
       if (g) guesses.set(g, (guesses.get(g) ?? 0) + 1);
       if (worstMs === undefined || r.frameMs > worstMs) { worstMs = r.frameMs; worstGuess = g; }
+    } else if (r.type === 'jitter') {
+      // A coordinate jump (SPEC §3.6) — counted, so a fix's before/after can
+      // say the view stopped snapping, not only that frames got shorter.
+      jitters++;
     }
   }
   const hours = Math.max((to - from) / 3_600_000, 1 / 60);
@@ -69,15 +73,16 @@ export function summarizeWindow(records, from, to) {
   if (p95s.length) s.p95Ms = median(p95s);
   if (meds.length) s.medianMs = median(meds);
   for (const k of BEAT_COUNTERS) if (counters[k].length) s[k] = median(counters[k]);
+  if (jitters > 0) { s.jitters = jitters; s.jittersPerHour = +(jitters / hours).toFixed(1); }
   if (worstMs !== undefined) { s.worstMs = +worstMs.toFixed(1); s.worstGuess = worstGuess; }
   if (guesses.size) s.topGuess = [...guesses].sort((a, b) => b[1] - a[1])[0][0];
   if (regime) s.regime = regime;
   return s;
 }
 
-/** Evidence = a record that measured something: a beat or a hitch. Arm
- *  probes and settles name a build without saying how it ran. */
-const EVIDENCE = new Set(['heartbeat', 'hitch']);
+/** Evidence = a record that measured something: a beat, a hitch, a jitter.
+ *  Arm probes and settles name a build without saying how it ran. */
+const EVIDENCE = new Set(['heartbeat', 'hitch', 'jitter']);
 
 /** Builds in order of first evidence, each with its measured window. */
 function buildWindows(records) {
@@ -127,6 +132,7 @@ export function buildHistory(records, opts = {}) {
     const b0 = fromMs + i * width, b1 = i === n - 1 ? toMs : fromMs + (i + 1) * width - 1;
     const s = summarizeWindow(records, b0, b1);
     delete s.hitchesPerHour;                       // a bucket is a slice, not a rate
+    delete s.jittersPerHour;
     const inBucket = measured.filter(({ t }) => t >= b0 && t <= b1);
     const build = inBucket.map(({ r }) => r.build).filter(Boolean).pop();
     if (build) s.build = build;

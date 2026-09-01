@@ -191,7 +191,8 @@ sloptimize fix           record a verified fix (title, issue, solution,
 sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize watch         the push channel: one stdout line per usermark /
-                         ≥100ms hitch / gpu cap-hit / feed dark; never exits
+                         ≥100ms hitch / gpu cap-hit / coordinate jitter /
+                         feed dark; never exits
 sloptimize doctor        what is wired, what is degraded, stated limits
 ```
 

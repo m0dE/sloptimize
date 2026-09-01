@@ -222,7 +222,11 @@ function renderSession(host) {
     const ago = Math.round((now - i.at) / 1000);
     const agoTxt = ago < 90 ? `${ago}s ago` : `${Math.round(ago / 60)}m ago`;
     const ph = i.phase ? `<span style="color:${C.mute}">[${esc(i.phase)}]</span> ` : '';
-    return `<div style="padding:2px 0;color:${i.manual ? C.mark : C.ink}">${i.manual ? '★' : '·'} ${agoTxt} — ${ph}${Math.round(i.frameMs)}ms → <b>${esc(i.guess)}</b> <span style="color:${C.dim}">${esc(String(i.evidence).slice(0, 64))}</span></div>`;
+    // A row's measure is milliseconds unless it says otherwise (a jitter row
+    // measures a distance, and marks itself ↯).
+    const measure = i.label ? esc(i.label) : `${Math.round(i.frameMs)}ms`;
+    const glyph = i.manual ? '★' : (i.glyph ? esc(i.glyph) : '·');
+    return `<div style="padding:2px 0;color:${i.manual ? C.mark : C.ink}">${glyph} ${agoTxt} — ${ph}${measure} → <b>${esc(i.guess)}</b> <span style="color:${C.dim}">${esc(String(i.evidence).slice(0, 64))}</span></div>`;
   }).join('');
   const feed = host.feed?.() ?? { state: 'ok' };
   const feedLine = feed.state === 'ok'
@@ -234,7 +238,7 @@ function renderSession(host) {
 
 /**
  * @param host {{
- *   incidents?: () => Array<{at:number, frameMs:number, guess:string, evidence:string, manual:boolean, phase?:string}>,
+ *   incidents?: () => Array<{at:number, frameMs:number, guess:string, evidence:string, manual:boolean, phase?:string, label?:string, glyph?:string}>,
  *   feed?: () => {state:'ok'|'dark', reason?:string, buffered?:number, darkForS?:number},
  *   history?: () => Promise<{records:object[], fixes?:object[]} | ReturnType<typeof buildHistory> | null>,
  *   onNote: (note: string|null) => void,   // called exactly once per open, on close

@@ -51,6 +51,18 @@ test('wakeLine: usermark, big hitch, capped gpu-settle, gpu-stall wake; heartbea
   assert.equal(wakeLine({ type: 'arm-probe', at: 'T' }, 'D'), null);
 });
 
+test('wakeLine: a jitter snap or oscillation wakes; a long-frame catch-up or a passenger does not', () => {
+  const snap = { type: 'jitter', at: 'T', track: 'unit', kind: 'snap', units: 0.62, jump: [0.6, 0.15, 0], travelUnits: 0.133, speed: 8, dtMs: 16.7,
+    classification: [{ guess: 'snap', confidence: 'high', evidence: '0.62m off its trajectory' }], phase: 'play', build: 'v1', coincident: ['camera'] };
+  assert.match(wakeLine(snap, 'D'), /↯ jitter unit snap 0\.62 \(jump \[0\.6, 0\.15, 0\], expected 0\.133 of travel at 8\/s in a 16\.7ms frame\) with=camera @ T → snap \(0\.62m off its trajectory\) phase=play build=v1/);
+  const osc = { type: 'jitter', at: 'T', track: 'camera', kind: 'oscillation', frames: 41, durationMs: 683, amplitude: 0.3,
+    classification: [{ guess: 'oscillation', confidence: 'high', evidence: '41 reversals' }] };
+  assert.match(wakeLine(osc, 'D'), /↯ jitter camera oscillation ×41 over 683ms, amplitude 0\.3 @ T → oscillation/);
+  assert.equal(wakeLine({ ...snap, classification: [{ guess: 'long-frame-catch-up', evidence: 'e' }] }, 'D'), null);
+  assert.equal(wakeLine({ ...snap, track: 'camera', classification: [{ guess: 'follows-track', evidence: 'e' }, snap.classification[0]] }, 'D'), null);
+  assert.equal(wakeLine({ ...snap, automated: true }, 'D'), null);
+});
+
 test('watcher starts at EOF: history does not wake, appended records do, each once', () => {
   const dir = scratch();
   writeFileSync(join(dir, 'perf.jsonl'), line(hitch(500)) + line({ type: 'heartbeat', at: 'T' }));

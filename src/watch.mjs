@@ -11,8 +11,11 @@
 // Wakes: any usermark · an auto hitch ≥ minHitchMs (default 100) · a
 // gpu-settle that hit its cap without settling · a warm run whose worst
 // batch ≥ minHitchMs (with its per-batch builds) · any gpu-stall
-// record · the feed going quiet (> staleMin without a record) and coming
-// back. Silent: heartbeats, arm-probes, sub-threshold hitches.
+// record · a coordinate jitter (a snap or an oscillation of the unit or the
+// camera, SPEC §3.6) · the feed going quiet (> staleMin without a record)
+// and coming back. Silent: heartbeats, arm-probes, sub-threshold hitches,
+// a jitter whose verdict is long-frame-catch-up (the stall it rode already
+// woke as a hitch) or one explained as the passenger of another track.
 //
 // Starts at EOF: the ledger's history is the report's business, not a wake
 // storm at arm time. Cursor is in memory, per watcher — two sessions
@@ -63,6 +66,19 @@ export function wakeLine(rec, dir, opts = {}) {
     }
     case 'gpu-stall':
       return `sloptimize ⏳ gpu-stall ${rec.queueDoneMs}ms @ ${rec.at} → ${cls(rec.classification)} ${ctx} ${where}`;
+    case 'jitter': {
+      // The unit/camera landed off its own trajectory (SPEC §3.6). Not an
+      // incident of its own when the stall it rode already woke (the catch-up
+      // verdict), nor when it merely followed the track it is attached to —
+      // that track's record wakes, and names it as coincident.
+      const g = rec.classification?.[0]?.guess;
+      if (g === 'long-frame-catch-up' || g === 'follows-track') return null;
+      const shape = rec.kind === 'oscillation'
+        ? `oscillation ×${rec.frames} over ${rec.durationMs}ms, amplitude ${rec.amplitude}`
+        : `snap ${rec.units} (jump [${(rec.jump ?? []).join(', ')}], expected ${rec.travelUnits} of travel at ${rec.speed}/s in a ${rec.dtMs}ms frame)`;
+      const with_ = Array.isArray(rec.coincident) && rec.coincident.length ? ` with=${rec.coincident.join(',')}` : '';
+      return `sloptimize ↯ jitter ${rec.track} ${shape}${with_} @ ${rec.at} → ${cls(rec.classification)} ${ctx} ${where}`;
+    }
     default:
       return null;
   }

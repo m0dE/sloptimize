@@ -28,7 +28,39 @@ rec.frame({
 ```
 
 Hitches are detected, classified with evidence, and rate-limited
-automatically. Bind a chord for the manual channel — capture FIRST, then
+automatically.
+
+Coordinate jitter (SPEC §3.6) is the second detector — the unit or the
+camera landing off its own trajectory. Feed it once per RENDERED frame,
+after the render (so a transient camera shake the host restores is not
+sampled), with the same clock every frame:
+
+```js
+import { createMotionMonitor } from 'sloptimize';
+const motion = createMotionMonitor({
+  unit: 'm',
+  longFrameMs: 50,     // YOUR sim's dt clamp: a frame past it cannot have its motion judged
+  tracks: {
+    unit:   { floor: 0.1 },                                   // the view pivot: rotation-invariant
+    camera: { floor: 0.1, reach: 'boom', follows: 'unit' },   // the eye; reach = distance to the pivot
+  },
+});
+// per frame:
+motion.sample('unit',   pivot.x,  pivot.y,  pivot.z,  performance.now(), { held: paused || !continuityExpected, phase });
+motion.sample('camera', camera.x, camera.y, camera.z, performance.now(), { held: lookInputThisFrame || paused, reach, phase });
+// on a camera-mode flip, a spectate-target change, a respawn, a session boundary:
+motion.cut();
+// drain beside the recorder's records — same pipe, same ledger:
+post('records', [...rec.drainRecords(), ...motion.drainRecords()]);
+```
+
+`held` frames are not judged and re-seed the track (a mouse flick swings a
+boom metres in one frame — intended; the reference runtime marks a frame
+held when a mousemove/wheel/touchmove landed since the previous sample).
+`cut()` is for the discontinuities the host MEANT; the reference runtime
+derives them from a view-configuration key (pivot publisher · third-person
+flag · spectated subject) and cuts whenever it changes, so no call site has
+to remember. Bind a chord for the manual channel — capture FIRST, then
 optionally ask the human for one line (see mecharoyale's
 `dev/sloptimize-runtime.ts` for a complete reference including the note
 overlay, held-input tracking, WebGPU regime detection, and the
@@ -145,8 +177,10 @@ change → verify with counters; never claim a fix without a before/after).
 `sloptimize watch` is the watcher (SPEC §8.1.1): a byte cursor over each
 `--dir`'s `perf.jsonl`, polled every 20s, printing ONE line per record an
 agent should act on — every usermark, every auto hitch ≥100ms
-(`--min-hitch-ms`), a gpu-settle that hit its cap, any gpu-stall, and the
-feed going quiet / coming back. Heartbeats, arm-probes and small hitches
+(`--min-hitch-ms`), a gpu-settle that hit its cap, any gpu-stall, every
+coordinate jitter that is its own incident (`↯` — not a long-frame
+catch-up, not a passenger of another track), and the feed going quiet /
+coming back. Heartbeats, arm-probes and small hitches
 stay silent. It starts at EOF (history is `report`'s job) and never exits.
 
 Arm it as a Claude Code Monitor — stdout lines become wake events:

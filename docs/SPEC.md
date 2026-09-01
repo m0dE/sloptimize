@@ -223,6 +223,78 @@ network waterfall. `performance.memory` (Chromium-only) is sampled at 1Hz
 solely to support the `gc` classification, and its absence downgrades that
 guess's confidence — it never blocks a record.
 
+### 3.6 Coordinate continuity — jitter records
+
+Hitches are about TIME. The second thing an operator feels is about SPACE:
+"my player unit/camera's coordinate suddenly jumping instead of smoothly
+transitioning at every frame". So the runtime ships a second detector,
+`createMotionMonitor`, fed once per rendered frame with the world position
+of each TRACK the host cares about — the reference integration feeds two:
+
+- `unit` — the point the view is arranged around (the host's view pivot:
+  the eye on foot, the hull aboard, the spectated subject). Rotation-
+  invariant by construction, so a mouse flick cannot move it.
+- `camera` — the eye itself, `follows: 'unit'`, with `reach` = its distance
+  to the pivot (the boom length), and HELD on every frame that carried look
+  or zoom input (a flick swings a boom metres in one frame — intended).
+
+The test is a one-step constant-velocity prediction from the previous two
+samples; the residual `r = p − p̂` is how far the point landed off its own
+trajectory (½·a·dt² for smooth motion — millimetres). A residual is a
+CANDIDATE when `|r| > max(floor, ratio × predicted travel)`; it becomes an
+EVENT only when the next frame REVERSES it (compared as velocity anomalies,
+so a jump landing in a 400ms stall frame is still confirmed by the 17ms
+frame after it). A residual that is not reversed is a change of motion —
+a dash, a boom easing back out — and is never reported. Consecutive events
+(≤3 frames apart) fold into one burst: one event is a `snap`, two or more
+an `oscillation`; the burst posts as ONE record when it closes (or every
+2s while it continues).
+
+```json
+{
+  "type": "jitter",
+  "at": "2026-09-01T19:17:02.130Z",
+  "track": "unit",
+  "kind": "snap",                    // "snap" | "oscillation"
+  "frame": 8412,
+  "jump": [0.6, 0.3, 0],             // the off-trajectory displacement, host units
+  "units": 0.671,
+  "travelUnits": 0.133,              // what constant velocity predicted for this frame
+  "speed": 8.0,                      // host units per second before the jump
+  "dtMs": 16.7, "medianDtMs": 16.7,
+  "from": [12.1, 3.0, -4.2], "to": [12.83, 3.3, -4.2],
+  "frames": 41, "durationMs": 683, "amplitude": 0.3,   // oscillation only
+  "coincident": ["camera"],          // other tracks that jumped in the same frame
+  "reach": { "name": "boom", "before": 10.0, "after": 9.1 },   // if the host samples one
+  "classification": [ { "guess": "snap", "confidence": "high", "evidence": "…" } ],
+  "phase": "play", "build": "v1788289826333"
+}
+```
+
+Classification vocabulary (closed): `snap`, `oscillation`,
+`long-frame-catch-up` (the jump landed in a frame ≥ the host's `longFrameMs`
+— its sim's dt clamp, default the 100ms hitch bar — or ≥2× the median and
+≥50ms: past the clamp the point moves by the clamp while the prediction
+scales with the clock, so the residual is the stall's, not a jump's),
+`follows-track` (the track jumped in the same frame as the one it declares
+it follows — the passenger, not the cause), `reach-change` (the point's
+distance to its anchor changed by ≈ the jump — a boom clamp or a zoom, not
+a teleport). Explanations rank ahead of the kind. Every guess carries
+evidence.
+
+Host contract: the host says which frames are HELD (input-driven, paused)
+and when the view was CUT on purpose (camera mode flip, spectate target
+change, respawn, session boundary) — the detector never guesses intent.
+Rate limits: one record per second PER TRACK (a unit that teleports takes
+its camera with it in the same frame, and the camera's record is the one
+that says so), 200 per session, drops counted onto the next record.
+
+Stated limits: a pure rotation pop (a yaw snap) moves no coordinate and is
+not detected; a snap that coincides with an equal-and-opposite velocity
+change reads as a change of motion; the camera is judged only on frames
+without look input, so a pop under a moving mouse is missed (the unit
+track still sees it if the pivot moved).
+
 ---
 
 ## 4. Census and attribution
@@ -495,8 +567,9 @@ hook fires. The first field deployment closed the loop the other direction
   in a hitch record existing.
 - A session-side WATCHER (Claude Code's Monitor primitive, a 20s poll over
   `perf.jsonl` with a byte cursor) turns each new meaningful record — an
-  auto hitch ≥100ms, or any usermark — into an agent wake event carrying the
-  classification line. The agent starts the §8.2 playbook unprompted.
+  auto hitch ≥100ms, any usermark, a coordinate jitter (§3.6) — into an
+  agent wake event carrying the classification line. The agent starts the
+  §8.2 playbook unprompted.
 - `perf.jsonl`'s record schema is therefore a PUSH CONTRACT, not just an
   audit trail: fields added to records surface directly in wake events.
 

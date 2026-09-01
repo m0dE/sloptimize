@@ -106,7 +106,7 @@ investigating while you keep playing and never type. Two recipes:
 
 - **`sloptimize watch` as a Monitor** (INTEGRATION.md §5): the shipped
   watcher polls `perf.jsonl` with a byte cursor (~20s) and wakes the
-  agent with one line per new usermark, ≥100ms hitch, gpu cap-hit or
+  agent with one line per new usermark, ≥100ms hitch, gpu cap-hit, coordinate jitter or
   feed-dark edge. A `SessionStart` hook can arm it in every session
   automatically — then nobody types anything, ever.
 - **`/loop` in one session**: e.g.

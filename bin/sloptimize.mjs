@@ -34,8 +34,9 @@ if (cmd === 'report') {
   const hitches = readJsonl('perf.jsonl', 80);
   const marks = hitches.filter((h) => h.type === 'usermark');
   const auto = hitches.filter((h) => h.type === 'hitch');
+  const jitters = hitches.filter((h) => h.type === 'jitter');
   const census = readJson('census.json');
-  if (json) { out({ profile, hitches: auto, usermarks: marks, census }); process.exit(0); }
+  if (json) { out({ profile, hitches: auto, usermarks: marks, jitters, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
   console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}`);
   const beats = hitches.filter((h) => h.type === 'heartbeat');
@@ -52,6 +53,15 @@ if (cmd === 'report') {
   for (const m of marks.slice(-3)) {
     const w = m.worstFrames?.[0];
     console.log(`  ★ usermark ${m.at} ${m.note ?? ''} — window ${m.window?.frames}f median ${m.window?.medianMs}ms; worst ${w?.frameMs}ms → ${w?.classification?.[0]?.guess}`);
+  }
+  if (jitters.length) {
+    // Coordinate jumps (SPEC §3.6): the unit or the camera landed off its own
+    // trajectory. Listed apart from hitches — a snap at 60fps is not a slow frame.
+    console.log(`  jitters recorded: ${jitters.length} (showing last ${Math.min(jitters.length, 5)})`);
+    for (const j of jitters.slice(-5)) {
+      const shape = j.kind === 'oscillation' ? `oscillation ×${j.frames} amp ${j.amplitude}` : `snap ${j.units} [${(j.jump ?? []).join(', ')}]`;
+      console.log(`  ↯ ${j.at} ${j.track} ${shape} in a ${j.dtMs}ms frame → ${j.classification?.[0]?.guess}: ${j.classification?.[0]?.evidence}`);
+    }
   }
   if (census?.hints?.length) {
     console.log(`  census hints (${census.hints.length}):`);
