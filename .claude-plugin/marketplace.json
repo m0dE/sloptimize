@@ -1,0 +1,11 @@
+{
+  "name": "sloptimize",
+  "owner": { "name": "m0dE" },
+  "plugins": [
+    {
+      "name": "sloptimize",
+      "source": "./",
+      "description": "The agent-native profiler for three.js games: always-on incident recording, zero-setup attach with file:line attribution, budgets with exit codes."
+    }
+  ]
+}

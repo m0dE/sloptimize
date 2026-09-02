@@ -4,9 +4,16 @@
   "type": "module",
   "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench — so a coding agent can measure, attribute, and verify instead of guessing.",
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/m0dE/sloptimize.git"
+  },
+  "homepage": "https://github.com/m0dE/sloptimize#readme",
+  "bugs": {
+    "url": "https://github.com/m0dE/sloptimize/issues"
   },
   "bin": {
     "sloptimize": "bin/sloptimize.mjs"
@@ -24,6 +31,8 @@
     "mcp",
     "docs",
     ".claude-plugin",
+    ".mcp.json",
+    "LICENSE",
     "README.md"
   ],
   "peerDependencies": {
@@ -36,16 +45,11 @@
     },
     "three": {
       "optional": true
-    },
-    "playwright-core": {
-      "optional": true
-    },
-    "stats-gl": {
-      "optional": true
     }
   },
   "scripts": {
-    "test": "node --test './test/**/*.test.js'"
+    "test": "node --test './test/**/*.test.js'",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "three.js",

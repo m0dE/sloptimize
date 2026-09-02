@@ -6,10 +6,16 @@
 // says what it cannot know instead of guessing. Exit codes are API:
 //   check: 0 all budgets pass · 1 breach · 4 no measurement / no budgets file
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
+if (cmd === '--version' || cmd === '-v') {
+  const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
+  console.log(pkg.version);
+  process.exit(0);
+}
 const json = args.includes('--json');
 const dirFlag = args.indexOf('--dir');
 const DIR = dirFlag >= 0 ? args[dirFlag + 1] : '.sloptimize';
