@@ -175,3 +175,101 @@ test('the flush timer is unref()d so it never keeps a Node host alive on its own
   mk(h, { setInterval: setInterval_ });
   assert.equal(unrefCalls, 1);
 });
+
+test('a non-429 4xx drops the batch: counted, queue empty, no backoff', async () => {
+  // 400 means the service will never accept this body. Retrying it forever
+  // would wedge the sink behind data it cannot send.
+  const h = harness({ statuses: [400] });
+  const sink = mk(h);
+  h.source.pending.push({ type: 'hitch', at: '0' }, { type: 'hitch', at: '1' });
+  await sink.flush();
+  const s = sink.stats();
+  assert.equal(s.lastStatus, 400);
+  assert.equal(s.lastError, 'HTTP 400');
+  assert.equal(s.droppedLocally, 2);
+  assert.equal(s.queued, 0);
+  assert.equal(s.backoffUntil, 0);
+  await sink.flush();
+  assert.equal(h.calls.length, 1);   // nothing left to retry
+});
+
+test('429 honours Retry-After when it is longer than the backoff step', async () => {
+  const h = harness({ statuses: [429] });
+  const sink = mk(h);
+  h.source.pending.push({ type: 'hitch', at: '0' });
+  await sink.flush();
+  // Retry-After: 30 vs the first backoff step (5s) — the longer wins.
+  assert.equal(sink.stats().backoffUntil, Math.max(30 * 1000, 5000));
+  assert.equal(sink.stats().lastError, 'HTTP 429');
+  assert.equal(sink.stats().queued, 1);   // retryable: the batch went back
+  await sink.flush();
+  assert.equal(h.calls.length, 1);        // still backing off
+});
+
+test('the periodic flush sends no keepalive (it caps the body at 64 KiB)', async () => {
+  const h = harness();
+  const sink = mk(h);
+  h.source.pending.push({ type: 'hitch', at: 'x' });
+  await sink.flush();
+  assert.equal(h.calls[0].keepalive, undefined);
+});
+
+test('a batch is split by bytes, not just by count', async () => {
+  const h = harness();
+  // envelope {"records":[],"build":"b1"} is 27 bytes; each record is 134, so
+  // two fit under 300 and the third does not.
+  const sink = mk(h, { maxBatchBytes: 300 });
+  for (let i = 0; i < 3; i++) h.source.pending.push({ type: 'hitch', at: String(i), pad: 'a'.repeat(100) });
+  await sink.flush();
+  assert.deepEqual(h.calls[0].body.records.map((r) => r.at), ['0', '1']);
+  assert.ok(JSON.stringify(h.calls[0].body).length <= 300);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.at), ['2']);
+  assert.equal(sink.stats().queued, 0);
+  assert.equal(sink.stats().droppedLocally, 0);
+});
+
+test('a single record over the byte budget is dropped and counted, never retried', async () => {
+  const h = harness();
+  const sink = mk(h, { maxBatchBytes: 300 });
+  h.source.pending.push({ type: 'hitch', at: 'huge', pad: 'a'.repeat(5000) });
+  await sink.flush();
+  assert.equal(h.calls.length, 0);                 // nothing sendable
+  assert.equal(sink.stats().queued, 0);            // and nothing left to wedge on
+  assert.equal(sink.stats().droppedLocally, 1);
+  assert.match(sink.stats().lastError, /maxBatchBytes/);
+  assert.equal(sink.stats().backoffUntil, 0);
+  await sink.flush();
+  assert.equal(h.calls.length, 0);
+  // The next ordinary record goes out, carrying the honest drop count.
+  h.source.pending.push({ type: 'hitch', at: 'ok' });
+  await sink.flush();
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].body.droppedLocally, 1);
+  assert.equal(sink.stats().droppedLocally, 0);
+});
+
+test('the beacon path honours the byte budget too', async () => {
+  // sendBeacon has its own body limit: the unload flush drops the oversized
+  // record exactly as the timer flush does, and still ships the rest.
+  const h = harness();
+  const sink = mk(h, { maxBatchBytes: 300 });
+  h.source.pending.push({ type: 'hitch', at: 'huge', pad: 'a'.repeat(5000) }, { type: 'hitch', at: 'ok' });
+  h.target.fire('pagehide', {});
+  assert.equal(h.beacons.length, 1);
+  const body = JSON.parse(await h.beacons[0].blob.text());
+  assert.deepEqual(body.records.map((r) => r.at), ['ok']);
+  assert.equal(body.droppedLocally, 1);            // the drop is told, not hidden
+  assert.equal(sink.stats().droppedLocally, 0);    // and credited once it was told
+  assert.equal(sink.stats().queued, 0);
+});
+
+test('enqueue with a non-array never throws into the host', () => {
+  const h = harness();
+  const sink = mk(h);
+  sink.enqueue(undefined);
+  sink.enqueue({ type: 'hitch' });
+  sink.enqueue('records');
+  assert.equal(sink.stats().queued, 0);
+  assert.match(sink.stats().lastError, /expected an array/);
+});

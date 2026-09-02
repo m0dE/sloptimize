@@ -221,32 +221,53 @@ is invite-only, and the endpoint you use is whatever that page shows you).
 It hands you three snippets:
 
 ```js
-// browser: errors ride the same recorder as hitches, and reach the cloud
-// because the recorder is one of the sink's sources
+// browser: the cloud sink is a TEE beside your existing drain, never instead
+// of it — errors ride the same recorder as hitches, so one drain feeds both
 import { createRecorder, createErrorMonitor, createCloudSink } from 'sloptimize';
 const rec = createRecorder({ budgetFrameMs: 16.7 });
 createErrorMonitor(rec);
-const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build, sources: [rec] });
+const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build });
+// in the ~2s drain you already have (docs/INTEGRATION.md §1):
+const batch = rec.drainRecords();
+post('records', batch);   // unchanged: .sloptimize/perf.jsonl, still the source of truth
+cloud.enqueue(batch);     // the same records, teed to the cloud sink's own queue
 ```
+
+(The `sources: [rec]` option exists only for a host with no file sink at all:
+the sink drains those sources itself, so anything it takes never reaches your
+own `drainRecords()`.)
 
 ```js
 // game server (Node): ticks, event-loop stalls, and uncaught errors
 import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<key>', endpoint: '<endpoint>', build });
+const server = createServerRuntime({ key: '<secret key from settings>', endpoint: '<endpoint from settings>', build });
 ```
+
+The server runtime registers `uncaughtExceptionMonitor` only, so it observes
+a crash without ever becoming part of the crash path. One consequence worth
+knowing: under `--unhandled-rejections=warn` or `none`, unhandled rejections
+are **not** captured — that event sees them only in Node's default `throw`
+mode, and listening to `unhandledRejection` instead would suppress the throw
+your process relies on.
 
 ```bash
 # CLI: read the cloud catalogue instead of this machine's ledger
-export SLOPTIMIZE_KEY=<key> SLOPTIMIZE_ENDPOINT=<endpoint>
+export SLOPTIMIZE_KEY=<secret key from settings> SLOPTIMIZE_ENDPOINT=<endpoint from settings>
 npx sloptimize issues --cloud --preset 7d
 npx sloptimize fix --title "…" --push   # records locally, then pushes
 ```
 
 Honesty is the whole pitch: a dropped-locally count rides every batch the
 sink sends, so the dashboard's numbers say what they could not see rather
-than pretending nothing was lost; the key is public and write-only (it can
-post incidents, never read anyone else's), so shipping it in a client
-bundle is the intended use, not a leak.
+than pretending nothing was lost.
+
+Two kinds of key, and the difference matters. The **publishable** key is
+public and write-only (it can post incidents, never read anyone else's), so
+shipping it in a client bundle is the intended use, not a leak — that is the
+key in the browser snippet above. The **secret** key is the one the server
+runtime, the CLI (`SLOPTIMIZE_KEY`) and the MCP server use: it reads your
+whole catalogue (`/v1/issues`) and writes fixes (`/v1/fixes`). A secret key
+never goes in a client bundle.
 
 ## Budgets: "fast enough" as an exit code
 

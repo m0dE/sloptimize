@@ -20,11 +20,13 @@ export function foldProfile(profile, excludeUrl) {
     const { functionName, url } = n.callFrame;
     if (!url && /^\((root|program|garbage collector|idle)\)$/.test(functionName)) continue;
     if (excludeUrl && url.includes(excludeUrl)) continue;
-    const key = `${url} ${functionName}`;
+    // NUL, not a space: getters fold as "get health" and real paths contain
+    // spaces, both of which a space-separated key would split in the wrong place.
+    const key = `${url}\u0000${functionName}`;
     selfUs.set(key, (selfUs.get(key) ?? 0) + (deltas[i] ?? 0));
   }
   return [...selfUs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, us]) => {
-    const [url, fn] = k.split(' ');
+    const [url, fn] = k.split('\u0000');
     return { file: url.replace(/^file:\/\//, ''), fn: fn || 'anonymous', selfMs: Math.round(us / 1000) };
   });
 }

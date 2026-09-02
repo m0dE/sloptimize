@@ -95,12 +95,22 @@ export function topFrameSite(stack) {
   const lines = Array.isArray(stack) ? stack : String(stack ?? '').split('\n');
   for (const raw of lines) {
     const line = String(raw).trim();
-    if (!line.startsWith('at ')) continue;
-    // "at fn (loc)" | "at loc"
-    const m = /^at (?:(.+?) \()?(.+?)\)?$/.exec(line);
-    if (!m) continue;
-    const fn = m[1] && !/^(async |new )/.test(m[1]) ? m[1] : (m[1] ? m[1].replace(/^(async |new )+/, '') : 'anonymous');
-    let loc = m[2];
+    let fn, loc;
+    if (line.startsWith('at ')) {
+      // V8/Chromium/Node: "at fn (loc)" | "at loc" | "at async fn (loc)" | "at new Cls (loc)"
+      const m = /^at (?:(.+?) \()?(.+?)\)?$/.exec(line);
+      if (!m) continue;
+      fn = m[1] ? m[1].replace(/^(?:async |new )+/, '') : '';
+      loc = m[2];
+    } else {
+      // SpiderMonkey/JavaScriptCore: "fn@loc" | "@loc" (anonymous). Half the
+      // players are on Firefox or Safari; without this their stacks parse to
+      // nothing and one bug becomes two catalogue rows.
+      const m = /^([^@]*)@((?:[a-z][a-z0-9+.-]*:)?\/\/?.+?:\d+(?::\d+)?)$/.exec(line);
+      if (!m) continue;
+      fn = m[1];
+      loc = m[2];
+    }
     loc = loc.replace(/:\d+:\d+$/, '').replace(/:\d+$/, '');
     try { const u = new URL(loc); loc = u.pathname; } catch { /* not a URL: a path */ }
     loc = loc.replace(/[?#].*$/, '');
@@ -204,11 +214,11 @@ export function footprintOf(rec) {
 export function describeFootprint(key) {
   const parts = String(key ?? '').split('|').filter((p) => !p.startsWith('ctx:'));
   const ctx = contextOfKey(key);
-  const d = describeBase(parts);
+  const d = describeBase(parts, String(key ?? ''));
   return { ...d, ctx };
 }
 
-function describeBase(parts) {
+function describeBase(parts, key) {
   const [type] = parts;
   switch (type) {
     case 'hitch': return { glyph: '⚡', label: `hitch · ${parts[2] ?? '?'}${parts[3] ? ` · ${parts[3].split(',').length} mint site(s)` : ''}`, phase: parts[1] ?? '?' };

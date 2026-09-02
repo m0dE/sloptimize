@@ -32,7 +32,7 @@
     "skills",
     "hooks",
     "mcp",
-    "docs",
+    "docs/*.md",
     ".claude-plugin",
     ".mcp.json",
     "LICENSE",

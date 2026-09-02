@@ -37,3 +37,22 @@ test('server-hitch and server-stall footprints name the phase and top self-time 
   assert.equal(footprintKey({ type: 'server-stall', at: '2026-09-02T00:00:00Z', phase: 'lobby', p99Ms: 80, frames: [{ file: '/srv/db.js', fn: 'query', selfMs: 60 }] }), 'server-stall|lobby|/srv/db.js#query');
   assert.deepEqual(describeFootprint(footprintKey(h)), { glyph: '▣', label: 'server tick over budget · /srv/world.js#step', phase: 'match', ctx: {} });
 });
+
+test('the top frame site parses Gecko/JSC stacks and V8 async/constructor prefixes', () => {
+  // SpiderMonkey/JavaScriptCore: "fn@url:line:col", "@url:line:col" anonymous.
+  assert.equal(topFrameSite('render@https://g/a.js?v=3:120:45'), '/a.js#render');
+  assert.equal(topFrameSite('@https://g/a.js:1:2'), '/a.js#anonymous');
+  assert.equal(topFrameSite(['step@file:///srv/game/world.js:10:5']), '/srv/game/world.js#step');
+  // V8 frame prefixes the site must not carry into the function name.
+  assert.equal(topFrameSite(['at async load (https://g/a.js:1:1)']), '/a.js#load');
+  assert.equal(topFrameSite(['at new Mech (https://g/a.js:1:1)']), '/a.js#Mech');
+  // A Gecko stack and its V8 equivalent name the same site — one row, not two.
+  assert.equal(topFrameSite('render@https://g/a.js:1:1'), topFrameSite('at render (https://g/a.js:1:1)'));
+});
+
+test('an unrecognized footprint key describes itself instead of throwing', () => {
+  // This runs on the cloud service's import surface, where a key can come
+  // from a client of any version: it must degrade, never ReferenceError.
+  assert.deepEqual(describeFootprint('mystery|a|b'), { glyph: '·', label: 'mystery|a|b', phase: '', ctx: {} });
+  assert.deepEqual(describeFootprint(''), { glyph: '·', label: '', phase: '', ctx: {} });
+});

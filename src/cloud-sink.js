@@ -13,6 +13,9 @@ export function createCloudSink(opts = {}) {
   const { key, endpoint, build } = opts;
   const sources = opts.sources ?? [];
   const flushMs = opts.flushMs ?? 5000, maxBatch = opts.maxBatch ?? 100, maxQueue = opts.maxQueue ?? 500;
+  // The Fetch spec caps a keepalive body at 64 KiB and sendBeacon has a limit
+  // of its own, so a batch is bounded by bytes as well as by count.
+  const maxBatchBytes = opts.maxBatchBytes ?? 60 * 1024;
   const fetchImpl = opts.fetch ?? globalThis.fetch;
   const beacon = opts.sendBeacon ?? (typeof navigator !== 'undefined' && navigator.sendBeacon ? navigator.sendBeacon.bind(navigator) : null);
   const target = opts.target ?? globalThis;
@@ -40,6 +43,30 @@ export function createCloudSink(opts = {}) {
     if (droppedLocally) b.droppedLocally = droppedLocally;
     return b;
   }
+  const encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+  const byteLen = (s) => (encoder ? encoder.encode(s).length : s.length);
+  /** How many of the queue's leading records fit in one body under
+   *  `maxBatchBytes`. A single record too large to ever fit is DROPPED and
+   *  counted, never retried: re-prepending it would wedge the sink forever,
+   *  and a silent wedge is the one failure this sink must not have. */
+  function fitCount() {
+    let envelope = byteLen(JSON.stringify(body([])));
+    let total = envelope, n = 0;
+    while (n < queue.length && n < maxBatch) {
+      const size = byteLen(JSON.stringify(queue[n])) + (n > 0 ? 1 : 0);   // +1 for the comma
+      if (total + size > maxBatchBytes) {
+        if (n > 0) break;
+        queue.shift();
+        droppedLocally++;
+        stats.lastError = `record dropped: ${size} bytes over maxBatchBytes (${maxBatchBytes})`;
+        envelope = byteLen(JSON.stringify(body([])));   // droppedLocally just grew
+        total = envelope;
+        continue;
+      }
+      total += size; n++;
+    }
+    return n;
+  }
   async function flush() {
     drain();
     if (inflight || queue.length === 0 || now() < backoffUntil) return;
@@ -48,18 +75,26 @@ export function createCloudSink(opts = {}) {
     // otherwise a concurrent onHide()/enqueue() during the in-flight request
     // sees records that are already (or about to be) accounted for elsewhere,
     // causing duplicate delivery or silently corrupting the queue.
-    const batch = queue.splice(0, maxBatch);
+    const errBefore = stats.lastError;
+    const n = fitCount();
+    // A success clears transport errors, but must not erase the report of a
+    // record this sink itself had to throw away in the same pass.
+    const droppedThisPass = stats.lastError !== errBefore;
+    if (n === 0) { inflight = false; return; }   // everything queued was oversized
+    const batch = queue.splice(0, n);
     const sentDropped = droppedLocally;
     try {
+      // No `keepalive` here: it caps the body at 64 KiB in browsers, and the
+      // unload path already uses sendBeacon. This is the periodic flush.
       const res = await fetchImpl(endpoint, {
-        method: 'POST', keepalive: true,
+        method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
         body: JSON.stringify(body(batch)),
       });
       stats.lastStatus = res.status;
       if (res.ok) {
         droppedLocally = Math.max(0, droppedLocally - sentDropped);
-        failures = 0; backoffUntil = 0; stats.sent += batch.length; stats.lastError = null;
+        failures = 0; backoffUntil = 0; stats.sent += batch.length; if (!droppedThisPass) stats.lastError = null;
       } else if (res.status === 429 || res.status >= 500) {
         // Retryable: put the batch back at the front (it's the oldest data)
         // and re-apply the cap, counting any resulting drops.
@@ -92,7 +127,9 @@ export function createCloudSink(opts = {}) {
       // Any batch currently in flight via flush() was already spliced out of
       // `queue`, so what's here is guaranteed disjoint from it — no duplicate
       // delivery risk.
-      const batch = queue.slice(0, maxBatch);
+      const n = fitCount();
+      if (n === 0) return;
+      const batch = queue.slice(0, n);
       const beaconedDropped = droppedLocally;
       const ok = beacon(`${endpoint}?key=${encodeURIComponent(key)}`, new Blob([JSON.stringify(body(batch))], { type: 'application/json' }));
       if (ok) { queue = queue.slice(batch.length); droppedLocally = Math.max(0, droppedLocally - beaconedDropped); stats.sent += batch.length; }
@@ -110,7 +147,10 @@ export function createCloudSink(opts = {}) {
   return {
     flush,
     enqueue(records) {
-      if (records && records.length) queue.push(...records);
+      // A host tee that hands over something other than an array is a wiring
+      // bug in the host, not a reason to throw into its drain loop.
+      if (!Array.isArray(records)) { stats.lastError = 'enqueue: expected an array of records'; return; }
+      if (records.length) queue.push(...records);
       trim();
     },
     stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, lastError: stats.lastError, lastStatus: stats.lastStatus }; },

@@ -78,8 +78,14 @@ export function createServerRuntime(opts = {}) {
     return rec;
   }
   function pushAsync(rec, withFrames) {
+    // After close() the sink is disposed and nothing will ever drain `pending`
+    // again: a frame promise that resolves later must not grow it forever.
+    if (closed) return;
     if (!withFrames) { pending.push(rec); return; }
-    frames().then((f) => { rec.frames = f.frames; rec.attribution = f.attribution; pending.push(rec); });
+    frames().then((f) => {
+      if (closed) return;
+      rec.frames = f.frames; rec.attribution = f.attribution; pending.push(rec);
+    });
   }
 
   function endTick(startMs) {

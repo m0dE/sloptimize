@@ -167,7 +167,7 @@ With a project on sloptimize cloud, `SLOPTIMIZE_KEY` and `SLOPTIMIZE_ENDPOINT`
 instead of just this machine's:
 
 ```bash
-export SLOPTIMIZE_KEY=<key from the settings page>
+export SLOPTIMIZE_KEY=<secret key from the settings page>   # secret, not publishable: /v1/issues is secret-only
 export SLOPTIMIZE_ENDPOINT=<endpoint from the settings page>
 npx sloptimize issues --cloud                     # last 24h across every player/build, by default
 npx sloptimize issues --cloud --preset 7d         # or 30d

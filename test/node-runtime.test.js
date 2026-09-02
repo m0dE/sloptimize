@@ -22,6 +22,23 @@ test('foldProfile ranks self time per (url, function), excludes runtime and VM f
   ]);
 });
 
+test('foldProfile keys survive spaces in a function name or a path', () => {
+  // "get health" is what V8 calls a getter, and a game's dist path can have a
+  // space in it — a space-separated fold key mangled both.
+  const profile = {
+    nodes: [
+      { id: 1, callFrame: { functionName: 'get health', url: 'file:///srv/My Game/mech.js' } },
+      { id: 2, callFrame: { functionName: 'step', url: 'file:///srv/world.js' } },
+    ],
+    samples: [1, 1, 2],
+    timeDeltas: [2000, 2000, 1000],
+  };
+  assert.deepEqual(foldProfile(profile), [
+    { file: '/srv/My Game/mech.js', fn: 'get health', selfMs: 4 },
+    { file: '/srv/world.js', fn: 'step', selfMs: 1 },
+  ]);
+});
+
 function harness() {
   let t = 0;
   const posted = [];
@@ -140,4 +157,20 @@ test('a runtime built with real timers exits the process naturally without close
   const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 5000, encoding: 'utf8' });
   assert.equal(res.signal, null, `process did not exit naturally (stderr: ${res.stderr})`);
   assert.equal(res.status, 0, `process exited non-zero (stderr: ${res.stderr})`);
+});
+
+test('a frame promise that resolves after close() never lands in the queue', async () => {
+  // close() disposes the sink; nothing will ever drain `pending` again, so a
+  // late profiler result must be dropped rather than grow a queue forever.
+  const h = harness();
+  let resolveTake;
+  const profiler = { start() {}, take: () => new Promise((r) => { resolveTake = r; }), stop() {} };
+  const rt = mk(h, { profiler });
+  const s = rt.beginTick(); h.tick(40); rt.endTick(s);   // a hitch, waiting on frames()
+  await rt.close();
+  resolveTake([{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]);
+  await new Promise((r) => setTimeout(r, 0));
+  await rt.flush();
+  assert.equal(h.posted.length, 0);
+  assert.equal(rt.stats().sink.queued, 0);
 });

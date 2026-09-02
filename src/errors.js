@@ -17,8 +17,22 @@ export function createErrorMonitor(recorder, opts = {}) {
   const lastByFp = new Map();
   const stats = { seen: 0, emitted: 0, deduped: 0 };
 
+  // V8 frames start with "at "; SpiderMonkey/JavaScriptCore frames are
+  // "fn@url:line:col" (or "@url:line:col" when anonymous). Keeping only the
+  // V8 shape gave every Firefox and Safari player an empty stack — and a
+  // second catalogue row for the same bug.
+  const FRAME_RE = /^at |^[^\s]*@.+:\d+/;
   function frames(stack) {
-    return String(stack ?? '').split('\n').map((l) => l.trim()).filter((l) => l.startsWith('at ')).slice(0, maxFrames);
+    return String(stack ?? '').split('\n').map((l) => l.trim()).filter((l) => FRAME_RE.test(l)).slice(0, maxFrames);
+  }
+
+  /** A rejection reason that is not an Error, said as plainly as it can be
+   *  said. JSON.stringify throws on a circular object (and on a throwing
+   *  toJSON); an uncaught throw here would lose the incident entirely. */
+  function reasonMessage(r) {
+    if (typeof r === 'string') return r;
+    try { const j = JSON.stringify(r ?? null); if (j !== undefined) return j; } catch { /* circular / throwing toJSON */ }
+    try { return String(r); } catch { return '[unstringifiable]'; }
   }
   function toRecord(name, message, stack) {
     return { type: 'error', at: new Date().toISOString(), source: 'client', name, message: String(message ?? ''), stack: frames(stack) };
@@ -41,7 +55,7 @@ export function createErrorMonitor(recorder, opts = {}) {
   const onRejection = (ev) => {
     try {
       const r = ev?.reason;
-      handle(r instanceof Error ? toRecord(r.name || 'Error', r.message, r.stack) : toRecord('UnhandledRejection', typeof r === 'string' ? r : JSON.stringify(r ?? null), ''));
+      handle(r instanceof Error ? toRecord(r.name || 'Error', r.message, r.stack) : toRecord('UnhandledRejection', reasonMessage(r), ''));
     } catch { /* never throw into the host */ }
   };
   target.addEventListener('error', onError);

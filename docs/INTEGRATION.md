@@ -174,7 +174,7 @@ BESIDE the local `post()`, never instead of it:
 
 ```js
 import { createCloudSink } from 'sloptimize/cloud';
-const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });
+const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });   // publishable: safe in the client bundle
 // wherever the local sink drains and posts:
 const batch = [...rec.drainRecords(), ...motion.drainRecords()];
 post('records', batch);   // unchanged: the local ledger, still the source of truth
@@ -198,7 +198,7 @@ the browser uses.
 
 ```js
 import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<key>', endpoint: '<endpoint>', build, tickBudgetMs: 16 });
+const server = createServerRuntime({ key: '<secret key>', endpoint: '<endpoint>', build, tickBudgetMs: 16 });
 
 function gameLoop() {
   server.tick(() => {          // wraps one tick; records a server-hitch if it overran tickBudgetMs
@@ -207,9 +207,15 @@ function gameLoop() {
 }
 ```
 
+The key here is a SECRET key (`server-*` record types and the read routes
+are secret-only) — it never goes in a client bundle.
+
 `createServerRuntime` registers `uncaughtExceptionMonitor` only (never
 `uncaughtException`/`unhandledRejection`) — it observes a crash, it never
-becomes part of the crash path. Call `await server.close()` on shutdown to
+becomes part of the crash path. That also means that under
+`--unhandled-rejections=warn` or `none`, unhandled rejections are NOT
+captured: `uncaughtExceptionMonitor` sees them only in Node's default
+`throw` mode. Call `await server.close()` on shutdown to
 flush the queue; a `beforeExit` hook already races a best-effort flush so a
 clean exit does not lose the last batch.
 
