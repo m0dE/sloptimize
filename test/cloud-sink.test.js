@@ -167,3 +167,11 @@ test('a pagehide beacon and a concurrent flush success never double-subtract dro
   assert.equal(sink.stats().droppedLocally, 0);
   assert.ok(sink.stats().droppedLocally >= 0);
 });
+
+test('the flush timer is unref()d so it never keeps a Node host alive on its own', () => {
+  const h = harness();
+  let unrefCalls = 0;
+  const setInterval_ = (fn, ms) => { h.timers ??= []; return { unref: () => { unrefCalls++; } }; };
+  mk(h, { setInterval: setInterval_ });
+  assert.equal(unrefCalls, 1);
+});

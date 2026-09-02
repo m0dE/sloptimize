@@ -99,6 +99,11 @@ export function createCloudSink(opts = {}) {
     } catch { /* never throw into the host */ }
   }
   const timer = setI(() => { flush(); }, flushMs);
+  // Never keep a game server's (or any Node host's) event loop alive just
+  // to poll for records — this sink runs beside the host's own liveness,
+  // not instead of it. A browser's setInterval returns a number, so the
+  // optional chaining below is a no-op there.
+  timer?.unref?.();
   target.addEventListener?.('pagehide', onHide);
   const onVis = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') onHide(); };
   target.addEventListener?.('visibilitychange', onVis);

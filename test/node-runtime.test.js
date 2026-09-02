@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { foldProfile } from '../src/node/profiler.js';
 import { createServerRuntime } from '../src/node/index.js';
 
@@ -90,4 +91,53 @@ test('uncaughtExceptionMonitor produces a server error record and nothing else i
   const [r] = h.posted[0].records;
   assert.equal(r.type, 'error'); assert.equal(r.source, 'server'); assert.equal(r.name, 'RangeError');
   assert.deepEqual(r.stack, ['at step (/srv/world.js:1:1)']);
+});
+
+test('a hitch recorded while an injected profiler is still starting still gets attributed once start() resolves', async () => {
+  const h = harness();
+  let resolveStart;
+  const deferredProfiler = {
+    started: 0,
+    start() { this.started++; return new Promise((res) => { resolveStart = res; }); },
+    async take() { return [{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]; },
+    stop() {},
+  };
+  const rt = mk(h, { profiler: deferredProfiler });
+  rt.tick(() => h.tick(40));            // hitch recorded while profiler.start() is still pending
+  resolveStart();
+  await rt.flush();
+  assert.equal(h.posted.length, 1);
+  const [r] = h.posted[0].records;
+  assert.equal(r.attribution, 'profiler');
+  assert.deepEqual(r.frames, [{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]);
+});
+
+test('a throwing phase() does not crash the record or tick(); leaves phase unset and counts hostErrors', async () => {
+  const h = harness();
+  const rt = mk(h, { phase: () => { throw new Error('boom'); } });
+  assert.doesNotThrow(() => rt.tick(() => h.tick(40)));
+  await rt.flush();
+  assert.equal(h.posted.length, 1);
+  const [r] = h.posted[0].records;
+  assert.equal(r.type, 'server-hitch');
+  assert.equal(r.phase, undefined);
+  assert.equal(r.ctx, 'mode=ranked');    // the other stamp() field is unaffected
+  assert.equal(rt.stats().hostErrors, 1);
+});
+
+test('a runtime built with real timers exits the process naturally without close() (flush timer is unref\'d)', () => {
+  const modulePath = new URL('../src/node/index.js', import.meta.url).href;
+  const script = `
+    import { createServerRuntime } from ${JSON.stringify(modulePath)};
+    const rt = createServerRuntime({
+      key: 'sk_live_x', endpoint: 'https://c.example/v1/ingest', build: 'b1',
+      fetch: async () => ({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) }),
+      profiler: { start() {}, async take() { return []; }, stop() {} },
+      monitor: { percentiles: new Map([[50, 0], [99, 0]]), max: 0, reset() {}, enable() {}, disable() {} },
+    });
+    rt.tick(() => { const end = Date.now() + 5; while (Date.now() < end) { /* busy */ } });
+  `;
+  const res = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 5000, encoding: 'utf8' });
+  assert.equal(res.signal, null, `process did not exit naturally (stderr: ${res.stderr})`);
+  assert.equal(res.status, 0, `process exited non-zero (stderr: ${res.stderr})`);
 });

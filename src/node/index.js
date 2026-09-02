@@ -25,6 +25,7 @@ export function createServerRuntime(opts = {}) {
   const proc = opts.process ?? process;
   const setI = opts.setInterval ?? setInterval, clearI = opts.clearInterval ?? clearInterval;
   const profileOn = opts.profile !== false;
+  let closed = false;
 
   const pending = [];
   const source = { drainRecords() { return pending.splice(0, pending.length); } };
@@ -33,26 +34,46 @@ export function createServerRuntime(opts = {}) {
     fetch: opts.fetch, sendBeacon: null, target: { addEventListener() {}, removeEventListener() {} }, setInterval: setI, clearInterval: clearI, now,
   });
 
-  const stats = { hitches: 0, stalls: 0, errors: 0, droppedByRate: 0 };
+  const stats = { hitches: 0, stalls: 0, errors: 0, droppedByRate: 0, hostErrors: 0 };
   let lastHitchAt = -Infinity, lastStallAt = -Infinity;
 
   // The profiler: injectable for tests (never touches node:inspector), or
   // lazily imported for real use so the fake-profiler test path never loads
-  // the inspector module.
+  // the inspector module. `closed` is re-checked once the import (and the
+  // inspector session it builds) resolves, so a close() that races the lazy
+  // init stops the profiler instead of starting a session nobody will ever
+  // stop.
   let profiler = opts.profiler ?? null;
   let profilerReady = profileOn && profiler ? Promise.resolve(profiler.start()) : null;
   if (profileOn && !profiler) {
     profilerReady = import('./profiler.js')
-      .then(async (m) => { profiler = await m.createProfiler(); await profiler.start(); })
+      .then(async (m) => {
+        if (closed) return;
+        const p = await m.createProfiler();
+        if (closed) { await p.stop?.(); return; }
+        profiler = p;
+        await profiler.start();
+      })
       .catch((e) => { stats.profilerError = e?.message; profiler = null; });
   }
   async function frames() {
-    if (!profileOn || !profiler) return { frames: [], attribution: 'off' };
-    try { await profilerReady; return { frames: await profiler.take(), attribution: 'profiler' }; } catch { return { frames: [], attribution: 'off' }; }
+    if (!profileOn) return { frames: [], attribution: 'off' };
+    try {
+      // Wait for the (possibly still-lazily-importing) profiler before
+      // deciding attribution is unavailable — otherwise every hitch/stall
+      // during startup is permanently recorded as attribution: 'off' even
+      // though the real profiler comes up moments later.
+      await profilerReady;
+      if (!profiler) return { frames: [], attribution: 'off' };
+      return { frames: await profiler.take(), attribution: 'profiler' };
+    } catch { return { frames: [], attribution: 'off' }; }
   }
+  // Host-supplied phase()/context() callbacks run on every record; a
+  // throwing one must never break the record (or crash a bare setInterval
+  // callback) — it just leaves that field unset, counted in hostErrors.
   function stamp(rec) {
-    const p = phaseFn(); if (p) rec.phase = p;
-    const c = ctxFn(); if (c) rec.ctx = typeof c === 'string' ? c : canonicalContext(c);
+    try { const p = phaseFn(); if (p) rec.phase = p; } catch { stats.hostErrors++; }
+    try { const c = ctxFn(); if (c) rec.ctx = typeof c === 'string' ? c : canonicalContext(c); } catch { stats.hostErrors++; }
     rec.at = new Date().toISOString();
     return rec;
   }
@@ -62,13 +83,15 @@ export function createServerRuntime(opts = {}) {
   }
 
   function endTick(startMs) {
-    const tickMs = now() - startMs;
-    if (tickMs <= tickBudgetMs) return;
-    const t = now();
-    if (t - lastHitchAt < 1000) { stats.droppedByRate++; return; }
-    lastHitchAt = t; stats.hitches++;
-    const rec = stamp({ type: 'server-hitch', tickMs: +tickMs.toFixed(2), budgetMs: tickBudgetMs, frames: [], attribution: 'off' });
-    pushAsync(rec, profileOn);
+    try {
+      const tickMs = now() - startMs;
+      if (tickMs <= tickBudgetMs) return;
+      const t = now();
+      if (t - lastHitchAt < 1000) { stats.droppedByRate++; return; }
+      lastHitchAt = t; stats.hitches++;
+      const rec = stamp({ type: 'server-hitch', tickMs: +tickMs.toFixed(2), budgetMs: tickBudgetMs, frames: [], attribution: 'off' });
+      pushAsync(rec, profileOn);
+    } catch { stats.hostErrors++; }
   }
 
   // Event-loop delay: sampled every second, an incident when p99 crosses
@@ -76,15 +99,17 @@ export function createServerRuntime(opts = {}) {
   const monitor = opts.monitor ?? monitorEventLoopDelay({ resolution: 20 });
   monitor?.enable?.();
   const sampler = setI(() => {
-    if (!monitor) return;
-    const p99 = monitor.percentiles.get(99) / 1e6, p50 = monitor.percentiles.get(50) / 1e6, max = monitor.max / 1e6;
-    monitor.reset();
-    if (!(p99 > stallMs)) return;
-    const t = now();
-    if (t - lastStallAt < 5000) { stats.droppedByRate++; return; }
-    lastStallAt = t; stats.stalls++;
-    const rec = stamp({ type: 'server-stall', p50Ms: +p50.toFixed(1), p99Ms: +p99.toFixed(1), maxMs: +max.toFixed(1), frames: [], attribution: 'off' });
-    pushAsync(rec, profileOn);
+    try {
+      if (!monitor) return;
+      const p99 = monitor.percentiles.get(99) / 1e6, p50 = monitor.percentiles.get(50) / 1e6, max = monitor.max / 1e6;
+      monitor.reset();
+      if (!(p99 > stallMs)) return;
+      const t = now();
+      if (t - lastStallAt < 5000) { stats.droppedByRate++; return; }
+      lastStallAt = t; stats.stalls++;
+      const rec = stamp({ type: 'server-stall', p50Ms: +p50.toFixed(1), p99Ms: +p99.toFixed(1), maxMs: +max.toFixed(1), frames: [], attribution: 'off' });
+      pushAsync(rec, profileOn);
+    } catch { stats.hostErrors++; }
   }, 1000);
   sampler?.unref?.();
 
@@ -97,20 +122,30 @@ export function createServerRuntime(opts = {}) {
     } catch { /* never throw from a monitor */ }
   };
   proc.on('uncaughtExceptionMonitor', onUncaught);
-  const onBeforeExit = () => { Promise.race([sink.flush(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {}); };
+  // The watchdog timer must be unref'd too: Promise.race never cancels its
+  // losing arm, so a plain setTimeout here would itself become a handle
+  // that keeps a real host's event loop alive for up to 2s on every exit
+  // attempt (and, since that can make the loop look non-empty again,
+  // potentially re-trigger beforeExit indefinitely).
+  const onBeforeExit = () => {
+    Promise.race([sink.flush(), new Promise((r) => { const t = setTimeout(r, 2000); t?.unref?.(); })]).catch(() => {});
+  };
   proc.on('beforeExit', onBeforeExit);
 
   return {
     tick(fn) { const s = now(); try { return fn(); } finally { endTick(s); } },
     beginTick() { return now(); },
     endTick,
-    mark(label, meta = {}) { pending.push(stamp({ type: 'usermark', label, ...meta })); },
+    mark(label, meta = {}) {
+      try { pending.push(stamp({ type: 'usermark', label, ...meta })); } catch { stats.hostErrors++; }
+    },
     // Awaits one macrotask before draining the sink so that pushAsync's
     // frame promise (resolved on a microtask, even for a synchronous fake
     // profiler) has already landed its record in `pending`.
     async flush() { await new Promise((r) => setTimeout(r, 0)); await sink.flush(); },
     stats() { return { ...stats, sink: sink.stats() }; },
     async close() {
+      closed = true;
       clearI(sampler);
       monitor?.disable?.();
       proc.off?.('uncaughtExceptionMonitor', onUncaught);
