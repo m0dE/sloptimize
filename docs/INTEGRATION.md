@@ -164,6 +164,53 @@ panel.open();
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.
 
+### Cloud sink (optional, paid, invite-only)
+
+The dev-endpoint sink above stays the default: it is what makes the files
+useful with nobody watching. sloptimize cloud is a separate, additive tee —
+never a replacement — that ships the same records to a service so the
+catalogue spans every player and build, not just this machine. Run it
+BESIDE the local `post()`, never instead of it:
+
+```js
+import { createCloudSink } from 'sloptimize/cloud';
+const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });
+// wherever the local sink drains and posts:
+const batch = [...rec.drainRecords(), ...motion.drainRecords()];
+post('records', batch);   // unchanged: the local ledger, still the source of truth
+cloud.enqueue(batch);     // same records, teed to the cloud sink's own queue and flush timer
+```
+
+`enqueue(records)` just appends to the sink's internal queue (capped at
+`maxQueue`, oldest dropped and counted honestly) — it does not fetch or
+flush itself; the sink's own timer (and `pagehide`/`visibilitychange`) drain
+and post it on the usual backoff. Pair it with `sloptimize/errors`'
+`createErrorMonitor()` to fold uncaught client errors into the same feed.
+
+### Game server (optional, paid, invite-only)
+
+The server side of the same catalogue: ticks that overran their budget,
+event-loop stalls the runtime itself measured, and uncaught errors — each
+attributed by a sampling profiler and shipped through the same cloud sink
+the browser uses.
+
+```js
+import { createServerRuntime } from 'sloptimize/node';
+const server = createServerRuntime({ key: '<key>', endpoint: '<endpoint>', build, tickBudgetMs: 16 });
+
+function gameLoop() {
+  server.tick(() => {          // wraps one tick; records a server-hitch if it overran tickBudgetMs
+    // … the game's own tick work …
+  });
+}
+```
+
+`createServerRuntime` registers `uncaughtExceptionMonitor` only (never
+`uncaughtException`/`unhandledRejection`) — it observes a crash, it never
+becomes part of the crash path. Call `await server.close()` on shutdown to
+flush the queue; a `beforeExit` hook already races a best-effort flush so a
+clean exit does not lose the last batch.
+
 ## 3. The CLI (the agent's shell surface)
 
 `sloptimize report|check|census|doctor --dir <game>/.sloptimize` — no

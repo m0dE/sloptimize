@@ -203,6 +203,50 @@ prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
 `docs/INTEGRATION.md` §5. Wire it into a `SessionStart` hook and every
 session arms it by itself.
 
+## Cloud (paid, invite-only)
+
+Everything above is local: one machine's `.sloptimize/` directory, read by
+that machine's shell and that machine's Claude Code session. sloptimize
+cloud is a separate, optional, invite-only service that widens the same
+catalogue to **every player, every build** — not just the one in front of
+you: 24h/7d/30d or any custom range, client incidents and server incidents
+(`sloptimize/node`) folded into the same footprint identity, plus uncaught
+errors (`sloptimize/errors`) as their own incident kind. The local product
+stays the default story — nothing below changes what a project with no
+cloud key does.
+
+Where the endpoint and key live: your project's settings page on the
+service (there is no public hostname to document here — sloptimize cloud
+is invite-only, and the endpoint you use is whatever that page shows you).
+It hands you three snippets:
+
+```js
+// browser: tee live records to the cloud sink beside the local sink
+import { createCloudSink } from 'sloptimize/cloud';
+import { createErrorMonitor } from 'sloptimize/errors';
+const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build });
+const errors = createErrorMonitor();
+```
+
+```js
+// game server (Node): ticks, event-loop stalls, and uncaught errors
+import { createServerRuntime } from 'sloptimize/node';
+const server = createServerRuntime({ key: '<key>', endpoint: '<endpoint>', build });
+```
+
+```bash
+# CLI: read the cloud catalogue instead of this machine's ledger
+export SLOPTIMIZE_KEY=<key> SLOPTIMIZE_ENDPOINT=<endpoint>
+npx sloptimize issues --cloud --preset 7d
+npx sloptimize fix --title "…" --push   # records locally, then pushes
+```
+
+Honesty is the whole pitch: a dropped-locally count rides every batch the
+sink sends, so the dashboard's numbers say what they could not see rather
+than pretending nothing was lost; the key is public and write-only (it can
+post incidents, never read anyone else's), so shipping it in a client
+bundle is the intended use, not a leak.
+
 ## Budgets: "fast enough" as an exit code
 
 `.sloptimize/budgets.json` (the one file a human reviews):

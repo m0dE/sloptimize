@@ -359,7 +359,8 @@ fixes applied to it, or the exact command that would record one.
 
 Cloud path: the footprint is computed by the writer, so a service that
 ingests many clients' records dedupes on `footprint.id` from day one; the
-fold is the same code.
+fold is the same code. The service is specified in the sloptimize-cloud repo
+(`docs/superpowers/specs/2026-09-02-sloptimize-cloud-design.md`).
 
 ---
 

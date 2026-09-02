@@ -160,6 +160,31 @@ npx sloptimize history --dir <game>/.sloptimize  # p95/calls/hitches over time, 
 npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 ```
 
+## The cloud catalogue (optional, paid, invite-only)
+
+With a project on sloptimize cloud, `SLOPTIMIZE_KEY` and `SLOPTIMIZE_ENDPOINT`
+(or `--key`/`--endpoint`) point the same CLI at every player's ledger
+instead of just this machine's:
+
+```bash
+export SLOPTIMIZE_KEY=<key from the settings page>
+export SLOPTIMIZE_ENDPOINT=<endpoint from the settings page>
+npx sloptimize issues --cloud                     # last 24h across every player/build, by default
+npx sloptimize issues --cloud --preset 7d         # or 30d
+npx sloptimize issues --cloud --from <ISO> --to <ISO> --source client --kind hitch
+```
+
+Unconfigured, it exits 2 and names the missing variable rather than
+silently falling back to the local ledger; a request that fails once
+configured (bad key, unreachable endpoint) exits 4. `sloptimize doctor`
+reports which state you're in (`cloud: configured (<endpoint>)` or
+`cloud: not configured (...)`).
+
+`sloptimize fix --push` records the fix locally exactly as `sloptimize fix`
+always has — the local ledger stays the source of truth — and then also
+POSTs it to the cloud service; a push failure prints `push failed: <reason>`
+but the command still exits 0, since the fix was recorded either way.
+
 ## Recording a fix (the agent's last step)
 
 Once a fix is verified — the new build is live and the ledger has evidence

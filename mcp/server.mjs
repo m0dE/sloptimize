@@ -30,7 +30,9 @@ const TOOLS = [
   { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
     inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
   { name: 'get_issues', description: 'The issue catalogue (SPEC §3.7): every incident type on the ledger grouped by FOOTPRINT — the identity of a cause (type, phase, verdict, site, the game’s situation), never its time — with occurrences, first/last seen, builds, worst, the last verdict, and the fixes applied to it. Read this before proposing a fix: an issue with a fix already recorded is not new.',
-    inputSchema: { type: 'object', properties: { fp: { type: 'string', description: 'one footprint id' }, from: { type: 'string', description: 'ISO lower bound' }, to: { type: 'string', description: 'ISO upper bound' }, includeAutomated: { type: 'boolean', description: 'count robots’ sessions too (default false)' }, limit: { type: 'number', description: 'max rows (default 50)' } } } },
+    inputSchema: { type: 'object', properties: { fp: { type: 'string', description: 'one footprint id' }, from: { type: 'string', description: 'ISO lower bound' }, to: { type: 'string', description: 'ISO upper bound' }, includeAutomated: { type: 'boolean', description: 'count robots’ sessions too (default false)' }, limit: { type: 'number', description: 'max rows (default 50)' },
+      cloud: { type: 'boolean', description: 'read the cloud catalogue (every player, every build) instead of this machine\'s ledger — requires SLOPTIMIZE_KEY/SLOPTIMIZE_ENDPOINT' },
+      preset: { type: 'string', description: 'cloud only: 24h | 7d | 30d' }, source: { type: 'string', description: 'cloud only: filter by source (client|server)' }, kind: { type: 'string', description: 'cloud only: filter by incident kind' } } } },
   { name: 'record_fix', description: 'Append a fix report to .sloptimize/fixes.jsonl: title, issue, solution, commit, the FOOTPRINTS it addresses (from get_issues — this is how the Issues tab shows which fixes were applied to an issue), and MEASURED before/after windows of the ledger (default: the previous build vs the latest build with evidence; or name a build / an <ISO>..<ISO> range). Call this after verifying a perf fix — never with numbers of your own.',
     inputSchema: { type: 'object', properties: { title: { type: 'string' }, issue: { type: 'string' }, solution: { type: 'string' }, commit: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
@@ -72,6 +74,15 @@ async function callTool(name, args = {}) {
     return buildHistory(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), buckets: args.buckets ?? 24 });
   }
   if (name === 'get_issues') {
+    if (args.cloud === true) {
+      const { cloudConfig, fetchIssues } = await import('../src/cloud-client.js');
+      const cfg = cloudConfig(process.env, []);
+      if (!cfg) return { error: 'cloud not configured: set SLOPTIMIZE_KEY and SLOPTIMIZE_ENDPOINT' };
+      try {
+        const rows = await fetchIssues(cfg, { preset: args.preset, from: args.from, to: args.to, source: args.source, kind: args.kind });
+        return { source: 'cloud', endpoint: cfg.endpoint, footprints: rows.length, occurrences: rows.reduce((n, i) => n + i.count, 0), issues: args.fp ? rows.filter((i) => i.id === args.fp) : rows.slice(0, args.limit ?? 50) };
+      } catch (e) { return { error: e.message }; }
+    }
     const { buildIssues } = await import('../src/history.js');
     const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), from: args.from, to: args.to, includeAutomated: args.includeAutomated === true });
     const rows = args.fp ? issues.filter((i) => i.id === args.fp) : issues.slice(0, args.limit ?? 50);

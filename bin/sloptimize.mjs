@@ -88,8 +88,24 @@ if (cmd === 'issues') {
   // The issue catalogue (SPEC §3.7): every incident type grouped by
   // footprint, with occurrences, first/last, builds, worst, and the fixes
   // applied to it. `--from/--to` scope the count; `--all` includes robots.
-  const { buildIssues, agoText } = await import('../src/history.js');
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const { buildIssues, agoText } = await import('../src/history.js');
+  if (args.includes('--cloud')) {
+    // The cloud catalogue (SPEC cloud §8.4): every player, every build, not
+    // just this machine's ledger. Configuration is explicit — a missing key
+    // or endpoint is said, never guessed.
+    const { cloudConfig, fetchIssues } = await import('../src/cloud-client.js');
+    const cfg = cloudConfig(process.env, args);
+    if (!cfg) { console.error('sloptimize issues --cloud: set SLOPTIMIZE_KEY and SLOPTIMIZE_ENDPOINT (or --key/--endpoint)'); process.exit(2); }
+    let rows;
+    try { rows = await fetchIssues(cfg, { preset: get('--preset'), from: get('--from'), to: get('--to'), source: get('--source'), kind: get('--kind') }); }
+    catch (e) { console.error(`sloptimize issues --cloud: ${e.message}`); process.exit(4); }
+    if (json) { out(rows); process.exit(0); }
+    if (rows.length === 0) { console.log('no incidents in this range on the cloud catalogue'); process.exit(4); }
+    console.log(`cloud ${cfg.endpoint} · ${get('--preset') ?? (get('--from') ? 'custom' : '24h')} · ${rows.length} footprints`);
+    for (const i of rows) console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}] ${i.source}  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.fixCount ? `  fixes ${i.fixCount}` : ''}`);
+    process.exit(0);
+  }
   const issues = buildIssues(readJsonl('perf.jsonl', Infinity), {
     fixes: readJsonl('fixes.jsonl', Infinity), from: get('--from'), to: get('--to'), includeAutomated: args.includes('--all'),
   });
@@ -161,6 +177,8 @@ if (cmd === 'doctor') {
   console.log('  stated limits: no per-draw GPU timing; bisection ranks, never sums; workload repro not trajectory repro;');
   console.log('  gpu:* instruments fire only under a real WebGPU backend — a WebGL2-fallback session reads them as zeros, honestly;');
   console.log('  bench/gate (M3) not built yet in this install — verify fixes with counters (exact grade) + real-hardware sessions.');
+  const cfg = (await import('../src/cloud-client.js')).cloudConfig(process.env, args);
+  console.log(cfg ? `  cloud: configured (${cfg.endpoint})` : '  cloud: not configured (SLOPTIMIZE_KEY, SLOPTIMIZE_ENDPOINT)');
   process.exit(0);
 }
 
@@ -300,6 +318,14 @@ if (cmd === 'history' || cmd === 'fix') {
     const { appendFileSync, mkdirSync } = await import('node:fs');
     mkdirSync(DIR, { recursive: true });
     appendFileSync(join(DIR, 'fixes.jsonl'), JSON.stringify(fix) + '\n');
+    if (args.includes('--push')) {
+      // The local ledger is the source of truth — a push failure is
+      // reported but never turns a recorded fix into a failed command.
+      const { cloudConfig, pushFix } = await import('../src/cloud-client.js');
+      const cfg = cloudConfig(process.env, args);
+      if (!cfg) console.error('push skipped: set SLOPTIMIZE_KEY and SLOPTIMIZE_ENDPOINT');
+      else { try { await pushFix(cfg, fix); console.log('pushed to cloud'); } catch (e) { console.error(`push failed: ${e.message}`); } }
+    }
     out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}`);
     process.exit(0);
   }
@@ -342,5 +368,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
