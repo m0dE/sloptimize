@@ -125,6 +125,10 @@ monkey-patch around the inspector.
   budget checks but kept for continuity).
 - Flush: every 2s (aligned with the inspector's refresh throttle), write
   `.sloptimize/profile.json` — the rolling summary, not the ring.
+- Per-frame strings the host may pass and the recorder stamps at mint:
+  `phase` (the host's moment axis — menu/boot/launch/match…) and `ctx` (the
+  host's canonical situation, §3.7). Both are strings the host caches and
+  hands along; the recorder allocates nothing for them.
 
 ### 3.2 `profile.json` (rolling summary)
 
@@ -716,12 +720,17 @@ node and the page):
   `sloptimize fix --title … [--issue … --solution … --commit … --before …
   --after …]`; MCP: `record_fix`. The doctrine's last step.
 - **The in-game debugger** (`src/panel.js`, `createPanel`) — the human's
-  Ctrl+F12 modal, three tabs: **Session** (this tab's incidents + the note
-  box), **Timeline** (the strips above on one time axis, build boundaries
-  marked, a shared crosshair), **Fixes** (one card per fix: date, commit,
-  was → now, before/after sparklines and deltas). The host serves the ledger
-  back over a dev-gated GET (the reference: `/api/sloptimize/ledger`, the
-  2MB tail of `perf.jsonl` + `fixes.jsonl`); the page folds it.
+  Ctrl+F12 modal, four tabs: **Current Session** (this tab's incidents, each
+  with its footprint id, + the note box), **Issues** (§3.7: every incident
+  type grouped by footprint, `×N`, last seen, the situation as chips; a row
+  opens its history and the fixes applied), **Optimizations** (the strips
+  above on one time axis, build boundaries marked, a shared crosshair, and
+  one card per fix: date, commit, was → now, before/after sparklines and
+  deltas, merge/reject for proposals), **Settings** (the fix loop's
+  automation level). The host serves the ledger back over a dev-gated GET
+  (the reference: `/api/sloptimize/ledger`, the 2MB tail of `perf.jsonl` +
+  `fixes.jsonl`); the page folds it, so the Issues tab covers that tail and
+  the CLI covers the whole file.
 
 Honesty rules, inherited: a bucket with no evidence draws a gap, never a
 zero; a spike past a strip's ceiling (1.5 × p90) is drawn at the ceiling

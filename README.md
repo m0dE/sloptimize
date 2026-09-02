@@ -10,12 +10,16 @@ second, and cannot verify a "fix" it cannot measure. sloptimize gives the
 agent the three verbs it measurably lacks:
 
 - **MEASURE** — an always-on flight recorder detects incidents (CPU spikes,
-  fps drops, GPU stalls) automatically, in the background, and writes them to
-  disk before anyone asks. The human just plays.
+  fps drops, GPU stalls, and the player's unit or camera SNAPPING off its own
+  trajectory) automatically, in the background, and writes them to disk
+  before anyone asks. The human just plays.
 - **ATTRIBUTE** — every incident arrives classified with evidence
-  (`shader-compile: programs +2`, `long-script`, upload storms), clustered so
-  one cause is investigated once, and — with the attach tier — named by
-  **function and file:line** from a rolling sampling profiler.
+  (`shader-compile: programs +2`, `long-script`, upload storms,
+  `snap 17.5m in one frame`), stamped with a **footprint** — the identity of
+  its cause and the game's situation (which machine, at the helm or on foot,
+  in combat…), never its time — so one cause across builds, sessions and
+  players is one issue with a count and a fix history, and — with the attach
+  tier — named by **function and file:line** from a rolling sampling profiler.
 - **VERIFY** — exact counters (draw calls, triangles, pipelines — deterministic
   on any renderer), perf budgets with exit codes, and honest labels: timing
   numbers carry their regime (`hardware`/`software`) and are never compared
@@ -37,7 +41,7 @@ game/browser ──► incidents (auto-detected, classified, clustered)
                     ▼
               .sloptimize/          ◄── the agent's reading room
               profile.json            rolling summary (median/p95/counters/regime)
-              perf.jsonl              incident records, append-only
+              perf.jsonl              incident records, append-only, each with its footprint
               clusters.json           one cause = one cluster
               census.json             per-entity cost census (tier 1+)
               fixes.jsonl             the fix ledger: issue → solution, commit, MEASURED before/after
@@ -46,9 +50,10 @@ game/browser ──► incidents (auto-detected, classified, clustered)
         ┌───────────┴───────────┐
         ▼                       ▼
    Claude Code (agent)     in-game debugger (human, OPTIONAL)
-   woken on new incidents;  Session · Timeline · Fixes — this tab's
-   reads, fixes, verifies,  incidents + a note box; p95/draw calls/
-   records each fix         hitches over time; every fix's before/after
+   woken on new incidents   Session · Issues · Optimizations · Settings —
+   (fp=<id> ×N on each);    this tab's incidents + a note box; every cause
+   reads, fixes, verifies,  grouped by footprint with ×N, last seen and the
+   records each fix         fixes applied; p95/calls/hitches over time
 ```
 
 Showing the work is part of the loop: after a verified fix the agent runs
@@ -133,6 +138,27 @@ their own:
   unreferenced sourcemap at build time and decode locally (the game repo's
   `tools/decode-perf-stack.mjs` is a dependency-free reference decoder).
 
+**Coordinate jitter and the issue catalogue** (tier 1, ~200 lines in the
+game): feed the unit's and the camera's positions once per rendered frame
+and a snap or oscillation lands as a classified `jitter` record; declare a
+few facets of the player's situation and every incident of every kind is
+footprinted, counted and linked to its fixes — the debugger's **Issues**
+tab, `sloptimize issues`, and `fp=<id> ×N` on every wake line. The whole
+recipe, with the three traps that make a naive position detector lie
+(rotation, transient shakes, the sim's dt clamp), is
+`docs/JITTER-AND-FOOTPRINTS.md`.
+
+```js
+import { createMotionMonitor, canonicalContext, footprintOf } from 'sloptimize';
+const motion = createMotionMonitor({ unit: 'm', longFrameMs: 50,
+  tracks: { unit: { floor: 0.1 }, camera: { floor: 0.1, reach: 'boom', follows: 'unit' } } });
+// per rendered frame, after the render:
+motion.sample('unit',   pivot.x, pivot.y, pivot.z, now, { held: paused, phase, ctx });
+motion.sample('camera', cam.x,   cam.y,   cam.z,   now, { held: paused || lookInput, reach, phase, ctx });
+// once a second:  ctx = canonicalContext({ stance: 'helm', hull: 'elong-x', squad: 'duo', combat: 'no' });
+// at post:        for (const r of records) { r.ctx ??= ctx; const fp = footprintOf(r); if (fp) r.footprint = fp; }
+```
+
 Tier 2 (scene census, per-entity attribution, measured bisection) layers on
 top where the engine grants scene access — see `docs/SPEC.md` §4.
 
@@ -157,7 +183,9 @@ That carries three surfaces into every session:
 - **Prompt hook** — silent by default; when a NEW keyframe or budget breach
   exists, up to five lines land in the agent's context on your next prompt.
 - **MCP server** — `get_report`, `check_budgets`, `get_history`,
-  `record_fix`, and `attach_start` / `attach_stop` for the live tier.
+  `get_issues` (the catalogue by footprint), `record_fix` (with the
+  footprints it addresses), and `attach_start` / `attach_stop` for the live
+  tier.
 
 For instant wakeups (the agent starts fixing ~20s after the stutter, no
 prompt needed), arm `sloptimize watch` as a session Monitor — one line, in

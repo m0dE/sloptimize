@@ -26,9 +26,12 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} } },
   { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
     inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
-  { name: 'record_fix', description: 'Append a fix report to .sloptimize/fixes.jsonl: title, issue, solution, commit, and MEASURED before/after windows of the ledger (default: the previous build vs the latest build with evidence; or name a build / an <ISO>..<ISO> range). Call this after verifying a perf fix — never with numbers of your own.',
+  { name: 'get_issues', description: 'The issue catalogue (SPEC §3.7): every incident type on the ledger grouped by FOOTPRINT — the identity of a cause (type, phase, verdict, site, the game’s situation), never its time — with occurrences, first/last seen, builds, worst, the last verdict, and the fixes applied to it. Read this before proposing a fix: an issue with a fix already recorded is not new.',
+    inputSchema: { type: 'object', properties: { fp: { type: 'string', description: 'one footprint id' }, from: { type: 'string', description: 'ISO lower bound' }, to: { type: 'string', description: 'ISO upper bound' }, includeAutomated: { type: 'boolean', description: 'count robots’ sessions too (default false)' }, limit: { type: 'number', description: 'max rows (default 50)' } } } },
+  { name: 'record_fix', description: 'Append a fix report to .sloptimize/fixes.jsonl: title, issue, solution, commit, the FOOTPRINTS it addresses (from get_issues — this is how the Issues tab shows which fixes were applied to an issue), and MEASURED before/after windows of the ledger (default: the previous build vs the latest build with evidence; or name a build / an <ISO>..<ISO> range). Call this after verifying a perf fix — never with numbers of your own.',
     inputSchema: { type: 'object', properties: { title: { type: 'string' }, issue: { type: 'string' }, solution: { type: 'string' }, commit: { type: 'string' },
-      files: { type: 'array', items: { type: 'string' } }, before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
+      files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
+      before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
@@ -64,6 +67,12 @@ async function callTool(name, args = {}) {
   if (name === 'get_history') {
     const { buildHistory } = await import('../src/history.js');
     return buildHistory(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), buckets: args.buckets ?? 24 });
+  }
+  if (name === 'get_issues') {
+    const { buildIssues } = await import('../src/history.js');
+    const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), from: args.from, to: args.to, includeAutomated: args.includeAutomated === true });
+    const rows = args.fp ? issues.filter((i) => i.id === args.fp) : issues.slice(0, args.limit ?? 50);
+    return { footprints: issues.length, occurrences: issues.reduce((n, i) => n + i.count, 0), issues: rows };
   }
   if (name === 'record_fix') {
     const { buildFix } = await import('../src/history.js');

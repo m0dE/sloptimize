@@ -73,6 +73,26 @@ lines, only when something is NEW:
 
 Silence means nothing new — the hook exits 0 with no output.
 
+The watcher (below) adds the live lines. Reading one:
+
+```
+sloptimize ↯ jitter unit snap 17.542 (jump [-16.25, 5.552, 3.584], expected 1.363 of travel
+  at 33.25/s in a 41ms frame) @ … → snap (17.542m off its trajectory …; motion resumed from
+  the new place) phase=play ctx=combat=yes,hull=droyd-g,squad=duo,stance=helm,view=tps
+  build=v178… fp=b5b203ba ×2 [.sloptimize]
+```
+
+`↯` is a coordinate jump: which track (the unit or the camera), how far off
+its own trajectory it landed, what constant velocity predicted for that
+frame, and the verdict — `snap` (one displacement, motion resumed),
+`oscillation` (frame-to-frame reversals), `follows-track` (the camera rode
+along with the unit; that record is the cause), `reach-change` (the camera
+boom clamped or zoomed), `long-frame-catch-up` (the stall it rode is the
+incident — silent on the watcher, listed in the ledger). `ctx=` is the
+game's situation when it happened; `fp=` is the cause's id and `×N` how
+often this ledger has seen it — `sloptimize issues --fp <id>` is its history
+and the fixes already applied.
+
 ## Several sessions at once: who gets told?
 
 **All of them, once each.** Dedup state is **per working directory**

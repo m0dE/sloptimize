@@ -3,7 +3,10 @@
 What the mecharoyale deployment wired, generalized. Five pieces; each is
 small, and the first three are enough to be useful. This doc is the ONE-TIME
 wiring; for how to use the result day to day (the operator's verbs, how new
-and concurrent Claude Code sessions pick up the feed), see USAGE.md.
+and concurrent Claude Code sessions pick up the feed), see USAGE.md. The
+jitter detector and the footprint/issue catalogue have their own step-by-step
+cookbook with the traps spelled out: JITTER-AND-FOOTPRINTS.md — read it
+after §1 here.
 
 ## 1. The in-page runtime (the game feeds the recorder)
 

@@ -38,9 +38,43 @@ that:
   hitches.
 - Bind a keyframe chord (Ctrl+F12 recommended) AND a small clickable chip:
   capture the trailing 5s FIRST, then open the package's debugger
-  (`createPanel` — Session · Timeline · Fixes + the note box) and post the
-  keyframe only if a note comes back.
-- Stamp `build` and `phase` on every posted record.
+  (`createPanel` — Current Session · Issues · Optimizations · Settings + the
+  note box) and post the keyframe only if a note comes back. The incident
+  rows you hand it carry `fp` (the footprint id) and, for rows that are not
+  milliseconds, `label`/`glyph`.
+- Stamp `build`, `phase`, `automated` (navigator.webdriver), `ctx` and
+  `footprint` (`footprintOf(record)`) on every posted record — the writer
+  names the cause; every reader agrees without re-deriving.
+
+### 2b. The jitter detector (the second incident type)
+
+Read `docs/JITTER-AND-FOOTPRINTS.md` §1–2, then:
+
+- `createMotionMonitor({ unit, longFrameMs: <the sim's dt clamp, ms>,
+  tracks: { unit: { floor }, camera: { floor, reach: 'boom', follows: 'unit' } } })`.
+  `longFrameMs` MUST be the game's real clamp, found in its loop — never a
+  guess; the floor is the smallest pop a player can see in the game's units.
+- Feed once per RENDERED frame, after the render (transient shakes must not
+  be sampled): the `unit` track is the point the view is arranged around
+  (the pivot — rotation-invariant), NEVER the raw camera; the `camera` track
+  is the eye, HELD on any frame that consumed look/zoom input, with `reach`
+  = its distance to the pivot.
+- Hold both tracks while paused/unfocused and in phases without a
+  continuous view (boot, a cinematic that cuts). Derive a view-configuration
+  key (pivot publisher · camera mode · spectate target) and `cut()` when it
+  changes — never enumerate call sites.
+- Drain beside the recorder into the same post.
+
+### 2c. The situation and footprints
+
+Read `docs/JITTER-AND-FOOTPRINTS.md` §3–4, then:
+
+- Write a `context()` returning ≤6 LOW-CARDINALITY facets of the player's
+  situation (the reference: stance, hull, squad, view, combat) — categories,
+  never positions or counters. Refresh `canonicalContext(context())` once a
+  second; pass the string as `ctx` to `frame()`, `usermark()` and every
+  motion `sample()`.
+- At post, for every record: `r.ctx ??= ctx; const fp = footprintOf(r); if (fp) r.footprint = fp;`.
 - Post a `{type:'heartbeat', medianFrameMs, p95Ms, calls, triangles,
   programs}` ledger line once a minute while armed — the counters are the
   Timeline's draw-call history.
@@ -92,8 +126,16 @@ knows what it is.
 3. Fire a synthetic keyframe: `__sloptimize.mark('install-test')` in the
    console (or the chord).
 4. Run `npx sloptimize report --dir <game>/.sloptimize` and confirm the
-   `install-test` usermark is in it.
+   `install-test` usermark is in it — with a `footprint` and a `ctx` on the
+   ledger line.
 5. Run `npx sloptimize check` and report the budget verdict.
+6. Jitter: `__sloptimize.motion()` (or your equivalent) shows both tracks
+   sampling with `held` counting up on look input; force one jump of the
+   unit (move the body/hull by a metre in one frame from the console) and
+   confirm a `jitter` record with `kind: 'snap'` and the right `units` lands
+   — and that a camera flick, a mode flip and a respawn land NOTHING.
+7. `npx sloptimize issues --dir <game>/.sloptimize` lists the footprints
+   seen so far, the `install-test` keyframe among them.
 
 Only after 4 succeeds may you tell the user the install is complete —
 report what was wired, the verify evidence, and the one daily obligation
