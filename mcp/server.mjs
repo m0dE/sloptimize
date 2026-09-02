@@ -13,8 +13,11 @@
 // wake is not a contract this host documents; when it becomes one, the
 // watcher moves here (SPEC-attach §2, delivery edge).
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+
+const PKG_VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version;
 
 const DIR = () => join(process.cwd(), '.sloptimize');
 let attachSession = null;
@@ -111,7 +114,7 @@ rl.on('line', (line) => {
     try {
       if (msg.method === 'initialize') {
         reply(msg.id, { protocolVersion: msg.params?.protocolVersion ?? '2024-11-05',
-          capabilities: { tools: {} }, serverInfo: { name: 'sloptimize', version: '0.3.0' } });
+          capabilities: { tools: {} }, serverInfo: { name: 'sloptimize', version: PKG_VERSION } });
       } else if (msg.method === 'tools/list') {
         reply(msg.id, { tools: TOOLS });
       } else if (msg.method === 'tools/call') {
