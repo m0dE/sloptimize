@@ -5,7 +5,7 @@
   "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench — so a coding agent can measure, attribute, and verify instead of guessing.",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "repository": {
     "type": "git",

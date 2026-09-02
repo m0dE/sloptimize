@@ -1,5 +1,7 @@
 # sloptimize
 
+[![npm](https://img.shields.io/npm/v/sloptimize.svg)](https://www.npmjs.com/package/sloptimize)
+
 sloptimize optimizes your game's rendering performance by finding the
 bottlenecks and reporting them to Claude Code to fix — all while you just play
 the game. No action is required on your end.
@@ -64,11 +66,17 @@ and `sloptimize history` read that ledger back.
 
 ## Install
 
+Published on npm as [`sloptimize`](https://www.npmjs.com/package/sloptimize).
+Node 22+.
+
 ```bash
-npm i -D sloptimize        # in your game repo
-# or one-off: npx sloptimize attach --launch http://localhost:3000
-# or from a checkout: node sloptimize/bin/sloptimize.mjs … (bare Node, no install)
+npm i -D sloptimize          # in your game repo (recommended)
+npx sloptimize --version     # confirm: prints the installed version
 ```
+
+No install at all for a one-off: `npx sloptimize attach --launch http://localhost:3000`.
+Working from a git checkout instead? `node /path/to/sloptimize/bin/sloptimize.mjs …`
+runs on bare Node.
 
 Zero dependencies, no postinstall, no supply chain — npm is delivery only.
 
@@ -164,13 +172,16 @@ top where the engine grants scene access — see `docs/SPEC.md` §4.
 
 ## Claude Code integration — the whole point
 
-This repo IS a Claude Code plugin. One install:
+The npm package IS a Claude Code plugin — skill, prompt hook, and MCP server
+ship inside it. After `npm i -D sloptimize`, point Claude at it:
 
 ```bash
-claude --plugin-dir node_modules/sloptimize    # after npm i -D sloptimize
-claude --plugin-dir /path/to/sloptimize        # from a checkout
-# or via marketplace: /plugin marketplace add m0dE/sloptimize && /plugin install sloptimize
+claude --plugin-dir node_modules/sloptimize
 ```
+
+Alternatives: `claude --plugin-dir /path/to/sloptimize` from a git checkout,
+or via the marketplace:
+`/plugin marketplace add m0dE/sloptimize` then `/plugin install sloptimize`.
 
 Then let the agent wire your game: `/sloptimize:install` walks it through
 the tier-1 integration (runtime, sink, budgets, hooks) and refuses to call

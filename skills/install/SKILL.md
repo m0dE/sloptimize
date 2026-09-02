@@ -16,7 +16,8 @@ not report success until step 7 shows your test keyframe in
 
 ## 1. Locate the package and the game's shape
 
-- Find sloptimize: `node_modules/sloptimize` (npm) or a sibling checkout.
+- Find sloptimize: `node_modules/sloptimize` (from `npm i -D sloptimize`) or a
+  sibling checkout. If neither exists, install it from npm first.
 - Identify: the render loop's stats site (wherever `renderer.info` is
   already read), the dev-server topology (vite? own server? esbuild?), and
   the dev-only switch the project already uses for debug endpoints.
