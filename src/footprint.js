@@ -71,6 +71,52 @@ export function contextOfKey(key) {
   return out;
 }
 
+/** Scrub an error message down to its shape: quoted strings, hex ids and
+ *  numbers collapse to placeholders, whitespace and `|` (the key separator)
+ *  are normalized, and the result is capped so a huge message never bloats a
+ *  key. Two errors that differ only by which mesh id or how many ms are the
+ *  SAME cause once normalized. */
+export function normalizeErrorMessage(msg) {
+  return String(msg ?? '')
+    .replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '"…"')
+    .replace(/0x[0-9a-f]{6,}/gi, '#')
+    .replace(/\b[0-9a-f]{6,}\b/gi, '#')
+    .replace(/\d+(\.\d+)?/g, '#')
+    .replace(/\s+/g, ' ')
+    .replace(/\|/g, '¦')
+    .trim()
+    .slice(0, 120);
+}
+
+/** `<path>#<function>` of the top stack frame, without origin, query, hash,
+ *  line or column — the site an error is thrown from, apart from which build
+ *  served it or which line the minifier put it on. */
+export function topFrameSite(stack) {
+  const lines = Array.isArray(stack) ? stack : String(stack ?? '').split('\n');
+  for (const raw of lines) {
+    const line = String(raw).trim();
+    if (!line.startsWith('at ')) continue;
+    // "at fn (loc)" | "at loc"
+    const m = /^at (?:(.+?) \()?(.+?)\)?$/.exec(line);
+    if (!m) continue;
+    const fn = m[1] && !/^(async |new )/.test(m[1]) ? m[1] : (m[1] ? m[1].replace(/^(async |new )+/, '') : 'anonymous');
+    let loc = m[2];
+    loc = loc.replace(/:\d+:\d+$/, '').replace(/:\d+$/, '');
+    try { const u = new URL(loc); loc = u.pathname; } catch { /* not a URL: a path */ }
+    loc = loc.replace(/[?#].*$/, '');
+    return `${loc}#${fn || 'anonymous'}`;
+  }
+  return 'unknown';
+}
+
+/** The site a server incident's top self-time frame names — `unattributed`
+ *  when attribution was turned off or the server sent no frames at all. */
+function serverSite(rec) {
+  const f = Array.isArray(rec.frames) ? rec.frames[0] : undefined;
+  if (rec.attribution === 'off' || !f) return 'unattributed';
+  return `${f.file ?? '?'}#${f.fn ?? 'anonymous'}`;
+}
+
 /** The verdict a record leads with, or 'unclassified'. */
 function topGuess(rec) {
   return rec.classification?.[0]?.guess ?? 'unclassified';
@@ -132,6 +178,12 @@ function baseKey(rec) {
     case 'gpu-settle':
       // Only a cap hit is an incident; a settled wait is verification evidence.
       return rec.settled === false ? `gpu-settle|${rec.tag ?? '?'}` : null;
+    case 'error':
+      return `error|${rec.source ?? 'client'}|${rec.name ?? 'Error'}|${normalizeErrorMessage(rec.message)}|${topFrameSite(rec.stack)}`;
+    case 'server-hitch':
+      return `server-hitch|${phase}|${serverSite(rec)}`;
+    case 'server-stall':
+      return `server-stall|${phase}|${serverSite(rec)}`;
     default:
       return null;
   }
@@ -165,6 +217,9 @@ function describeBase(parts) {
     case 'warm': return { glyph: '🔥', label: `warm · ${parts[1] ?? '?'} (${parts[2] ?? '?'})`, phase: parts[3] ?? '?' };
     case 'gpu-stall': return { glyph: '⏳', label: 'gpu-process stall', phase: parts[1] ?? '?' };
     case 'gpu-settle': return { glyph: '⏳', label: `gpu-settle cap hit · ${parts[1] ?? '?'}`, phase: '' };
+    case 'error': return { glyph: '✖', label: `error · ${parts[2] ?? '?'} · ${(parts[3] ?? '').slice(0, 60)}`, phase: '' };
+    case 'server-hitch': return { glyph: '▣', label: `server tick over budget · ${parts[2] ?? '?'}`, phase: parts[1] ?? '?' };
+    case 'server-stall': return { glyph: '▦', label: `event-loop stall · ${parts[2] ?? '?'}`, phase: parts[1] ?? '?' };
     default: return { glyph: '·', label: String(key ?? ''), phase: '' };
   }
 }

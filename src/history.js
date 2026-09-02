@@ -256,6 +256,9 @@ function worstOf(r) {
     case 'warm': return typeof r.worstBatchMs === 'number' ? { value: r.worstBatchMs, unit: 'ms' } : undefined;
     case 'gpu-stall': return typeof r.queueDoneMs === 'number' ? { value: r.queueDoneMs, unit: 'ms' } : undefined;
     case 'gpu-settle': return typeof r.ms === 'number' ? { value: r.ms, unit: 'ms' } : undefined;
+    case 'error': return undefined;
+    case 'server-hitch': return typeof r.tickMs === 'number' ? { value: r.tickMs, unit: 'ms' } : undefined;
+    case 'server-stall': return typeof r.p99Ms === 'number' ? { value: r.p99Ms, unit: 'ms' } : undefined;
     default: return undefined;
   }
 }
