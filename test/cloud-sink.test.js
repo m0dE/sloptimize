@@ -120,23 +120,50 @@ test('pagehide during an in-flight flush beacons only records not yet sent, and 
   assert.equal(sink.stats().queued, 0);
 });
 
-test('enqueue during an in-flight flush is never silently lost, even under the queue cap', async () => {
+test('enqueue during an in-flight flush is never silently lost, even under the queue cap (record identity)', async () => {
+  const h = harness();
+  let resolveFirst;
+  let callCount = 0;
+  const fetch = (url, init) => {
+    h.calls.push({ url, body: JSON.parse(init.body) });
+    callCount++;
+    if (callCount === 1) return new Promise((res) => { resolveFirst = res; });
+    return Promise.resolve({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) });
+  };
+  // maxQueue smaller than the in-flight batch, so a fixed-vs-broken splice
+  // point actually changes which records survive the cap — not just a count.
+  const sink = mk(h, { fetch, maxQueue: 2 });
+  sink.enqueue([{ type: 'hitch', at: '0' }, { type: 'hitch', at: '1' }]);
+  const flushPromise = sink.flush(); // batch [0,1] must leave `queue` immediately, before the await
+  sink.enqueue([{ type: 'hitch', at: '2' }]);
+  sink.enqueue([{ type: 'hitch', at: '3' }]);
+  sink.enqueue([{ type: 'hitch', at: '4' }]); // cap (2) trims '2' — only '3','4' should survive
+  resolveFirst({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) });
+  await flushPromise;
+  assert.deepEqual(h.calls[0].body.records.map((r) => r.at), ['0', '1']); // sent batch is exactly the pre-flush records
+  assert.equal(sink.stats().sent, 2);
+  assert.equal(sink.stats().droppedLocally, 1); // only '2' dropped by the cap, not '3' or '4'
+  await sink.flush(); // nothing new to drain; whatever is left in queue goes out now
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.at), ['3', '4']); // exactly what survived, in order
+  assert.equal(sink.stats().queued, 0);
+});
+
+test('a pagehide beacon and a concurrent flush success never double-subtract droppedLocally into negative', async () => {
   const h = harness();
   let resolveFetch;
   const fetch = (url, init) => {
     h.calls.push({ url, body: JSON.parse(init.body) });
     return new Promise((res) => { resolveFetch = res; });
   };
-  const sink = mk(h, { fetch, maxQueue: 3 });
-  sink.enqueue([{ type: 'hitch', at: '0' }, { type: 'hitch', at: '1' }, { type: 'hitch', at: '2' }]);
-  const flushPromise = sink.flush(); // batch [0,1,2] removed from queue and in flight
-  sink.enqueue([{ type: 'hitch', at: '3' }, { type: 'hitch', at: '4' }, { type: 'hitch', at: '5' }, { type: 'hitch', at: '6' }]);
-  // the in-flight batch [0,1,2] must be untouched by this trim — only the
-  // newly-enqueued records compete for the cap.
+  const sink = mk(h, { fetch, maxQueue: 1 });
+  sink.enqueue([{ type: 'hitch', at: 'a' }, { type: 'hitch', at: 'b' }]); // cap trims 'a' -> droppedLocally = 1
+  assert.equal(sink.stats().droppedLocally, 1);
+  const flushPromise = sink.flush(); // batch ['b'] spliced out and in flight; queue now []
+  sink.enqueue([{ type: 'hitch', at: 'c' }]); // queue = ['c']; droppedLocally still 1
+  h.target.fire('pagehide', {}); // beacons ['c'] carrying droppedLocally:1, then credits itself for that 1
+  assert.equal(h.beacons.length, 1);
   resolveFetch({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) });
-  await flushPromise;
-  const s = sink.stats();
-  assert.equal(s.sent, 3); // 0,1,2 delivered, none duplicated or lost
-  assert.equal(s.queued + s.droppedLocally, 4); // 3,4,5,6 fully accounted for
-  assert.equal(s.queued + s.sent + s.droppedLocally, 7); // total records ever handed to the sink
+  await flushPromise; // flush() also tries to credit the same 1 it saw before onHide ran
+  assert.equal(sink.stats().droppedLocally, 0);
+  assert.ok(sink.stats().droppedLocally >= 0);
 });

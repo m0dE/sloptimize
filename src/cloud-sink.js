@@ -58,7 +58,7 @@ export function createCloudSink(opts = {}) {
       });
       stats.lastStatus = res.status;
       if (res.ok) {
-        droppedLocally -= sentDropped;
+        droppedLocally = Math.max(0, droppedLocally - sentDropped);
         failures = 0; backoffUntil = 0; stats.sent += batch.length; stats.lastError = null;
       } else if (res.status === 429 || res.status >= 500) {
         // Retryable: put the batch back at the front (it's the oldest data)
@@ -93,8 +93,9 @@ export function createCloudSink(opts = {}) {
       // `queue`, so what's here is guaranteed disjoint from it — no duplicate
       // delivery risk.
       const batch = queue.slice(0, maxBatch);
+      const beaconedDropped = droppedLocally;
       const ok = beacon(`${endpoint}?key=${encodeURIComponent(key)}`, new Blob([JSON.stringify(body(batch))], { type: 'application/json' }));
-      if (ok) { queue = queue.slice(batch.length); droppedLocally = 0; stats.sent += batch.length; }
+      if (ok) { queue = queue.slice(batch.length); droppedLocally = Math.max(0, droppedLocally - beaconedDropped); stats.sent += batch.length; }
     } catch { /* never throw into the host */ }
   }
   const timer = setI(() => { flush(); }, flushMs);
