@@ -23,7 +23,8 @@
     "./history": "./src/history.js",
     "./panel": "./src/panel.js",
     "./cloud": "./src/cloud-sink.js",
-    "./errors": "./src/errors.js"
+    "./errors": "./src/errors.js",
+    "./node": "./src/node/index.js"
   },
   "files": [
     "bin",
