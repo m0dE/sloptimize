@@ -184,8 +184,10 @@ cloud.enqueue(batch);     // same records, teed to the cloud sink's own queue an
 `enqueue(records)` just appends to the sink's internal queue (capped at
 `maxQueue`, oldest dropped and counted honestly) — it does not fetch or
 flush itself; the sink's own timer (and `pagehide`/`visibilitychange`) drain
-and post it on the usual backoff. Pair it with `sloptimize/errors`'
-`createErrorMonitor()` to fold uncaught client errors into the same feed.
+and post it on the usual backoff. Pair it with `createErrorMonitor(rec)` —
+the SAME recorder from §1, not a bare call — so uncaught client errors land
+in `rec` via `recorder.emit()` and ride `rec.drainRecords()` into `batch`
+above like any hitch, with no separate wiring to the cloud sink needed.
 
 ### Game server (optional, paid, invite-only)
 

@@ -221,11 +221,12 @@ is invite-only, and the endpoint you use is whatever that page shows you).
 It hands you three snippets:
 
 ```js
-// browser: tee live records to the cloud sink beside the local sink
-import { createCloudSink } from 'sloptimize/cloud';
-import { createErrorMonitor } from 'sloptimize/errors';
-const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build });
-const errors = createErrorMonitor();
+// browser: errors ride the same recorder as hitches, and reach the cloud
+// because the recorder is one of the sink's sources
+import { createRecorder, createErrorMonitor, createCloudSink } from 'sloptimize';
+const rec = createRecorder({ budgetFrameMs: 16.7 });
+createErrorMonitor(rec);
+const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build, sources: [rec] });
 ```
 
 ```js
