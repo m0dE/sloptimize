@@ -295,6 +295,68 @@ change reads as a change of motion; the camera is judged only on frames
 without look input, so a pop under a moving mouse is missed (the unit
 track still sees it if the pivot moved).
 
+### 3.7 Footprints, situation, and the issue catalogue
+
+A ledger line is an OCCURRENCE. Two lines a day apart, on two builds, on
+two players' machines, are very often the same thing happening again, and
+a log that cannot say so cannot answer "how often does this happen" or
+"what did we do about it". So every incident record carries a
+**footprint**: the identity of its cause, apart from its occurrence.
+
+```json
+"footprint": { "v": 1, "id": "a3f92c1d", "key": "jitter|unit|snap|play|snap|horizontal|ctx:hull=elong-x,squad=duo,stance=helm" }
+```
+
+- `key` is readable and is exactly what was hashed: the record type, the
+  phase, the closed-vocabulary verdict, whatever identifies the SITE (a
+  hitch's minted `material@object` pairs, sorted and deduped; a jitter's
+  track, kind and dominant axis — vertical vs horizontal; a warm's tag and
+  kind), and the host's situation (below). Never the timestamp, the frame
+  number, the exact milliseconds or metres, the build, the machine.
+- `id` is FNV-1a 32 of `v<version>:<key>`, 8 hex characters — a dedupe key
+  over thousands of causes, stable across runtimes, no dependency.
+- `v` versions the derivation. A change to what enters a key is a new
+  version, never a silent reshuffle of old ids; a reader re-derives a
+  record stamped with an older version and keeps one stamped with the
+  current one (the writer's word stands).
+
+**Situation.** Time is not a facet of the cause; the game's STATE is. A
+hitch at the helm of a heavy machine with a copilot aboard in a firefight
+is not the same issue as the same hitch on foot in an empty lobby, and no
+profiler can know which facets matter for which game. So the host declares
+them: `context()` returns a few LOW-CARDINALITY facets — categories, never
+positions or counters — the runtime canonicalises them once a second
+(`canonicalContext`: keys sorted, `k=v` pairs joined by `,`, separators
+scrubbed) and hands the string to the recorder per frame (`frame({ ctx })`,
+`usermark({ ctx })`, the motion monitor's `meta.ctx`), which stamps it on
+the record as `ctx`; host-built records take the current one at post. The
+reference integration's facets: `stance` (foot|helm|crew|dead), `hull`
+(the frame's name), `squad` (solo|duo|trio), `view` (fp|tps), `combat`
+(yes|no, a ten-second window after any hit).
+
+**The catalogue.** `buildIssues(records, { fixes, from, to, now })` folds a
+ledger by footprint: one row per id with `count`, `first`, `last`,
+`lastAgoMs`, `builds` seen, `worst` (with its unit), the last verdict's
+evidence, the parsed situation facets, and `fixes` — every fix record whose
+`footprints` names the id. Robots' records (`automated: true`) are left out
+unless asked for. A fix names what it addresses:
+`sloptimize fix propose --footprints a3f92c1d,… --title "…"` (also on
+`sloptimize fix`); the catalogue answers "which fixes were applied to this
+issue" by that join, and the before/after windows of each say whether it
+landed.
+
+Surfaces: `sloptimize issues` (the catalogue; `--fp <id>` for one issue's
+history), `sloptimize report` (the top five), every `watch` wake line
+(`fp=a3f92c1d ×7` — the count is the ledger's, seeded at arm), and the
+debugger's **Issues** tab: every incident type grouped by footprint, most
+frequent first, with `×N` and `last 3h ago`; picking a row opens its
+history — key, first and last seen, builds, worst, last verdict, and the
+fixes applied to it, or the exact command that would record one.
+
+Cloud path: the footprint is computed by the writer, so a service that
+ingests many clients' records dedupes on `footprint.id` from day one; the
+fold is the same code.
+
 ---
 
 ## 4. Census and attribution

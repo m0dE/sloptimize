@@ -117,6 +117,19 @@ Either coexists with the ambient hook in the other sessions; dedup state
 is per directory, so the watcher consuming its own view hides nothing from
 anyone else.
 
+## The Issues tab: what keeps happening, and what was done about it
+
+Every incident carries a **footprint** — the identity of its cause (kind,
+phase, verdict, site, and the game's own situation: which machine, at the
+helm or on foot, squad size, in combat), never the time it happened. The
+debugger's **Issues** tab groups the whole ledger by footprint: one row per
+cause, `×N` occurrences, `last 3h ago`, the situation as chips. Click a row
+for its history: first and last seen, builds, worst, the last verdict, and
+every fix a session recorded against it (`sloptimize fix propose
+--footprints <id> …`). The same catalogue is `sloptimize issues` in a
+shell, and every watcher wake line ends with `fp=<id> ×N` so an agent knows
+on arrival whether it is looking at something new or the seventh time.
+
 ## Reading on demand (any session, any shell)
 
 ```bash

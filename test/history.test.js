@@ -3,7 +3,8 @@
 // MEASURED windows of that same ledger — never a typed-in number.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildHistory, summarizeWindow, buildFix, latestBuilds } from '../src/history.js';
+import { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText } from '../src/history.js';
+import { footprintOf } from '../src/footprint.js';
 
 const T0 = Date.parse('2026-01-01T00:00:00.000Z');
 const iso = (min) => new Date(T0 + min * 60_000).toISOString();
@@ -144,4 +145,53 @@ test('buildHistory carries fixes through, newest first, clipped to their own fie
   const fix = buildFix(ledger(), { title: 'a', now: iso(130) });
   const h = buildHistory(ledger(), { fixes: [fix, { ...fix, at: iso(140), title: 'b' }] });
   assert.deepEqual(h.fixes.map((f) => f.title), ['b', 'a']);
+});
+
+test('buildIssues: one row per footprint across builds, with count, first/last, builds, worst, and the fixes that name it', () => {
+  const recs = ledger();
+  const jit = (min, build, extra = {}) => ({ type: 'jitter', at: iso(min), track: 'unit', kind: 'snap', units: 0.5, jump: [0.5, 0, 0], build,
+    classification: [{ guess: 'snap', confidence: 'high', evidence: 'e' }], phase: 'play', ...extra });
+  recs.push(jit(10, 'v1'), jit(11, 'v1', { units: 0.9, jump: [0.9, 0, 0] }), jit(70, 'v2'));
+  recs.push(jit(12, 'v1', { ctx: 'crew=copilot,hull=walker' }));                 // a different situation: its own row
+  recs.push(jit(13, 'v1', { automated: true }));                                  // a robot's: not a player's issue
+  const now = T0 + 120 * 60_000;
+  const fixes = [
+    { type: 'fix', id: 'f1', at: iso(65), title: 'Ease hull corrections', commit: 'abc1234', status: 'merged', footprints: [footprintOf(jit(0)).id] },
+    { type: 'fix', id: 'f2', at: iso(66), title: 'Unrelated', footprints: ['00000000'] },
+    { type: 'fix', id: 'f3', at: iso(67), title: 'No footprints' },
+  ];
+  const issues = buildIssues(recs, { fixes, now });
+  const snap = issues.find((i) => i.key === 'jitter|unit|snap|play|snap|horizontal');
+  assert.ok(snap, JSON.stringify(issues.map((i) => i.key)));
+  assert.equal(snap.count, 3);
+  assert.deepEqual(snap.builds, ['v1', 'v2']);
+  assert.equal(snap.first, iso(10));
+  assert.equal(snap.last, iso(70));
+  assert.equal(snap.lastAgoMs, 50 * 60_000);
+  assert.deepEqual(snap.worst, { value: 0.9, unit: 'u' });
+  assert.equal(snap.glyph, '↯');
+  assert.equal(snap.phase, 'play');
+  assert.deepEqual(snap.fixes.map((f) => f.id), ['f1']);
+  assert.equal(snap.fixes[0].status, 'merged');
+  const copilot = issues.find((i) => i.key.endsWith('ctx:crew=copilot,hull=walker'));
+  assert.equal(copilot.count, 1);
+  // The hitches of the fixture fold too — the catalogue is every incident type.
+  const longScript = issues.find((i) => i.key === 'hitch|undefined|long-script' || i.key.startsWith('hitch|'));
+  assert.ok(longScript);
+  assert.ok(longScript.count >= 3);
+  assert.deepEqual(longScript.worst, { value: 900, unit: 'ms' });
+  // Most frequent first.
+  for (let i = 1; i < issues.length; i++) assert.ok(issues[i - 1].count >= issues[i].count);
+  // A range scopes the occurrences: only v2's jitter in the second hour.
+  const late = buildIssues(recs, { fixes, now, from: iso(60) });
+  assert.equal(late.find((i) => i.key === snap.key).count, 1);
+  assert.equal(agoText(50 * 60_000), '50m ago');
+  assert.equal(agoText(30 * 3600_000), '30h ago');
+  assert.equal(agoText(5 * 86400_000), '5d ago');
+  assert.equal(agoText(20_000), '20s ago');
+});
+
+test('buildFix carries the footprints a fix names', () => {
+  const fix = buildFix(ledger(), { title: 'x', footprints: ['a3f92c1d'] });
+  assert.deepEqual(fix.footprints, ['a3f92c1d']);
 });

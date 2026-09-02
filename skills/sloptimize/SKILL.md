@@ -54,6 +54,16 @@ transform in that phase and fix the discontinuity at its source. Verify
 with `sloptimize history` (jitters/h before → after) and a played session
 — never by raising the floor.
 
+Every wake line ends with the record's FOOTPRINT — `fp=<id> ×N` (SPEC §3.7):
+the identity of the cause (kind · phase · verdict · site · the game's
+situation: hull, stance, squad, combat), and how many times this ledger has
+seen it. ×1 is new; ×40 is the same issue again — read
+`sloptimize issues --fp <id>` FIRST: its history, and every fix already
+applied to it (do not re-propose one). When you record a fix, name the
+footprints it addresses: `sloptimize fix propose --footprints <id>,<id> …`
+— that is how the Issues tab and the catalogue show "which fixes were
+applied", and how the before/after says whether yours landed.
+
 Push channel: if a `sloptimize watch` Monitor is armed in this session,
 its lines (★ usermark / ⚡ hitch / ⏳ gpu / ◌ feed quiet) arrive as
 notifications; each one starts this playbook unprompted at step 1.

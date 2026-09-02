@@ -190,9 +190,12 @@ sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
 sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
+sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
+                         (cause + situation, never time) — how often, how
+                         recently, which fixes were applied; --fp <id> for one
 sloptimize watch         the push channel: one stdout line per usermark /
                          ≥100ms hitch / gpu cap-hit / coordinate jitter /
-                         feed dark; never exits
+                         feed dark, each with fp=<id> ×N; never exits
 sloptimize doctor        what is wired, what is degraded, stated limits
 ```
 

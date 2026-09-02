@@ -12,6 +12,8 @@
 // in-page panel folds the same bytes in the browser, and a test folds a
 // fixture — one implementation, three readers.
 
+import { footprintOf, describeFootprint } from './footprint.js';
+
 /** A date as ms — a number passes through, a string parses; NaN for junk. */
 function asMs(v) { return typeof v === 'number' ? v : Date.parse(v); }
 
@@ -184,8 +186,88 @@ export function buildFix(records, opts = {}) {
     at: opts.now ?? new Date().toISOString(),
     title: opts.title ?? '',
   };
-  for (const k of ['issue', 'solution', 'commit', 'files']) if (opts[k]) fix[k] = opts[k];
+  for (const k of ['issue', 'solution', 'commit', 'files', 'footprints']) if (opts[k]) fix[k] = opts[k];
   fix.before = windowReport(records, resolveWindow(records, before, 'before'));
   fix.after = windowReport(records, resolveWindow(records, after, 'after'));
   return fix;
+}
+
+/**
+ * THE ISSUE CATALOGUE (SPEC §3.7): every incident record in `records`,
+ * grouped by footprint — the same cause across builds, sessions and days is
+ * ONE row — with how often it happened, when first and last, on which builds,
+ * how bad at worst, and which fixes were applied to it (a fix names the
+ * footprints it addresses in `footprints`). Records stamped by the writer keep
+ * their footprint; older lines are derived here, so the catalogue reaches back
+ * to before footprints existed.
+ *
+ * `from`/`to` scope the occurrences counted (ms or ISO; either end open);
+ * `now` is for `lastAgoMs`. Sorted most-frequent first; ties by most recent.
+ */
+export function buildIssues(records, opts = {}) {
+  const lo = opts.from !== undefined && opts.from !== null && opts.from !== '' ? asMs(opts.from) : -Infinity;
+  const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
+  const now = opts.now ?? Date.now();
+  const groups = new Map();
+  for (const { t, r } of stamped(records)) {
+    if (t < lo || t > hi) continue;
+    if (r.automated === true && opts.includeAutomated !== true) continue;   // a robot's session is not a player's issue
+    const fp = footprintOf(r);
+    if (!fp) continue;
+    let g = groups.get(fp.id);
+    if (!g) {
+      const d = describeFootprint(fp.key);
+      g = { id: fp.id, key: fp.key, type: r.type, glyph: d.glyph, label: d.label, phase: d.phase, ctx: d.ctx,
+        count: 0, firstMs: t, lastMs: t, builds: new Set(), worst: undefined, sample: undefined };
+      groups.set(fp.id, g);
+    }
+    g.count++;
+    if (t < g.firstMs) g.firstMs = t;
+    if (t > g.lastMs) { g.lastMs = t; g.sample = r.classification?.[0] ?? g.sample; }
+    if (r.build) g.builds.add(r.build);
+    const w = worstOf(r);
+    if (w !== undefined && (g.worst === undefined || w.value > g.worst.value)) g.worst = w;
+  }
+  const fixes = (opts.fixes ?? []).filter((f) => Array.isArray(f.footprints) && f.footprints.length);
+  const out = [];
+  for (const g of groups.values()) {
+    const linked = fixes.filter((f) => f.footprints.includes(g.id)).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    out.push({
+      id: g.id, key: g.key, type: g.type, glyph: g.glyph, label: g.label, phase: g.phase, ctx: g.ctx,
+      count: g.count,
+      first: new Date(g.firstMs).toISOString(), last: new Date(g.lastMs).toISOString(),
+      lastAgoMs: Math.max(0, now - g.lastMs),
+      builds: [...g.builds],
+      ...(g.worst ? { worst: g.worst } : {}),
+      ...(g.sample ? { sample: g.sample } : {}),
+      fixes: linked.map((f) => ({ id: f.id, title: f.title, at: f.at, ...(f.commit ? { commit: f.commit } : {}),
+        ...(f.status ? { status: f.status } : {}), ...(f.pr ? { pr: f.pr } : {}), ...(f.mergeCommit ? { mergeCommit: f.mergeCommit } : {}) })),
+    });
+  }
+  return out.sort((a, b) => b.count - a.count || Date.parse(b.last) - Date.parse(a.last));
+}
+
+/** The one number that says how bad an occurrence was, with its unit. */
+function worstOf(r) {
+  switch (r.type) {
+    case 'hitch': return typeof r.frameMs === 'number' ? { value: r.frameMs, unit: 'ms' } : undefined;
+    case 'usermark': return typeof r.worstFrames?.[0]?.frameMs === 'number' ? { value: r.worstFrames[0].frameMs, unit: 'ms' } : undefined;
+    case 'jitter': { const v = r.kind === 'oscillation' ? r.amplitude : r.units; return typeof v === 'number' ? { value: v, unit: 'u' } : undefined; }
+    case 'warm': return typeof r.worstBatchMs === 'number' ? { value: r.worstBatchMs, unit: 'ms' } : undefined;
+    case 'gpu-stall': return typeof r.queueDoneMs === 'number' ? { value: r.queueDoneMs, unit: 'ms' } : undefined;
+    case 'gpu-settle': return typeof r.ms === 'number' ? { value: r.ms, unit: 'ms' } : undefined;
+    default: return undefined;
+  }
+}
+
+/** "X ago", the way a human reads a last occurrence. */
+export function agoText(ms) {
+  if (!(ms >= 0)) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
 }

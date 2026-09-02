@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWatcher, wakeLine } from '../src/watch.mjs';
+import { footprintOf } from '../src/footprint.js';
 
 function scratch() {
   const d = mkdtempSync(join(tmpdir(), 'sloptimize-watch-'));
@@ -73,6 +74,22 @@ test('watcher starts at EOF: history does not wake, appended records do, each on
   assert.equal(got.length, 1);
   assert.match(got[0], /hitch 150ms/);
   assert.deepEqual(w.poll(), []);
+});
+
+test('every wake line carries the footprint and how many times this ledger has seen it, history included', () => {
+  const dir = scratch();
+  // Two of the same cause already on disk (one under the wake bar — still the same issue), one different.
+  writeFileSync(join(dir, 'perf.jsonl'), line(hitch(500)) + line(hitch(30)) + line({ ...hitch(200), phase: 'play' }));
+  const w = createWatcher([dir], FIXED);
+  appendFileSync(join(dir, 'perf.jsonl'), line(hitch(150, 'A')) + line({ ...hitch(160, 'B'), ctx: 'crew=copilot,hull=walker' }));
+  const got = w.poll();
+  assert.equal(got.length, 2);
+  const id = footprintOf(hitch(1)).id;
+  assert.match(got[0], new RegExp(`phase=match build=v1 fp=${id} ×3`));      // the third occurrence of this cause
+  assert.match(got[1], /ctx=crew=copilot,hull=walker/);
+  assert.match(got[1], /fp=[0-9a-f]{8} ×1/);                                   // a different situation is a different issue
+  assert.equal(wakeLine(hitch(120), 'D').includes(' ×'), false);              // no counts handed in: no number invented
+  assert.match(wakeLine(hitch(120), 'D'), new RegExp(`fp=${id}`));
 });
 
 test('watcher holds a partial trailing line until its newline lands', () => {

@@ -120,6 +120,9 @@ export function createRecorder(opts = {}) {
       // happened, not the moment it was drained/posted (drains run on a 2s
       // cadence, and a launch is over in less).
       if (s.phase) rec.phase = s.phase;
+      // The host's situation facets (SPEC §3.7), a canonical string the host
+      // refreshes on its own cadence — stamped at mint like the phase.
+      if (s.ctx) rec.ctx = s.ctx;
       if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
       records.push(rec);
     },
@@ -219,6 +222,7 @@ export function createRecorder(opts = {}) {
       };
       if (meta.note) mark.note = meta.note;
       if (meta.phase) mark.phase = meta.phase;
+      if (meta.ctx) mark.ctx = meta.ctx;
       if (meta.inputsHeld) mark.inputsHeld = meta.inputsHeld;
       if (meta.world) mark.world = meta.world;
       records.push(mark);

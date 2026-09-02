@@ -63,9 +63,42 @@ if (cmd === 'report') {
       console.log(`  ↯ ${j.at} ${j.track} ${shape} in a ${j.dtMs}ms frame → ${j.classification?.[0]?.guess}: ${j.classification?.[0]?.evidence}`);
     }
   }
+  // The catalogue's head: which causes recur most (SPEC §3.7). The whole
+  // ledger, not the 80-line window — recurrence is the point.
+  const { buildIssues, agoText } = await import('../src/history.js');
+  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity) });
+  if (issues.length) {
+    console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
+    for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
+  }
   if (census?.hints?.length) {
     console.log(`  census hints (${census.hints.length}):`);
     for (const h of census.hints.slice(0, 8)) console.log(`  · [${h.kind}] ${h.entity ?? ''} ${h.detail}`);
+  }
+  process.exit(0);
+}
+
+if (cmd === 'issues') {
+  // The issue catalogue (SPEC §3.7): every incident type grouped by
+  // footprint, with occurrences, first/last, builds, worst, and the fixes
+  // applied to it. `--from/--to` scope the count; `--all` includes robots.
+  const { buildIssues, agoText } = await import('../src/history.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), {
+    fixes: readJsonl('fixes.jsonl', Infinity), from: get('--from'), to: get('--to'), includeAutomated: args.includes('--all'),
+  });
+  if (json) { out(issues); process.exit(0); }
+  if (issues.length === 0) { console.log('no incidents on the ledger yet'); process.exit(4); }
+  const only = get('--fp');
+  for (const i of issues) {
+    if (only && i.id !== only) continue;
+    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}`);
+    if (only || issues.length <= 8) {
+      console.log(`      key ${i.key}`);
+      if (i.sample) console.log(`      last verdict: ${i.sample.guess} — ${i.sample.evidence}`);
+      for (const f of i.fixes) console.log(`      ✔ ${f.at.slice(0, 10)} ${f.status ?? 'recorded'} ${f.title}${f.commit ? ` (${f.commit})` : ''}${f.pr?.url ? ` ${f.pr.url}` : ''}`);
+      if (i.fixes.length === 0) console.log(`      no fix recorded — sloptimize fix propose --footprints ${i.id} --title "…"`);
+    }
   }
   process.exit(0);
 }
@@ -185,7 +218,7 @@ if (cmd === 'hook-status') {
 }
 
 // ── The fix loop, git only (src/proposals.mjs) ──────────────────────────────
-//   fix propose --title … [--issue … --solution … --files a,b --branch … --no-push]
+//   fix propose --title … [--issue … --solution … --files a,b --footprints id,id --branch … --no-push]
 //   fix merge <id> · fix reject <id> · fixes [--json] · policy · settings --automation propose|merge
 const sub = args[1];
 if ((cmd === 'fix' && ['propose', 'merge', 'reject', 'list'].includes(sub)) || cmd === 'fixes' || cmd === 'policy' || cmd === 'settings') {
@@ -220,6 +253,7 @@ if ((cmd === 'fix' && ['propose', 'merge', 'reject', 'list'].includes(sub)) || c
       const fix = P.proposeFix(REPO, DIR, {
         title: get('--title'), issue: get('--issue'), solution: get('--solution'), branch: get('--branch'),
         files: get('--files')?.split(','), push: !args.includes('--no-push'),
+        footprints: get('--footprints')?.split(',').filter(Boolean),
         measure: () => { const f = buildFix(records, { title: get('--title'), before: get('--before'), after: get('--after') }); return { before: f.before, after: f.after }; },
       });
       out(fix, `proposed: ${fix.title}\n  branch ${fix.branch} @ ${fix.commit}${fix.pushed ? ' (pushed)' : ''}\n  id ${fix.id}${fix.before ? '' : '\n  (no measured before/after yet — the numbers land when it is played)'}`);
@@ -254,7 +288,8 @@ if (cmd === 'history' || cmd === 'fix') {
     let fix;
     try {
       fix = buildFix(records, { title: get('--title'), issue: get('--issue'), solution: get('--solution'), commit,
-        files: get('--files')?.split(','), before: get('--before'), after: get('--after') });
+        files: get('--files')?.split(','), before: get('--before'), after: get('--after'),
+        footprints: get('--footprints')?.split(',').filter(Boolean) });
     } catch (e) { console.error(`sloptimize fix: ${e.message}`); process.exit(4); }
     const { appendFileSync, mkdirSync } = await import('node:fs');
     mkdirSync(DIR, { recursive: true });
@@ -301,5 +336,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all]');
 process.exit(2);

@@ -110,7 +110,7 @@ export function createMotionMonitor(opts = {}) {
       dts: new Float64Array(DT_RING), dtN: 0, dtHead: 0,
       // The residual awaiting its reversal verdict.
       pend: { active: false, rx: 0, ry: 0, rz: 0, mag: 0, travel: 0, speed: 0, dt: 0, t: 0, wall: 0,
-        frame: 0, fromX: 0, fromY: 0, fromZ: 0, toX: 0, toY: 0, toZ: 0, reachBefore: NaN, reachAfter: NaN, phase: undefined },
+        frame: 0, fromX: 0, fromY: 0, fromZ: 0, toX: 0, toY: 0, toZ: 0, reachBefore: NaN, reachAfter: NaN, phase: undefined, ctx: undefined },
       // The open burst (folds consecutive events).
       burst: { active: false, events: 0, firstWall: 0, lastWall: 0, lastFrame: 0, amplitude: 0, durationMs: 0,
         first: null },
@@ -202,6 +202,7 @@ export function createMotionMonitor(opts = {}) {
       rec.amplitude = fx(b.amplitude);
     }
     if (f.phase) rec.phase = f.phase;
+    if (f.ctx) rec.ctx = f.ctx;
 
     // Cross-track: another point jumped in the SAME sample frame. Data on
     // every record; an EXPLANATION only where the host declared the hierarchy.
@@ -251,7 +252,8 @@ export function createMotionMonitor(opts = {}) {
      * One rendered frame's position for `track`, at host time `t` (ms, the
      * same clock every frame — performance.now()). `meta.held` marks a frame
      * whose motion is not the track's own to judge (look input, pause);
-     * `meta.reach` is the optional anchor distance; `meta.phase` stamps the
+     * `meta.reach` is the optional anchor distance; `meta.phase` and
+     * `meta.ctx` (the host's canonical situation string, SPEC §3.7) stamp the
      * record. Zero-allocation unless a burst closes.
      */
     sample(track, x, y, z, t, meta) {
@@ -307,6 +309,7 @@ export function createMotionMonitor(opts = {}) {
         p.toX = x; p.toY = y; p.toZ = z;
         p.reachBefore = tr.reach1; p.reachAfter = reach;
         p.phase = phase;
+        p.ctx = meta ? meta.ctx : undefined;
       }
       // Burst bookkeeping: closed by silence or by age.
       const b = tr.burst;

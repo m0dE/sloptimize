@@ -54,6 +54,23 @@ motion.cut();
 post('records', [...rec.drainRecords(), ...motion.drainRecords()]);
 ```
 
+Every record's FOOTPRINT (SPEC §3.7) — the identity of its cause — is
+stamped by the writer at post time, and the game's SITUATION rides in it.
+Declare the facets that make two incidents two issues in your game
+(categories only, never positions), refresh the canonical string once a
+second, and hand it along:
+
+```js
+import { canonicalContext, footprintOf } from 'sloptimize';
+let ctx = '';
+setInterval(() => { ctx = canonicalContext({ stance: 'helm', hull: 'elong-x', squad: 'duo', combat: 'no' }); }, 1000);
+rec.frame({ …, ctx });                       // stamped on hitches at mint
+rec.usermark({ …, ctx });
+motion.sample('unit', x, y, z, t, { held, phase, ctx });
+// at post, for every record (host-built ones take the current ctx):
+for (const r of records) { if (r.ctx === undefined && ctx) r.ctx = ctx; const fp = footprintOf(r); if (fp) r.footprint = fp; }
+```
+
 `held` frames are not judged and re-seed the track (a mouse flick swings a
 boom metres in one frame — intended; the reference runtime marks a frame
 held when a mousemove/wheel/touchmove landed since the previous sample).
@@ -180,7 +197,9 @@ agent should act on — every usermark, every auto hitch ≥100ms
 (`--min-hitch-ms`), a gpu-settle that hit its cap, any gpu-stall, every
 coordinate jitter that is its own incident (`↯` — not a long-frame
 catch-up, not a passenger of another track), and the feed going quiet /
-coming back. Heartbeats, arm-probes and small hitches
+coming back. Every line ends with the record's footprint and how many
+times this ledger has seen that cause (`fp=a3f92c1d ×7`, SPEC §3.7):
+`sloptimize issues --fp a3f92c1d` is its history and the fixes applied. Heartbeats, arm-probes and small hitches
 stay silent. It starts at EOF (history is `report`'s job) and never exits.
 
 Arm it as a Claude Code Monitor — stdout lines become wake events:

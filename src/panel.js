@@ -1,11 +1,16 @@
 // ============================================================
-// panel.js — the in-game perf debugger (SPEC §8.5): Session · Optimizations · Settings
+// panel.js — the in-game perf debugger (SPEC §8.5): Session · Issues · Optimizations · Settings
 // ============================================================
 // The human's face of the ledger. The host (the game's dev runtime) owns the
 // evidence and the transport; this module owns only the view:
 //
 //   SESSION   what the recorder caught since the tab opened (every row already
 //             reached the agent when it happened) + the one-line note box.
+//   ISSUES    the catalogue (SPEC §3.7): every incident type on the ledger
+//             grouped by FOOTPRINT — the same cause across builds, sessions
+//             and days is one row — with how often, how recently, in what
+//             situation, and which fixes were applied to it. Pick a row for
+//             its history.
 //   TIMELINE  the deployment's history folded from perf.jsonl — frame p95,
 //             draw calls and hitch spikes on ONE time axis, build boundaries
 //             marked — so "is it better than yesterday" is a glance.
@@ -17,7 +22,7 @@
 // Charts are inline SVG, one series per strip (never a dual axis), a shared
 // crosshair, and the honest ceiling: a spike past the strip's ceiling is
 // drawn AT the ceiling with a caret, and the readout says the real number.
-import { buildHistory } from './history.js';
+import { buildHistory, buildIssues, agoText } from './history.js';
 
 const C = {
   bg: 'rgba(8,12,20,0.94)', line: 'rgba(60,224,255,0.5)', ink: '#cfe6f5', dim: '#8fb4c4', mute: '#6f9db0',
@@ -34,7 +39,7 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 // font proportions rather than scaling a small drawing up.
 const PANEL_W = 1100, PANEL_H = 720;
 const W = 1000, STRIP_H = 96, PAD_L = 52, PAD_R = 10;
-const TABS = [['session', 'Current Session'], ['optimizations', 'Optimizations'], ['settings', 'Settings']];
+const TABS = [['session', 'Current Session'], ['issues', 'Issues'], ['optimizations', 'Optimizations'], ['settings', 'Settings']];
 /** The Fixes badge remembers what you have seen per browser. */
 const SEEN_KEY = 'sloptimize.fixes.seen';
 
@@ -203,6 +208,62 @@ function renderOptimizations(h, list, range) {
   return `${filterBar(range)}${notRepo}${svg}${improvementLine(h, fixCount)}${H('Fixes in range')}${rows}`;
 }
 
+/** A status badge, the same one the fix rows wear. */
+function statusBadge(st) {
+  const col = st === 'merged' ? C.good : st === 'proposed' ? C.accent : st === 'rejected' ? C.mute : C.warn;
+  return `<span style="font-family:${MONO};font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${col};border:1px solid ${col};border-radius:3px;padding:1px 6px">${esc(st)}</span>`;
+}
+
+/** A facet chip: `hull=walker` as a small labelled pill. */
+function chip(k, v, color = C.dim) {
+  return `<span style="font-family:${MONO};font-size:10px;color:${color};border:1px solid ${C.rule};border-radius:3px;padding:0 5px;white-space:nowrap"><span style="color:${C.mute}">${esc(k)}</span>${v !== undefined ? `=${esc(v)}` : ''}</span>`;
+}
+
+/**
+ * THE ISSUES TAB (SPEC §3.7). `issues` is `buildIssues(...)` over the ledger in
+ * the current range: one row per footprint, most frequent first. `selected`
+ * is the id whose history is open under its row: the readable key, when it
+ * was first and last seen, on which builds, how bad at worst, the last
+ * verdict's evidence, and every fix that names this footprint — or the exact
+ * command that would.
+ */
+function renderIssues(issues, range, selected) {
+  const total = issues.reduce((n, i) => n + i.count, 0);
+  const head = `<div style="display:flex;gap:18px;align-items:baseline;font-family:${MONO};font-size:11px;color:${C.dim};margin:2px 0 6px">
+      <span style="color:${C.accent};letter-spacing:1px;text-transform:uppercase;font-size:10px">Issues in range</span>
+      <span>${issues.length} footprint${issues.length === 1 ? '' : 's'}</span><span>${total} occurrence${total === 1 ? '' : 's'}</span>
+      <span style="color:${C.mute}">grouped by footprint: the same cause across builds and sessions is one row · click a row for its fix history</span></div>`;
+  if (issues.length === 0) return `${filterBar(range)}${head}<div style="color:${C.dim};padding:12px 0">No incidents in this range.</div>`;
+  const rows = issues.map((i) => {
+    const on = i.id === selected;
+    const ctx = Object.entries(i.ctx ?? {}).map(([k, v]) => chip(k, v)).join(' ');
+    const fixesTxt = i.fixes.length ? `<span style="color:${C.good}">${i.fixes.length} fix${i.fixes.length === 1 ? '' : 'es'}</span>` : `<span style="color:${C.mute}">no fix</span>`;
+    const worst = i.worst ? `worst ${num(i.worst.value, i.worst.unit === 'u' ? 'm' : i.worst.unit)}` : '';
+    const row = `<div data-issue="${esc(i.id)}" role="button" tabindex="0" style="display:grid;grid-template-columns:2ch 1fr auto auto auto;gap:0 12px;align-items:baseline;padding:6px 4px;border-top:1px solid ${C.rule};cursor:pointer;background:${on ? C.fill : 'none'}">
+        <span>${i.glyph}</span>
+        <span style="color:${C.ink};font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.label)} ${i.phase ? chip(i.phase) : ''} ${ctx}</span>
+        <span style="font-family:${MONO};font-size:11px;color:${C.warn};font-variant-numeric:tabular-nums">×${i.count}</span>
+        <span style="font-family:${MONO};font-size:11px;color:${C.dim};white-space:nowrap">last ${esc(agoText(i.lastAgoMs))}</span>
+        <span style="font-family:${MONO};font-size:10px;white-space:nowrap">${fixesTxt}</span></div>`;
+    if (!on) return row;
+    const fixLine = (f) => `<div style="display:flex;gap:10px;align-items:baseline;padding:3px 0">${statusBadge(f.status ?? 'recorded')}<span style="color:${C.ink}">${esc(f.title)}</span>
+        <span style="font-family:${MONO};font-size:10px;color:${C.mute};white-space:nowrap">${esc(when(f.at))}${f.commit ? ` @ ${esc(f.commit)}` : ''}${f.mergeCommit ? ` → ${esc(f.mergeCommit)}` : ''}</span>
+        ${f.pr?.url ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener" style="color:${C.accent};border:1px solid ${C.accent};border-radius:3px;padding:0 6px;text-decoration:none;font-size:10px">PR #${esc(String(f.pr.number))} ↗</a>` : ''}</div>`;
+    const detail = `<div style="padding:4px 4px 12px 26px;color:${C.dim};font-size:11.5px;background:${C.fill}">
+        <div style="font-family:${MONO};font-size:10px;color:${C.mute};margin-bottom:6px">fp ${esc(i.id)} · ${esc(i.key)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px 18px;font-family:${MONO};font-size:11px">
+          <span>first ${esc(when(i.first))}</span><span>last ${esc(when(i.last))} (${esc(agoText(i.lastAgoMs))})</span>
+          <span>${i.count} occurrence${i.count === 1 ? '' : 's'}</span>${worst ? `<span>${worst}</span>` : ''}
+          <span>builds ${i.builds.length ? esc(i.builds.slice(-6).join(', ')) : '—'}${i.builds.length > 6 ? ` +${i.builds.length - 6}` : ''}</span></div>
+        ${i.sample ? `<div style="margin-top:6px"><span style="color:${C.mute}">last verdict</span> <b style="color:${C.ink}">${esc(i.sample.guess)}</b> <span>${esc(i.sample.evidence)}</span></div>` : ''}
+        ${H('fixes applied to this issue')}
+        ${i.fixes.length ? i.fixes.map(fixLine).join('') : `<div style="color:${C.mute}">none recorded — a session that fixes it names the footprint: <code style="font-family:${MONO};color:${C.ink}">sloptimize fix propose --footprints ${esc(i.id)} --title "…"</code></div>`}
+      </div>`;
+    return row + detail;
+  }).join('');
+  return `${filterBar(range)}${head}<div id="sl-issues">${rows}</div>`;
+}
+
 function renderSettings(settings, list) {
   const s = settings ?? { automation: 'propose' };
   const opt = (v, label, help) => `<label style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;cursor:pointer">
@@ -226,7 +287,8 @@ function renderSession(host) {
     // measures a distance, and marks itself ↯).
     const measure = i.label ? esc(i.label) : `${Math.round(i.frameMs)}ms`;
     const glyph = i.manual ? '★' : (i.glyph ? esc(i.glyph) : '·');
-    return `<div style="padding:2px 0;color:${i.manual ? C.mark : C.ink}">${glyph} ${agoTxt} — ${ph}${measure} → <b>${esc(i.guess)}</b> <span style="color:${C.dim}">${esc(String(i.evidence).slice(0, 64))}</span></div>`;
+    const fp = i.fp ? ` <span style="font-family:${MONO};font-size:10px;color:${C.mute}">fp ${esc(i.fp)}</span>` : '';
+    return `<div style="padding:2px 0;color:${i.manual ? C.mark : C.ink}">${glyph} ${agoTxt} — ${ph}${measure} → <b>${esc(i.guess)}</b> <span style="color:${C.dim}">${esc(String(i.evidence).slice(0, 64))}</span>${fp}</div>`;
   }).join('');
   const feed = host.feed?.() ?? { state: 'ok' };
   const feedLine = feed.state === 'ok'
@@ -247,6 +309,7 @@ function renderSession(host) {
  */
 export function createPanel(host) {
   let root = null, input = null, body = null, tab = 'session', histCache = null;
+  let selectedIssue = null;
 
   function close(note) {
     if (!root) return;
@@ -286,6 +349,19 @@ export function createPanel(host) {
       });
       return;
     }
+    if (tab === 'issues') {
+      Promise.all([loadHistory(), loadFixes()]).then(([h, list]) => {
+        if (!root || tab !== next) return;
+        // Fixes with their git status when the fix loop is here; the measured
+        // ledger otherwise. Either carries `footprints` when the fix named them.
+        const fixes = list?.fixes?.length ? list.fixes : (rawCache?.fixes ?? []);
+        const issues = buildIssues(rawCache?.records ?? [], { fixes, from: h?.rangeLo, to: h?.rangeHi, now: Date.now() });
+        body.innerHTML = renderIssues(issues, range, selectedIssue);
+        wireRange();
+        wireIssueRows();
+      });
+      return;
+    }
     Promise.all([loadHistory(), loadFixes()]).then(([h, list]) => {
       if (!root || (tab !== next)) return;
       body.innerHTML = renderOptimizations(h, list, range);
@@ -300,10 +376,26 @@ export function createPanel(host) {
   let range = { from: '', to: '' };
   function wireRange() {
     const from = body.querySelector('#sl-from'), to = body.querySelector('#sl-to'), clear = body.querySelector('#sl-range-clear');
-    const apply = () => { range = { from: from?.value ?? '', to: to?.value ?? '' }; histCache = null; show('optimizations'); };
+    // The range is shared by every ledger view; re-fold the tab that has it.
+    const apply = () => { range = { from: from?.value ?? '', to: to?.value ?? '' }; histCache = null; show(tab); };
     if (from) from.onchange = apply;
     if (to) to.onchange = apply;
-    if (clear) clear.onclick = () => { range = { from: '', to: '' }; histCache = null; show('optimizations'); };
+    if (clear) clear.onclick = () => { range = { from: '', to: '' }; histCache = null; show(tab); };
+  }
+  function wireIssueRows() {
+    for (const r of body.querySelectorAll('[data-issue]')) {
+      const pick = () => {
+        const id = r.dataset.issue;
+        selectedIssue = selectedIssue === id ? null : id;
+        const top = body.scrollTop;
+        show('issues');
+        // Keep the reader where they were: the re-render must not scroll away
+        // from the row they just opened.
+        requestAnimationFrame(() => { if (body) body.scrollTop = top; });
+      };
+      r.onclick = pick;
+      r.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
+    }
   }
 
   let fixesCache = null, settingsCache = null;

@@ -21,8 +21,9 @@
 // storm at arm time. Cursor is in memory, per watcher — two sessions
 // watching the same directory each see every record (USAGE.md "who gets
 // told? all of them"); nothing on disk to race over.
-import { existsSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
+import { existsSync, openSync, readSync, closeSync, fstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { footprintOf } from './footprint.js';
 
 const DEFAULTS = { minHitchMs: 100, staleMin: 45, now: () => Date.now() };
 
@@ -38,7 +39,13 @@ export function wakeLine(rec, dir, opts = {}) {
   if (rec.automated === true) return null;
   const minHitchMs = opts.minHitchMs ?? DEFAULTS.minHitchMs;
   const where = `[${dir}]`;
-  const ctx = [rec.phase && `phase=${rec.phase}`, rec.build && `build=${rec.build}`].filter(Boolean).join(' ');
+  // The footprint (SPEC §3.7) and how many times this cause has been seen on
+  // this ledger — the watcher's count when it keeps one, else nothing: the
+  // number is a fact about the ledger, never a guess.
+  const fp = footprintOf(rec);
+  const seen = fp && opts.counts ? opts.counts.get(fp.id) : undefined;
+  const fpTxt = fp ? ` fp=${fp.id}${seen ? ` ×${seen}` : ''}` : '';
+  const ctx = [rec.phase && `phase=${rec.phase}`, rec.ctx && `ctx=${rec.ctx}`, rec.build && `build=${rec.build}`].filter(Boolean).join(' ') + fpTxt;
   const cls = (c) => c?.[0] ? `${c[0].guess} (${c[0].evidence})` : 'unclassified';
   switch (rec.type) {
     case 'usermark': {
@@ -143,6 +150,9 @@ export function createWatcher(dirs, opts = {}) {
     read: ledgerCursor(join(dir, 'perf.jsonl')),
     lastAt: 0,          // ms of the newest record seen (any type)
     dark: false,
+    // Occurrences per footprint on this ledger so far (SPEC §3.7): seeded from
+    // the file at arm, advanced per record — the `×N` on every wake line.
+    counts: footprintCounts(join(dir, 'perf.jsonl')),
   }));
   // Seed liveness from what is already on disk so a ledger that died before
   // the watch was armed still reports quiet — once.
@@ -156,7 +166,9 @@ export function createWatcher(dirs, opts = {}) {
       for (const r of recs) {
         const t = Date.parse(r.at);
         if (t > l.lastAt) l.lastAt = t;
-        const w = wakeLine(r, l.dir, o);
+        const fp = footprintOf(r);
+        if (fp) l.counts.set(fp.id, (l.counts.get(fp.id) ?? 0) + 1);
+        const w = wakeLine(r, l.dir, { ...o, counts: l.counts });
         if (w) lines.push(w);
       }
       if (l.lastAt > 0) {
@@ -173,6 +185,23 @@ export function createWatcher(dirs, opts = {}) {
     return lines;
   }
   return { poll };
+}
+
+/** Occurrences per footprint id over a whole ledger — read once at arm. A
+ *  ledger is megabytes at most; the count is what makes "this again" a
+ *  number on the wake line instead of a feeling. */
+function footprintCounts(path) {
+  const counts = new Map();
+  if (!existsSync(path)) return counts;
+  let text;
+  try { text = readFileSync(path, 'utf8'); } catch { return counts; }
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    let r; try { r = JSON.parse(line); } catch { continue; }
+    const fp = footprintOf(r);
+    if (fp) counts.set(fp.id, (counts.get(fp.id) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function fileStat(path) {
