@@ -3,6 +3,7 @@ export { createRecorder } from './recorder.js';
 export { buildCensus } from './census.js';
 export { classifyHitch } from './classify.js';
 export { createMotionMonitor } from './motion.js';
+export { createErrorMonitor } from './errors.js';
 export { footprintOf, footprintKey, describeFootprint, canonicalContext, contextOfKey, FOOTPRINT_VERSION } from './footprint.js';
 export { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText } from './history.js';
 export { createPanel } from './panel.js';

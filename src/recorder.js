@@ -43,6 +43,8 @@ export function createRecorder(opts = {}) {
   let sessionRecords = 0;
   let droppedSinceLast = 0;
   let lastRecordAt = -Infinity;
+  let lastPhase;   // most recent s.phase seen by frame(), for emit()'s stamping
+  let lastCtx;     // most recent s.ctx seen by frame(), for emit()'s stamping
 
   function sortedNonPaused(field, sinceIdx = 0) {
     const vals = [];
@@ -73,6 +75,8 @@ export function createRecorder(opts = {}) {
   return {
     /** One frame's numbers. Zero-allocation on the steady path. */
     frame(s) {
+      if (s.phase) lastPhase = s.phase;
+      if (s.ctx) lastCtx = s.ctx;
       const idx = head;
       for (const f of FIELDS) lanes[f][idx] = s[f] ?? 0;
       pausedLane[idx] = s.paused ? 1 : 0;
@@ -227,6 +231,19 @@ export function createRecorder(opts = {}) {
       if (meta.world) mark.world = meta.world;
       records.push(mark);
       return mark;
+    },
+
+    /** Append an externally built incident (errors, host-detected events). Same session cap as hitches. */
+    emit(rec) {
+      if (!rec || typeof rec !== 'object') return false;
+      if (sessionRecords >= MAX_RECORDS_PER_SESSION) { droppedSinceLast++; return false; }
+      sessionRecords++;
+      if (!rec.at) rec.at = new Date().toISOString();
+      if (rec.phase === undefined && lastPhase) rec.phase = lastPhase;
+      if (rec.ctx === undefined && lastCtx) rec.ctx = lastCtx;
+      if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
+      records.push(rec);
+      return true;
     },
 
     /** Hand back accumulated records and clear — the host owns transport. */
