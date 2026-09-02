@@ -1,3 +1,4 @@
 node_modules/
 .sloptimize/goldens/
 .sloptimize/bench/
+.env
