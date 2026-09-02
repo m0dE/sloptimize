@@ -98,3 +98,45 @@ test('enqueue pushes records into the queue and trims to maxQueue, counting drop
   assert.equal(sink.stats().queued, 3);
   assert.equal(sink.stats().droppedLocally, 1);
 });
+
+test('pagehide during an in-flight flush beacons only records not yet sent, and stats().sent stays accurate', async () => {
+  const h = harness();
+  let resolveFetch;
+  const fetch = (url, init) => {
+    h.calls.push({ url, body: JSON.parse(init.body), headers: init.headers, keepalive: init.keepalive });
+    return new Promise((res) => { resolveFetch = res; });
+  };
+  const sink = mk(h, { fetch });
+  h.source.pending.push({ type: 'hitch', at: 'a' }, { type: 'hitch', at: 'b' });
+  const flushPromise = sink.flush(); // drains a,b and starts an in-flight POST (batch removed from queue)
+  h.source.pending.push({ type: 'hitch', at: 'c' }); // arrives while a,b are still in flight
+  h.target.fire('pagehide', {});
+  assert.equal(h.beacons.length, 1);
+  const beaconBody = JSON.parse(await h.beacons[0].blob.text());
+  assert.deepEqual(beaconBody.records.map((r) => r.at), ['c']); // never re-sends a,b
+  resolveFetch({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) });
+  await flushPromise;
+  assert.equal(sink.stats().sent, 3); // a,b from the flush + c from the beacon — no double count
+  assert.equal(sink.stats().queued, 0);
+});
+
+test('enqueue during an in-flight flush is never silently lost, even under the queue cap', async () => {
+  const h = harness();
+  let resolveFetch;
+  const fetch = (url, init) => {
+    h.calls.push({ url, body: JSON.parse(init.body) });
+    return new Promise((res) => { resolveFetch = res; });
+  };
+  const sink = mk(h, { fetch, maxQueue: 3 });
+  sink.enqueue([{ type: 'hitch', at: '0' }, { type: 'hitch', at: '1' }, { type: 'hitch', at: '2' }]);
+  const flushPromise = sink.flush(); // batch [0,1,2] removed from queue and in flight
+  sink.enqueue([{ type: 'hitch', at: '3' }, { type: 'hitch', at: '4' }, { type: 'hitch', at: '5' }, { type: 'hitch', at: '6' }]);
+  // the in-flight batch [0,1,2] must be untouched by this trim — only the
+  // newly-enqueued records compete for the cap.
+  resolveFetch({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) });
+  await flushPromise;
+  const s = sink.stats();
+  assert.equal(s.sent, 3); // 0,1,2 delivered, none duplicated or lost
+  assert.equal(s.queued + s.droppedLocally, 4); // 3,4,5,6 fully accounted for
+  assert.equal(s.queued + s.sent + s.droppedLocally, 7); // total records ever handed to the sink
+});

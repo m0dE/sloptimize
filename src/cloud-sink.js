@@ -44,7 +44,11 @@ export function createCloudSink(opts = {}) {
     drain();
     if (inflight || queue.length === 0 || now() < backoffUntil) return;
     inflight = true;
-    const batch = queue.slice(0, maxBatch);
+    // Remove the batch from the queue BEFORE sending, not after the await:
+    // otherwise a concurrent onHide()/enqueue() during the in-flight request
+    // sees records that are already (or about to be) accounted for elsewhere,
+    // causing duplicate delivery or silently corrupting the queue.
+    const batch = queue.splice(0, maxBatch);
     const sentDropped = droppedLocally;
     try {
       const res = await fetchImpl(endpoint, {
@@ -54,22 +58,28 @@ export function createCloudSink(opts = {}) {
       });
       stats.lastStatus = res.status;
       if (res.ok) {
-        queue = queue.slice(batch.length);
         droppedLocally -= sentDropped;
         failures = 0; backoffUntil = 0; stats.sent += batch.length; stats.lastError = null;
       } else if (res.status === 429 || res.status >= 500) {
+        // Retryable: put the batch back at the front (it's the oldest data)
+        // and re-apply the cap, counting any resulting drops.
+        queue = batch.concat(queue);
+        trim();
         const ra = Number(res.headers?.get?.('retry-after'));
         const wait = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length - 1)];
         backoffUntil = now() + (Number.isFinite(ra) && ra > 0 ? Math.max(ra * 1000, wait) : wait);
         failures++;
         stats.lastError = `HTTP ${res.status}`;
       } else {
-        // 4xx other than 429: the batch is unacceptable; drop it rather than retry forever.
-        queue = queue.slice(batch.length);
+        // 4xx other than 429: the batch is unacceptable and already out of
+        // the queue (spliced above); drop it rather than retry forever.
         droppedLocally += batch.length;
         stats.lastError = `HTTP ${res.status}`;
       }
     } catch (e) {
+      // Network failure: the batch never left, so put it back and retry later.
+      queue = batch.concat(queue);
+      trim();
       stats.lastError = e?.message ?? String(e);
       const wait = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length - 1)];
       backoffUntil = now() + wait; failures++;
@@ -79,6 +89,9 @@ export function createCloudSink(opts = {}) {
     try {
       drain();
       if (queue.length === 0 || !beacon) return;
+      // Any batch currently in flight via flush() was already spliced out of
+      // `queue`, so what's here is guaranteed disjoint from it — no duplicate
+      // delivery risk.
       const batch = queue.slice(0, maxBatch);
       const ok = beacon(`${endpoint}?key=${encodeURIComponent(key)}`, new Blob([JSON.stringify(body(batch))], { type: 'application/json' }));
       if (ok) { queue = queue.slice(batch.length); droppedLocally = 0; stats.sent += batch.length; }
