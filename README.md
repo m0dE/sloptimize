@@ -2,338 +2,149 @@
 
 [![npm](https://img.shields.io/npm/v/sloptimize.svg)](https://www.npmjs.com/package/sloptimize)
 
-sloptimize optimizes your game's rendering performance by finding the
-bottlenecks and reporting them to Claude Code to fix — all while you just play
-the game. No action is required on your end.
+Your browser game stutters. sloptimize records every stutter while you play,
+works out what caused it, and hands it to Claude Code to fix — with numbers,
+so a fix is measured, never claimed.
 
-**The agent-native profiler for browser games.** Your coding agent cannot
-watch a game run — it will never feel a hitch, cannot screenshot 60 times a
-second, and cannot verify a "fix" it cannot measure. sloptimize gives the
-agent the three verbs it measurably lacks:
-
-- **MEASURE** — an always-on flight recorder detects incidents (CPU spikes,
-  fps drops, GPU stalls, and the player's unit or camera SNAPPING off its own
-  trajectory) automatically, in the background, and writes them to disk
-  before anyone asks. The human just plays.
-- **ATTRIBUTE** — every incident arrives classified with evidence
-  (`shader-compile: programs +2`, `long-script`, upload storms,
-  `snap 17.5m in one frame`), stamped with a **footprint** — the identity of
-  its cause and the game's situation (which machine, at the helm or on foot,
-  in combat…), never its time — so one cause across builds, sessions and
-  players is one issue with a count and a fix history, and — with the attach
-  tier — named by **function and file:line** from a rolling sampling profiler.
-- **VERIFY** — exact counters (draw calls, triangles, pipelines — deterministic
-  on any renderer), perf budgets with exit codes, and honest labels: timing
-  numbers carry their regime (`hardware`/`software`) and are never compared
-  across them.
-
-The division of labor is the design: **the tool decides what is true; the
-agent decides what to try; the human plays.**
-
-Proven in production on a 149k-line WebGPU battle-royale: the pipeline caught
-a 205,000-calls/11s GPU upload storm from a player's real session, attributed
-it, and verified the fix at >60× reduction — with the player doing nothing
-but playing.
-
-## The pipeline
-
-```
-game/browser ──► incidents (auto-detected, classified, clustered)
-                    │
-                    ▼
-              .sloptimize/          ◄── the agent's reading room
-              profile.json            rolling summary (median/p95/counters/regime)
-              perf.jsonl              incident records, append-only, each with its footprint
-              clusters.json           one cause = one cluster
-              census.json             per-entity cost census (tier 1+)
-              fixes.jsonl             the fix ledger: issue → solution, commit, MEASURED before/after
-              budgets.json            YOUR limits (the one human-authored file)
-                    │
-        ┌───────────┴───────────┐
-        ▼                       ▼
-   Claude Code (agent)     in-game debugger (human, OPTIONAL)
-   woken on new incidents   Session · Issues · Optimizations · Settings —
-   (fp=<id> ×N on each);    this tab's incidents + a note box; every cause
-   reads, fixes, verifies,  grouped by footprint with ×N, last seen and the
-   records each fix         fixes applied; p95/calls/hitches over time
-```
-
-Showing the work is part of the loop: after a verified fix the agent runs
-`sloptimize fix --title … --issue … --solution … --commit <sha>`, and the
-record's before/after are two **measured** windows of the ledger (previous
-build vs new build) — not numbers the agent typed. The debugger's Fixes tab
-and `sloptimize history` read that ledger back.
-
-## Install
-
-Published on npm as [`sloptimize`](https://www.npmjs.com/package/sloptimize).
-Node 22+.
+## Start in 15 seconds
 
 ```bash
-npm i -D sloptimize          # in your game repo (recommended)
-npx sloptimize --version     # confirm: prints the installed version
+npm i -D sloptimize
+claude --plugin-dir node_modules/sloptimize
 ```
 
-No install at all for a one-off: `npx sloptimize attach --launch http://localhost:3000`.
-Working from a git checkout instead? `node /path/to/sloptimize/bin/sloptimize.mjs …`
-runs on bare Node.
+Inside Claude Code:
 
-Zero dependencies, no postinstall, no supply chain — npm is delivery only.
+```
+/sloptimize:install
+```
 
-## Quickest start: zero integration (tier 0)
+The agent wires your game — one call per frame in your render loop, one
+dev-only endpoint that writes `.sloptimize/`, your budgets, its own hooks —
+and refuses to call itself done until a test incident shows up in
+`npx sloptimize report`. Then you just play.
 
-Requires only Node 22+ and a Chromium. No game changes, no build changes:
+No game changes at all? Attach to a running page instead:
 
 ```bash
-npx sloptimize attach --launch http://localhost:3000 --headless
-# play / drive the game …then:
+npx sloptimize attach --launch http://localhost:3000
+# play, then:
 npx sloptimize report
 ```
 
-Attach connects over the Chrome DevTools Protocol, injects a recorder before
-any page script (rAF timing, draw/triangle counts via graphics-API wraps,
-pipeline creations WITH call stacks, upload bytes, GPU queue latency), and
-runs a rolling sampling profiler so a freeze is attributed like:
+Node 22+. Zero dependencies, no postinstall.
 
-```
-INCIDENT long-script|seededFreezeWork@game.js:512 — 900ms
-```
+## What you get
 
-Limits, stated: Chromium-only; minified bundles attribute to minified names
-unless you serve sourcemaps; entity-level attribution needs tier 1+.
+- **Every incident, on disk, classified.** Hitches, freezes, GPU stalls,
+  shader compiles, and the player's unit or camera snapping off its own
+  path — each with the evidence (`shader-compile: programs +2`,
+  `long-script`, `snap 17.5m in one frame`) in `.sloptimize/perf.jsonl`.
+- **One cause = one issue.** Incidents are grouped by *footprint* — what
+  caused it and where in the game it happened, never when — so the same
+  stutter across builds and sessions is one entry with a count and its fix
+  history (`fp=a3f92c1d ×7`).
+- **A budget with an exit code.** `npx sloptimize check` exits 0 inside
+  your limits, 1 over them. That is what lets an agent loop until it is done.
+- **An agent that wakes itself.** About 20 s after a stutter, Claude Code
+  is woken with the classified incident, fixes it, verifies with exact
+  counters, and records the fix with a measured before/after.
 
-## Higher fidelity: the in-page feed (tier 1)
+## Wiring it by hand
 
-One call per frame from wherever your loop already reads `renderer.info`:
+If you would rather not let the agent do it:
 
 ```js
 import { createRecorder } from 'sloptimize';
 const rec = createRecorder({ budgetFrameMs: 16.7 });
-// per frame:
-rec.frame({ frameMs, insideRenderMs, calls, triangles, programs,
-            geometries, textures, spawned, paused });
-// optional human channel (bind to a chord, e.g. Ctrl+F11):
-rec.usermark({ windowMs: 5000, note, inputsHeld, world });
+
+// once per frame, where you already read renderer.info:
+rec.frame({ frameMs, insideRenderMs, calls, triangles, programs, geometries, textures, spawned, paused });
+
+// every ~2s, POST rec.drainRecords() to a dev-only endpoint that appends .sloptimize/perf.jsonl
 ```
 
-Ship the records to `.sloptimize/` however your stack likes — a vite host
-gets a plugin (planned); any other host adds one dev-gated POST endpoint
-(~100 lines; see `docs/INTEGRATION.md` for the reference implementation,
-including the four traps that cost the first deployment real time:
-**don't gate activation on hostname** (probe your dev endpoint instead),
-**give the recorder its own rAF clock** (a game-loop-fed clock is blind to
-boot/launch — exactly the windows you care about), **frameMs must bound
-insideRenderMs**, and **never let the feed die silently** (retry the probe
-and the posts on a backoff, buffer while dark, and SHOW the state — the
-first deployment lost an hour of real freezes to a server restart that
-dropped the ingest with no indication anywhere).
-
-The wire contract the reference runtime keeps, so the files are useful on
-their own:
-- **every record is self-sufficient** — `build` (which bundle the tab runs)
-  and `phase` (menu/boot/launch/match…) ride each ledger line; hitches are
-  stamped at mint time, not post time;
-- **a heartbeat record lands once a minute while armed**, so a quiet
-  `perf.jsonl` means "no session, or the feed is dark" — never just "idle"
-  (`sloptimize hook-status` warns when the ledger goes stale);
-- **gpu-settle records** report how long a boot/reveal gate actually waited
-  on `onSubmittedWorkDone` — the on-hardware verification channel for
-  compile-stall fixes;
-- **a hitch that overlapped pipeline/shader creates carries `createStacks`**
-  — the top 3 deduped `Error().stack` tails from the create wrappers (~2KB
-  cap), so a `programs +N` hitch from a machine you cannot profile names its
-  own call sites. The positions are minified (`bundle.js:L:C`); keep an
-  unreferenced sourcemap at build time and decode locally (the game repo's
-  `tools/decode-perf-stack.mjs` is a dependency-free reference decoder).
-
-**Coordinate jitter and the issue catalogue** (tier 1, ~200 lines in the
-game): feed the unit's and the camera's positions once per rendered frame
-and a snap or oscillation lands as a classified `jitter` record; declare a
-few facets of the player's situation and every incident of every kind is
-footprinted, counted and linked to its fixes — the debugger's **Issues**
-tab, `sloptimize issues`, and `fp=<id> ×N` on every wake line. The whole
-recipe, with the three traps that make a naive position detector lie
-(rotation, transient shakes, the sim's dt clamp), is
-`docs/JITTER-AND-FOOTPRINTS.md`.
-
-```js
-import { createMotionMonitor, canonicalContext, footprintOf } from 'sloptimize';
-const motion = createMotionMonitor({ unit: 'm', longFrameMs: 50,
-  tracks: { unit: { floor: 0.1 }, camera: { floor: 0.1, reach: 'boom', follows: 'unit' } } });
-// per rendered frame, after the render:
-motion.sample('unit',   pivot.x, pivot.y, pivot.z, now, { held: paused, phase, ctx });
-motion.sample('camera', cam.x,   cam.y,   cam.z,   now, { held: paused || lookInput, reach, phase, ctx });
-// once a second:  ctx = canonicalContext({ stance: 'helm', hull: 'elong-x', squad: 'duo', combat: 'no' });
-// at post:        for (const r of records) { r.ctx ??= ctx; const fp = footprintOf(r); if (fp) r.footprint = fp; }
-```
-
-Tier 2 (scene census, per-entity attribution, measured bisection) layers on
-top where the engine grants scene access — see `docs/SPEC.md` §4.
-
-## Claude Code integration — the whole point
-
-The npm package IS a Claude Code plugin — skill, prompt hook, and MCP server
-ship inside it. After `npm i -D sloptimize`, point Claude at it:
-
-```bash
-claude --plugin-dir node_modules/sloptimize
-```
-
-Alternatives: `claude --plugin-dir /path/to/sloptimize` from a git checkout,
-or via the marketplace:
-`/plugin marketplace add m0dE/sloptimize` then `/plugin install sloptimize`.
-
-Then let the agent wire your game: `/sloptimize:install` walks it through
-the tier-1 integration (runtime, sink, budgets, hooks) and refuses to call
-itself done until the feed is proven live end-to-end.
-
-That carries three surfaces into every session:
-- **Skill** — the doctrine: read → classify → census → ONE change → verify
-  with counters; never claim a perf fix without a measured before/after;
-  never quote timing from a software regime.
-- **Prompt hook** — silent by default; when a NEW keyframe or budget breach
-  exists, up to five lines land in the agent's context on your next prompt.
-- **MCP server** — `get_report`, `check_budgets`, `get_history`,
-  `get_issues` (the catalogue by footprint), `record_fix` (with the
-  footprints it addresses), and `attach_start` / `attach_stop` for the live
-  tier.
-
-For instant wakeups (the agent starts fixing ~20s after the stutter, no
-prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
-`docs/INTEGRATION.md` §5. Wire it into a `SessionStart` hook and every
-session arms it by itself.
-
-## Cloud (paid, invite-only)
-
-Everything above is local: one machine's `.sloptimize/` directory, read by
-that machine's shell and that machine's Claude Code session. sloptimize
-cloud is a separate, optional, invite-only service that widens the same
-catalogue to **every player, every build** — not just the one in front of
-you: 24h/7d/30d or any custom range, client incidents and server incidents
-(`sloptimize/node`) folded into the same footprint identity, plus uncaught
-errors (`sloptimize/errors`) as their own incident kind. The local product
-stays the default story — nothing below changes what a project with no
-cloud key does.
-
-Where the endpoint and key live: your project's settings page on the
-service (there is no public hostname to document here — sloptimize cloud
-is invite-only, and the endpoint you use is whatever that page shows you).
-It hands you three snippets:
-
-```js
-// browser: the cloud sink is a TEE beside your existing drain, never instead
-// of it — errors ride the same recorder as hitches, so one drain feeds both
-import { createRecorder, createErrorMonitor, createCloudSink } from 'sloptimize';
-const rec = createRecorder({ budgetFrameMs: 16.7 });
-createErrorMonitor(rec);
-const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build });
-// in the ~2s drain you already have (docs/INTEGRATION.md §1):
-const batch = rec.drainRecords();
-post('records', batch);   // unchanged: .sloptimize/perf.jsonl, still the source of truth
-cloud.enqueue(batch);     // the same records, teed to the cloud sink's own queue
-```
-
-(The `sources: [rec]` option exists only for a host with no file sink at all:
-the sink drains those sources itself, so anything it takes never reaches your
-own `drainRecords()`.)
-
-```js
-// game server (Node): ticks, event-loop stalls, and uncaught errors
-import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<secret key from settings>', endpoint: '<endpoint from settings>', build });
-```
-
-The server runtime registers `uncaughtExceptionMonitor` only, so it observes
-a crash without ever becoming part of the crash path. One consequence worth
-knowing: under `--unhandled-rejections=warn` or `none`, unhandled rejections
-are **not** captured — that event sees them only in Node's default `throw`
-mode, and listening to `unhandledRejection` instead would suppress the throw
-your process relies on.
-
-```bash
-# CLI: read the cloud catalogue instead of this machine's ledger
-export SLOPTIMIZE_KEY=<secret key from settings> SLOPTIMIZE_ENDPOINT=<endpoint from settings>
-npx sloptimize issues --cloud --preset 7d
-npx sloptimize fix --title "…" --push   # records locally, then pushes
-```
-
-Honesty is the whole pitch: a dropped-locally count rides every batch the
-sink sends, so the dashboard's numbers say what they could not see rather
-than pretending nothing was lost.
-
-Two kinds of key, and the difference matters. The **publishable** key is
-public and write-only (it can post incidents, never read anyone else's), so
-shipping it in a client bundle is the intended use, not a leak — that is the
-key in the browser snippet above. The **secret** key is the one the server
-runtime, the CLI (`SLOPTIMIZE_KEY`) and the MCP server use: it reads your
-whole catalogue (`/v1/issues`) and writes fixes (`/v1/fixes`). A secret key
-never goes in a client bundle.
-
-## Budgets: "fast enough" as an exit code
-
-`.sloptimize/budgets.json` (the one file a human reviews):
+Budgets live in `.sloptimize/budgets.json`:
 
 ```json
 { "perf.budget.draw_calls": 400, "perf.budget.frame_ms_p95": 16.7 }
 ```
 
+The full recipe — the ingest endpoint, the jitter detector, footprints, the
+Claude Code hooks, and the traps that cost the first deployment real time —
+is `docs/INTEGRATION.md`.
+
+## Cloud: every player, not just your machine
+
+The local setup above is free and is the default. It sees one machine: the
+one running the game with `.sloptimize/` beside it — your own sessions.
+
+**sloptimize cloud** ships the same records from every player's browser and
+from your game server into one catalogue, so the issues are the ones your
+users actually hit, in every build, not the ones you happened to reproduce.
+Same footprints, same CLI, same agent:
+
 ```bash
-npx sloptimize check              # exit 0 inside · 1 breached · 4 unmeasured
+export SLOPTIMIZE_KEY=<secret key>  SLOPTIMIZE_ENDPOINT=<endpoint>
+npx sloptimize issues --cloud --preset 7d     # every player, last 7 days
+npx sloptimize fix --title "…" --push          # record a fix locally, then to the cloud
 ```
 
-That exit code is what lets an agent self-iterate in a loop that terminates.
+Wiring is one tee beside the local sink, never instead of it:
+
+```js
+import { createRecorder, createErrorMonitor, createCloudSink } from 'sloptimize';
+const rec = createRecorder({ budgetFrameMs: 16.7 });
+createErrorMonitor(rec);                                   // uncaught errors ride the same recorder
+const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });
+// in your existing ~2s drain:
+const batch = rec.drainRecords();
+post('records', batch);      // local ledger, still the source of truth
+cloud.enqueue(batch);        // the same records, to the cloud
+```
+
+```js
+// game server (Node): tick overruns, event-loop stalls, uncaught errors
+import { createServerRuntime } from 'sloptimize/node';
+const server = createServerRuntime({ key: '<secret key>', endpoint: '<endpoint>', build });
+```
+
+Two keys: the **publishable** key is write-only and meant to ship in the
+client bundle; the **secret** key reads your catalogue and belongs on the
+server, in the CLI, and in Claude Code — never in a bundle. Every batch
+carries a dropped-locally count, so the dashboard says what it could not
+see instead of pretending nothing was lost.
+
+The cloud is paid and invite-only; your project's settings page hands you
+the endpoint and both keys.
 
 ## CLI
 
 ```
-sloptimize report        current profile + incidents + census hints
-sloptimize check         budgets → exit code (--counters-only for CI)
-sloptimize census        per-entity costs + closed-vocabulary hints
-sloptimize history       the timeline: p95 / draw calls / hitches per time
-                         bucket and per build, plus the fix ledger
-sloptimize fix           record a verified fix (title, issue, solution,
-                         commit) with MEASURED before/after windows
-sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
-sloptimize hook-status   the prompt hook's ≤5-line ambient surface
-sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
-                         (cause + situation, never time) — how often, how
-                         recently, which fixes were applied; --fp <id> for one
-sloptimize watch         the push channel: one stdout line per usermark /
-                         ≥100ms hitch / gpu cap-hit / coordinate jitter /
-                         feed dark, each with fp=<id> ×N; never exits
-sloptimize doctor        what is wired, what is degraded, stated limits
+sloptimize report      current profile, incidents, census hints
+sloptimize check       budgets → exit code
+sloptimize issues      every incident grouped by footprint (--cloud for every player)
+sloptimize history     p95 / draw calls / hitches per build, plus the fix ledger
+sloptimize fix         record a verified fix with a MEASURED before/after
+sloptimize watch       one line per incident, for the agent's Monitor
+sloptimize attach      zero-integration: --launch <url> [--headless]
+sloptimize census      per-entity meshes / triangles / materials
+sloptimize doctor      what is wired, what is degraded, stated limits
 ```
 
-## What it will tell you it cannot do
+## Limits, stated
 
-Printed by `doctor`, kept in the spec, never silently degraded: no per-draw
-GPU timing; bisection ranks rather than sums; workload repro, not trajectory
-repro; timing from software renderers flagged and never compared; V8
-inlining can split an incident cluster across an optimization boundary;
-**correctness bugs are out of scope** — a profiler cannot find a logic bug,
-and the doctrine routes "it looks/behaves wrong" reports away before anyone
-burns a loop on them.
+No per-draw GPU timing. Timing from software renderers is flagged and never
+compared with hardware. `long-script` names the frame, not the function,
+unless the attach tier's sampler is running. Correctness bugs are out of
+scope — a profiler cannot find a logic bug.
 
 ## Docs
 
-- `docs/USAGE.md` — day-to-day use once wired: the operator's verbs, new-session pickup, multi-session semantics, monitoring options
-- `docs/SPEC.md` — the founding specification (recorder, census, bench, anti-gaming posture)
-- `docs/SPEC-attach.md` — v2: the incident pipeline, tier-0 attach, measured exit criteria
-- `docs/INTEGRATION.md` — wiring a real game + Claude Code session, with the reference deployment's traps
-- `docs/DESIGN-mecharoyale-v0.md` — the first field deployment's decision record
-
-## Status
-
-M0–M2 (recorder, census, budgets/CLI) and M-A0–A2 (attach, incident
-identity, plugin packaging) shipped with measured exit criteria. Bench +
-correctness gate (SPEC §6, M3) and paused-world bisection (M4) are next.
-
-## Relationship to slopjs
-
-A sibling on the same platform: slopjs is a pointing device for a
-human-in-the-loop authoring session; sloptimize is a measurement loop that
-works with nobody watching. Tier 2 consumes `@slopjs/inspector` primitives
-(stable IDs, the coherent pause, snapshots) where present.
+- `docs/INTEGRATION.md` — wiring a real game and its Claude Code session
+- `docs/USAGE.md` — day-to-day use once wired
+- `docs/JITTER-AND-FOOTPRINTS.md` — the jitter detector and the issue catalogue
+- `docs/SPEC.md`, `docs/SPEC-attach.md` — the specifications
 
 ## License
 
