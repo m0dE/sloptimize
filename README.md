@@ -320,6 +320,7 @@ burns a loop on them.
 - `docs/SPEC.md` — the founding specification (recorder, census, bench, anti-gaming posture)
 - `docs/SPEC-attach.md` — v2: the incident pipeline, tier-0 attach, measured exit criteria
 - `docs/INTEGRATION.md` — wiring a real game + Claude Code session, with the reference deployment's traps
+- `docs/ELECTRON.md` — running under Electron: what works unchanged, the IPC sink, attach via --port, Electron-only signal worth adding
 - `docs/DESIGN-mecharoyale-v0.md` — the first field deployment's decision record
 
 ## Status
