@@ -160,15 +160,16 @@ npx sloptimize history --dir <game>/.sloptimize  # p95/calls/hitches over time, 
 npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 ```
 
-## The cloud catalogue (optional, paid, invite-only)
+## The cloud catalogue (optional — [sloptimizejs.com](https://sloptimizejs.com))
 
-With a project on sloptimize cloud, `SLOPTIMIZE_KEY` and `SLOPTIMIZE_ENDPOINT`
-(or `--key`/`--endpoint`) point the same CLI at every player's ledger
-instead of just this machine's:
+With a project on sloptimize cloud (sign in with GitHub, create a project,
+copy its secret key from the settings page), `SLOPTIMIZE_KEY` and
+`SLOPTIMIZE_ENDPOINT` (or `--key`/`--endpoint`) point the same CLI at every
+player's ledger instead of just this machine's:
 
 ```bash
-export SLOPTIMIZE_KEY=<secret key from the settings page>   # secret, not publishable: /v1/issues is secret-only
-export SLOPTIMIZE_ENDPOINT=<endpoint from the settings page>
+export SLOPTIMIZE_KEY=sk_live_…                     # secret, not publishable: /v1/issues is secret-only
+export SLOPTIMIZE_ENDPOINT=https://sloptimizejs.com   # the base URL; the CLI adds /v1/…
 npx sloptimize issues --cloud                     # last 24h across every player/build, by default
 npx sloptimize issues --cloud --preset 7d         # or 30d
 npx sloptimize issues --cloud --from <ISO> --to <ISO> --source client --kind hitch

@@ -164,17 +164,18 @@ panel.open();
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.
 
-### Cloud sink (optional, paid, invite-only)
+### Cloud sink (optional — [sloptimizejs.com](https://sloptimizejs.com))
 
 The dev-endpoint sink above stays the default: it is what makes the files
-useful with nobody watching. sloptimize cloud is a separate, additive tee —
-never a replacement — that ships the same records to a service so the
-catalogue spans every player and build, not just this machine. Run it
-BESIDE the local `post()`, never instead of it:
+useful with nobody watching. sloptimize cloud is an additive tee — never a
+replacement — that ships the same records to the service so the catalogue
+spans every player and build, not just this machine. Sign in with GitHub,
+create a project, and its settings page hands you the publishable key. Run
+the sink BESIDE the local `post()`, never instead of it:
 
 ```js
 import { createCloudSink } from 'sloptimize/cloud';
-const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });   // publishable: safe in the client bundle
+const cloud = createCloudSink({ key: 'pk_live_…', endpoint: 'https://sloptimizejs.com/v1/ingest', build });   // publishable: safe in the client bundle
 // wherever the local sink drains and posts:
 const batch = [...rec.drainRecords(), ...motion.drainRecords()];
 post('records', batch);   // unchanged: the local ledger, still the source of truth
@@ -192,7 +193,7 @@ the SAME recorder from §1, not a bare call — so uncaught client errors land
 in `rec` via `recorder.emit()` and ride `rec.drainRecords()` into `batch`
 above like any hitch, with no separate wiring to the cloud sink needed.
 
-### Game server (optional, paid, invite-only)
+### Game server (optional — the same project's secret key)
 
 The server side of the same catalogue: ticks that overran their budget,
 event-loop stalls the runtime itself measured, and uncaught errors — each
@@ -201,7 +202,7 @@ the browser uses.
 
 ```js
 import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<secret key>', endpoint: '<endpoint>', build, tickBudgetMs: 16 });
+const server = createServerRuntime({ key: process.env.SLOPTIMIZE_KEY, endpoint: 'https://sloptimizejs.com/v1/ingest', build, tickBudgetMs: 16 });
 
 function gameLoop() {
   server.tick(() => {          // wraps one tick; records a server-hitch if it overran tickBudgetMs
