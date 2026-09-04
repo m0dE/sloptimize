@@ -181,7 +181,10 @@ post('records', batch);   // unchanged: the local ledger, still the source of tr
 cloud.enqueue(batch);     // same records, teed to the cloud sink's own queue and flush timer
 ```
 
-`enqueue(records)` just appends to the sink's internal queue (capped at
+Every record the sink sends is stamped with a `session` id (12 chars, minted
+once per sink — a tab's lifetime), which is what the service's Sessions view
+groups by; pass `session: '<id>'` to pin one, and a record that already
+carries a `session` keeps it. `enqueue(records)` just appends to the sink's internal queue (capped at
 `maxQueue`, oldest dropped and counted honestly) — it does not fetch or
 flush itself; the sink's own timer (and `pagehide`/`visibilitychange`) drain
 and post it on the usual backoff. Pair it with `createErrorMonitor(rec)` —

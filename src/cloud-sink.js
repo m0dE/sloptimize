@@ -22,6 +22,11 @@ export function createCloudSink(opts = {}) {
   const setI = opts.setInterval ?? globalThis.setInterval, clearI = opts.clearInterval ?? globalThis.clearInterval;
   const now = opts.now ?? (() => Date.now());
 
+  // THE SESSION (cloud §1.4): one id per sink, minted once, stamped on every
+  // record that lacks one. A sink lives as long as its page, so the id names a
+  // tab's lifetime — the unit the service's Sessions view lists — without the
+  // host threading anything through. 12 base-62 chars: no two tabs collide.
+  const session = typeof opts.session === 'string' && opts.session ? opts.session : mintSession();
   let queue = [];
   let droppedLocally = 0;
   let failures = 0, backoffUntil = 0, inflight = false;
@@ -30,10 +35,14 @@ export function createCloudSink(opts = {}) {
   function trim() {
     if (queue.length > maxQueue) { droppedLocally += queue.length - maxQueue; queue = queue.slice(queue.length - maxQueue); }
   }
+  function stamp(records) {
+    for (const r of records) if (r && typeof r === 'object' && r.session === undefined) r.session = session;
+    return records;
+  }
   function drain() {
     for (const s of sources) {
       let r; try { r = s.drainRecords(); } catch { continue; }
-      if (r && r.length) queue.push(...r);
+      if (r && r.length) queue.push(...stamp(r));
     }
     trim();
   }
@@ -150,10 +159,23 @@ export function createCloudSink(opts = {}) {
       // A host tee that hands over something other than an array is a wiring
       // bug in the host, not a reason to throw into its drain loop.
       if (!Array.isArray(records)) { stats.lastError = 'enqueue: expected an array of records'; return; }
-      if (records.length) queue.push(...records);
+      if (records.length) queue.push(...stamp(records));
       trim();
     },
+    /** The id every record of this sink is stamped with. */
+    session: () => session,
     stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
     dispose() { clearI(timer); target.removeEventListener?.('pagehide', onHide); target.removeEventListener?.('visibilitychange', onVis); },
   };
+}
+
+const SESSION_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+function mintSession() {
+  const bytes = new Uint8Array(12);
+  const c = globalThis.crypto;
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  let s = '';
+  for (const b of bytes) s += SESSION_ALPHABET[b % 62];
+  return s;
 }
