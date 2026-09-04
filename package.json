@@ -1,6 +1,6 @@
 {
   "name": "sloptimize",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "The agent-native profiler for three.js games: an always-on flight recorder, per-entity cost attribution, and a deterministic bench — so a coding agent can measure, attribute, and verify instead of guessing.",
   "license": "MIT",

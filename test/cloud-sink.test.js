@@ -289,3 +289,13 @@ test('every record is stamped with the sink\'s session id — drained or enqueue
   assert.notEqual(mk(harness()).session(), sink.session());
   assert.equal(mk(harness(), { session: 'tab-7' }).session(), 'tab-7');
 });
+
+test('session: false stamps nothing — the server runtime\'s records are a process\'s, not a tab\'s', async () => {
+  const h = harness();
+  const sink = mk(h, { session: false });
+  assert.equal(sink.session(), null);
+  h.source.pending.push({ type: 'server-hitch', at: 'x' });
+  h.runTimers();
+  await sink.flush();
+  assert.equal('session' in h.calls[0].body.records[0], false);
+});

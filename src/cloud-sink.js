@@ -26,7 +26,8 @@ export function createCloudSink(opts = {}) {
   // record that lacks one. A sink lives as long as its page, so the id names a
   // tab's lifetime — the unit the service's Sessions view lists — without the
   // host threading anything through. 12 base-62 chars: no two tabs collide.
-  const session = typeof opts.session === 'string' && opts.session ? opts.session : mintSession();
+  // `session: false` opts out — the server runtime's records are a process's, not a tab's.
+  const session = opts.session === false ? null : typeof opts.session === 'string' && opts.session ? opts.session : mintSession();
   let queue = [];
   let droppedLocally = 0;
   let failures = 0, backoffUntil = 0, inflight = false;
@@ -36,6 +37,7 @@ export function createCloudSink(opts = {}) {
     if (queue.length > maxQueue) { droppedLocally += queue.length - maxQueue; queue = queue.slice(queue.length - maxQueue); }
   }
   function stamp(records) {
+    if (session === null) return records;
     for (const r of records) if (r && typeof r === 'object' && r.session === undefined) r.session = session;
     return records;
   }

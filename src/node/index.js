@@ -29,8 +29,9 @@ export function createServerRuntime(opts = {}) {
 
   const pending = [];
   const source = { drainRecords() { return pending.splice(0, pending.length); } };
+  // A server process is not a session (cloud §1.4): no session stamp on its records.
   const sink = createCloudSink({
-    key: opts.key, endpoint: opts.endpoint, build: opts.build, sources: [source], flushMs: opts.flushMs ?? 5000,
+    key: opts.key, endpoint: opts.endpoint, build: opts.build, sources: [source], flushMs: opts.flushMs ?? 5000, session: false,
     fetch: opts.fetch, sendBeacon: null, target: { addEventListener() {}, removeEventListener() {} }, setInterval: setI, clearInterval: clearI, now,
   });
 
