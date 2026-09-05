@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { foldProfile } from '../src/node/profiler.js';
 import { createServerRuntime } from '../src/node/index.js';
 
-test('foldProfile ranks self time per (url, function), excludes runtime and VM frames, strips file://', () => {
+test('foldProfile ranks self time per (url, function), excludes runtime, VM and inspector frames, strips file://', () => {
   const profile = {
     nodes: [
       { id: 1, callFrame: { functionName: '(root)', url: '' } },
@@ -12,9 +12,11 @@ test('foldProfile ranks self time per (url, function), excludes runtime and VM f
       { id: 3, callFrame: { functionName: 'query', url: 'file:///srv/db.js' } },
       { id: 4, callFrame: { functionName: 'take', url: 'file:///x/node_modules/sloptimize/src/node/profiler.js' } },
       { id: 5, callFrame: { functionName: '(garbage collector)', url: '' } },
+      // The window roll's own Profiler.stop parse: the sampler's cost, never the game's.
+      { id: 6, callFrame: { functionName: 'post', url: 'node:inspector' } },
     ],
-    samples: [2, 2, 3, 4, 5, 2],
-    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000],
+    samples: [2, 2, 3, 4, 5, 2, 6, 6, 6, 6],
+    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
   };
   assert.deepEqual(foldProfile(profile, '/sloptimize/src/node/'), [
     { file: '/srv/world.js', fn: 'step', selfMs: 3 },

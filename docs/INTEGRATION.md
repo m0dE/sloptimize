@@ -223,6 +223,14 @@ captured: `uncaughtExceptionMonitor` sees them only in Node's default
 flush the queue; a `beforeExit` hook already races a best-effort flush so a
 clean exit does not lose the last batch.
 
+The sampler is a rolling window, bounded in time: V8 keeps every sample of a
+running profile in memory until it is stopped, so the runtime rolls the
+profiler over every 10 s when no hitch has read it. A server that runs quiet
+for hours (an empty lobby) holds at most one window of samples — never the
+whole day's — and each hitch is attributed by the frames of the seconds
+leading up to it, not by everything the process did since the last one.
+`profile: false` turns the sampler off altogether (attribution `off`).
+
 ## 3. The CLI (the agent's shell surface)
 
 `sloptimize report|check|census|doctor --dir <game>/.sloptimize` — no
