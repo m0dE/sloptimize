@@ -164,13 +164,16 @@ panel.open();
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.
 
-### Cloud sink (optional, paid, invite-only)
+### Cloud sink (optional, hosted)
 
 The dev-endpoint sink above stays the default: it is what makes the files
 useful with nobody watching. sloptimize cloud is a separate, additive tee —
 never a replacement — that ships the same records to a service so the
-catalogue spans every player and build, not just this machine. Run it
-BESIDE the local `post()`, never instead of it:
+catalogue spans every player and build, not just this machine. The
+`<publishable key>` and `<endpoint>` below come from your project's
+**keys & setup** page on [sloptimizejs.com](https://sloptimizejs.com)
+(Projects → your project → Settings), which also prints this snippet
+filled in. Run it BESIDE the local `post()`, never instead of it:
 
 ```js
 import { createCloudSink } from 'sloptimize/cloud';
@@ -189,7 +192,7 @@ the SAME recorder from §1, not a bare call — so uncaught client errors land
 in `rec` via `recorder.emit()` and ride `rec.drainRecords()` into `batch`
 above like any hitch, with no separate wiring to the cloud sink needed.
 
-### Game server (optional, paid, invite-only)
+### Game server (optional, hosted)
 
 The server side of the same catalogue: ticks that overran their budget,
 event-loop stalls the runtime itself measured, and uncaught errors — each
@@ -208,7 +211,8 @@ function gameLoop() {
 ```
 
 The key here is a SECRET key (`server-*` record types and the read routes
-are secret-only) — it never goes in a client bundle.
+are secret-only) — it never goes in a client bundle. Mint it on the same
+keys & setup page (kind: secret) and copy it when it is shown, once.
 
 `createServerRuntime` registers `uncaughtExceptionMonitor` only (never
 `uncaughtException`/`unhandledRejection`) — it observes a crash, it never

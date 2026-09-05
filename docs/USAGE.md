@@ -160,11 +160,13 @@ npx sloptimize history --dir <game>/.sloptimize  # p95/calls/hitches over time, 
 npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 ```
 
-## The cloud catalogue (optional, paid, invite-only)
+## The cloud catalogue (optional, hosted)
 
-With a project on sloptimize cloud, `SLOPTIMIZE_KEY` and `SLOPTIMIZE_ENDPOINT`
-(or `--key`/`--endpoint`) point the same CLI at every player's ledger
-instead of just this machine's:
+With a project on [sloptimize cloud](https://sloptimizejs.com), `SLOPTIMIZE_KEY`
+and `SLOPTIMIZE_ENDPOINT` (or `--key`/`--endpoint`) point the same CLI at
+every player's ledger instead of just this machine's. Both values come from
+the project's **keys & setup** page (Projects → your project → Settings):
+create a **secret** key there and copy it when it is shown, once.
 
 ```bash
 export SLOPTIMIZE_KEY=<secret key from the settings page>   # secret, not publishable: /v1/issues is secret-only

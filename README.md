@@ -203,11 +203,11 @@ prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
 `docs/INTEGRATION.md` §5. Wire it into a `SessionStart` hook and every
 session arms it by itself.
 
-## Cloud (paid, invite-only)
+## Cloud (optional, hosted)
 
 Everything above is local: one machine's `.sloptimize/` directory, read by
 that machine's shell and that machine's Claude Code session. sloptimize
-cloud is a separate, optional, invite-only service that widens the same
+cloud is a separate, optional, hosted service that widens the same
 catalogue to **every player, every build** — not just the one in front of
 you: 24h/7d/30d or any custom range, client incidents and server incidents
 (`sloptimize/node`) folded into the same footprint identity, plus uncaught
@@ -215,10 +215,13 @@ errors (`sloptimize/errors`) as their own incident kind. The local product
 stays the default story — nothing below changes what a project with no
 cloud key does.
 
-Where the endpoint and key live: your project's settings page on the
-service (there is no public hostname to document here — sloptimize cloud
-is invite-only, and the endpoint you use is whatever that page shows you).
-It hands you three snippets:
+**Where the endpoint and keys live**: sign in with GitHub at
+[sloptimizejs.com](https://sloptimizejs.com), create a project (**Projects →
+New project**), and you land on its **keys & setup** page — the Settings tab
+of every project. That page shows the ingest endpoint, the publishable key
+(created with the project), a button that mints the secret key (shown
+once, copy it then), and the three snippets below already filled in for
+your project:
 
 ```js
 // browser: the cloud sink is a TEE beside your existing drain, never instead
