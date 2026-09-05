@@ -231,6 +231,22 @@ whole day's — and each hitch is attributed by the frames of the seconds
 leading up to it, not by everything the process did since the last one.
 `profile: false` turns the sampler off altogether (attribution `off`).
 
+### A host that profiles itself (optional)
+
+A `long-script` hitch is the one verdict sloptimize cannot take further in a
+player's tab — there is no profiler there. If the game keeps its own per-frame
+sections, put the top ones on the record before it is drained:
+
+```js
+rec.sections = [{ label: 'sim.world.greenery', excessMs: 41.2, baselineMs: 1.1 },
+                { label: 'terrain',            excessMs: 9.6,  baselineMs: 0.4 }];
+```
+
+The first section becomes the hitch's SITE in its footprint (`hitch|play|
+long-script|section:sim.world.greenery`), so the catalogue shows one row per
+cause instead of one row per phase; mints, when a hitch has them, still win.
+Extra fields (`sectionCoverage`, `offLoop`, …) ride along as evidence.
+
 ## 3. The CLI (the agent's shell surface)
 
 `sloptimize report|check|census|doctor --dir <game>/.sloptimize` — no

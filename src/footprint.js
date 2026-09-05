@@ -140,6 +140,20 @@ function mintSite(rec) {
   return ids.join(',');
 }
 
+/** The site of a browser hitch: the materials it minted when it minted any
+ *  (a compile has a material), else the host's own attribution — the loop
+ *  SECTION whose time was most above its baseline (`rec.sections`, written by
+ *  a host that runs a per-frame profiler of its own). A long-script hitch
+ *  with neither is one row per phase; with a section it is one row per cause,
+ *  which is what makes a hundred players' "long-script in play" workable. */
+function hitchSite(rec) {
+  const mints = mintSite(rec);
+  if (mints) return mints;
+  const top = Array.isArray(rec.sections) ? rec.sections[0] : undefined;
+  const label = top && typeof top.label === 'string' ? top.label.trim() : '';
+  return label ? `section:${label.replace(/[|,]/g, '_').slice(0, 60)}` : '';
+}
+
 /** Which way a jitter moved: vertical (a step, a ground clamp, a fall) or
  *  horizontal (a correction, a teleport across the ground). x vs z would only
  *  say which way the pilot happened to be facing. */
@@ -169,7 +183,7 @@ function baseKey(rec) {
   const phase = rec.phase ?? '?';
   switch (rec.type) {
     case 'hitch': {
-      const site = mintSite(rec);
+      const site = hitchSite(rec);
       return `hitch|${phase}|${topGuess(rec)}${site ? `|${site}` : ''}`;
     }
     case 'usermark': {
@@ -218,10 +232,17 @@ export function describeFootprint(key) {
   return { ...d, ctx };
 }
 
+/** How a hitch's site reads: a section by name, mints by count. */
+function hitchSiteLabel(site) {
+  if (!site) return '';
+  if (site.startsWith('section:')) return ` · ${site.slice('section:'.length)}`;
+  return ` · ${site.split(',').length} mint site(s)`;
+}
+
 function describeBase(parts, key) {
   const [type] = parts;
   switch (type) {
-    case 'hitch': return { glyph: '⚡', label: `hitch · ${parts[2] ?? '?'}${parts[3] ? ` · ${parts[3].split(',').length} mint site(s)` : ''}`, phase: parts[1] ?? '?' };
+    case 'hitch': return { glyph: '⚡', label: `hitch · ${parts[2] ?? '?'}${hitchSiteLabel(parts[3])}`, phase: parts[1] ?? '?' };
     case 'usermark': return { glyph: '★', label: `keyframe · ${parts[2] ?? '?'}`, phase: parts[1] ?? '?' };
     case 'jitter': return { glyph: '↯', label: `jitter · ${parts[1] ?? '?'} ${parts[2] ?? '?'} · ${parts[4] ?? '?'} · ${parts[5] ?? '?'}`, phase: parts[3] ?? '?' };
     case 'warm': return { glyph: '🔥', label: `warm · ${parts[1] ?? '?'} (${parts[2] ?? '?'})`, phase: parts[3] ?? '?' };
