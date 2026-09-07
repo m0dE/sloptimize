@@ -41,9 +41,12 @@ export function createCloudSink(opts = {}) {
     for (const r of records) if (r && typeof r === 'object' && r.session === undefined) r.session = session;
     return records;
   }
-  function drain() {
+  // A source may hold a record it has not decided yet (the recorder's open
+  // hitch window); the unload drain is the last one, so it says so.
+  const FINAL = Object.freeze({ final: true });
+  function drain(final = false) {
     for (const s of sources) {
-      let r; try { r = s.drainRecords(); } catch { continue; }
+      let r; try { r = s.drainRecords(final ? FINAL : undefined); } catch { continue; }
       if (r && r.length) queue.push(...stamp(r));
     }
     trim();
@@ -133,7 +136,7 @@ export function createCloudSink(opts = {}) {
   }
   function onHide() {
     try {
-      drain();
+      drain(true);
       if (queue.length === 0 || !beacon) return;
       // Any batch currently in flight via flush() was already spliced out of
       // `queue`, so what's here is guaranteed disjoint from it — no duplicate

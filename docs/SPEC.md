@@ -191,10 +191,17 @@ insideRenderMs small). Multiple guesses allowed, ranked. `confidence` is
 `low | medium | high` and the `evidence` string is mandatory — a guess
 without its reason is banned by principle 4.
 
-Rate limit: at most 1 record per second and 500 per session; when the limit
-truncates, the *last* record of the session says how many were dropped
-(silence must mean nothing was dropped — the inspector's selection-block
-rule, inherited).
+Rate limit: at most 1 record per second and 500 per session. The second is
+a WINDOW and its record is its WORST hitch: a hitch opens the window, a
+bigger frame inside it takes the record over, and the hitches that lost are
+counted onto that record's `droppedSinceLast`. The record leaves on the
+first frame after the window closes; `drainRecords({ final: true })` — the
+host is going away — closes it early. Past the session cap, hitches are
+counted onto the next record through (silence must mean nothing was dropped
+— the inspector's selection-block rule, inherited). Keeping the FIRST hitch
+of a second instead would blind the instrument exactly when it matters: a
+tab dropping one frame a second at a 120 Hz grade would swallow the 300 ms
+freeze that landed 200 ms after one of them.
 
 ### 3.5 Usermarks — the human's half of hitch detection
 
@@ -291,7 +298,9 @@ and when the view was CUT on purpose (camera mode flip, spectate target
 change, respawn, session boundary) — the detector never guesses intent.
 Rate limits: one record per second PER TRACK (a unit that teleports takes
 its camera with it in the same frame, and the camera's record is the one
-that says so), 200 per session, drops counted onto the next record.
+that says so), 200 per session. The second is a window and its record is
+the track's BIGGEST jump in it, the losers counted onto that record (§3.3);
+the session cap's drops ride the next record through.
 
 Stated limits: a pure rotation pop (a yaw snap) moves no coordinate and is
 not detected; a snap that coincides with an equal-and-opposite velocity

@@ -11,6 +11,17 @@
 // accumulated; the caller ships them wherever its sink lives. The recorder
 // must never be the hitch it reports — no JSON, no strings, no closures per
 // frame.
+//
+// The 1/s rate limit is a WINDOW, and the record for a window is its WORST
+// hitch. A hitch opens a one-second window; every hitch inside it competes
+// for the one record, the bigger frame wins, and the losers are counted
+// onto that record's `droppedSinceLast`. The record leaves on the first
+// frame after the window closes (or on a `final` drain). The alternative —
+// keep the first hitch of the second and drop the rest — blinds the
+// instrument exactly when it matters: a session dropping one 17 ms frame
+// every second at a 120 Hz grade (mecharoyale 2026-09-07, 32 of 199 hitches
+// dropped) would swallow a 300 ms freeze that landed 200 ms after one of
+// them, and the catalogue would say the session's worst frame was 92 ms.
 
 import { classifyHitch } from './classify.js';
 
@@ -41,8 +52,10 @@ export function createRecorder(opts = {}) {
 
   let records = [];
   let sessionRecords = 0;
-  let droppedSinceLast = 0;
-  let lastRecordAt = -Infinity;
+  let droppedSinceLast = 0;   // the session cap's drops — reported on the next record through
+  // The open hitch window: the record it will emit, when it opened, the
+  // hitches that lost to it, and where in `records` it belongs (mint order).
+  let pending = null;
   let lastPhase;   // most recent s.phase seen by frame(), for emit()'s stamping
   let lastCtx;     // most recent s.ctx seen by frame(), for emit()'s stamping
 
@@ -72,6 +85,15 @@ export function createRecorder(opts = {}) {
 
   function prevIdx(back = 1) { return (head - 1 - back + RING * 2) % RING; }
 
+  /** The window closed: its worst hitch becomes the record, its losers ride
+   *  on it, and it takes its place in mint order among what was pushed since. */
+  function flushPending() {
+    const { rec, dropped, index } = pending;
+    pending = null;
+    if (dropped + droppedSinceLast > 0) { rec.droppedSinceLast = dropped + droppedSinceLast; droppedSinceLast = 0; }
+    records.splice(Math.min(index, records.length), 0, rec);
+  }
+
   return {
     /** One frame's numbers. Zero-allocation on the steady path. */
     frame(s) {
@@ -80,10 +102,11 @@ export function createRecorder(opts = {}) {
       const idx = head;
       for (const f of FIELDS) lanes[f][idx] = s[f] ?? 0;
       pausedLane[idx] = s.paused ? 1 : 0;
-      atLane[idx] = now();
+      const t = atLane[idx] = now();
       head = (head + 1) % RING;
       if (count < RING) count++;
       frameNo++;
+      if (pending !== null && t - pending.openedAt >= MIN_RECORD_GAP_MS) flushPending();
 
       if (s.paused) return;
       const median = rollingMedian();
@@ -91,14 +114,15 @@ export function createRecorder(opts = {}) {
       if (s.frameMs <= threshold || count < 30) return;
 
       // A hitch. Rate limits first (SPEC §3.3): silence must mean nothing
-      // was dropped, so the drops are counted and reported on the NEXT record.
-      const t = now();
-      if (t - lastRecordAt < MIN_RECORD_GAP_MS || sessionRecords >= MAX_RECORDS_PER_SESSION) {
+      // was dropped, so the drops are counted and reported — the window's
+      // losers on the window's own record, the session cap's on the next one.
+      if (pending !== null) {
+        pending.dropped++;
+        if (s.frameMs <= pending.rec.frameMs) return;
+      } else if (sessionRecords >= MAX_RECORDS_PER_SESSION) {
         droppedSinceLast++;
         return;
       }
-      lastRecordAt = t;
-      sessionRecords++;
 
       const prev = prevIdx(1);
       const delta = {};
@@ -127,8 +151,9 @@ export function createRecorder(opts = {}) {
       // The host's situation facets (SPEC §3.7), a canonical string the host
       // refreshes on its own cadence — stamped at mint like the phase.
       if (s.ctx) rec.ctx = s.ctx;
-      if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
-      records.push(rec);
+      if (pending !== null) { pending.rec = rec; return; }   // the worse hitch takes the window
+      sessionRecords++;
+      pending = { rec, openedAt: t, dropped: 0, index: records.length };
     },
 
     /** SPEC §3.2 — the rolling summary. Absent fields stay absent. */
@@ -246,7 +271,15 @@ export function createRecorder(opts = {}) {
       return true;
     },
 
-    /** Hand back accumulated records and clear — the host owns transport. */
-    drainRecords() { const r = records; records = []; return r; },
+    /** Hand back accumulated records and clear — the host owns transport.
+     *  A hitch window still open rides to the next drain (its record is not
+     *  decided yet); `{ final: true }` — the host is going away — closes it now. */
+    drainRecords(opts) {
+      if (pending !== null) {
+        if (opts?.final || now() - pending.openedAt >= MIN_RECORD_GAP_MS) flushPending();
+        else pending.index = 0;
+      }
+      const r = records; records = []; return r;
+    },
   };
 }

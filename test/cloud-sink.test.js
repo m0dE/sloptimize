@@ -75,6 +75,18 @@ test('pagehide flushes via sendBeacon with the key in the query', () => {
   assert.equal(h.beacons[0].url, 'https://c.example/v1/ingest?key=pk_live_x');
 });
 
+test('the unload drain is FINAL — a source closes its open window; a periodic drain does not', async () => {
+  const h = harness();
+  const drains = [];
+  h.source.drainRecords = function (opts) { drains.push(opts); const r = this.pending; this.pending = []; return r; };
+  const sink = mk(h);
+  h.source.pending.push({ type: 'hitch', at: 'a' });
+  await sink.flush();
+  h.source.pending.push({ type: 'hitch', at: 'b' });
+  h.target.fire('pagehide', {});
+  assert.deepEqual(drains, [undefined, { final: true }]);
+});
+
 test('fetch throwing never escapes; it lands in stats().lastError', async () => {
   const h = harness();
   const sink = mk(h, { fetch: async () => { throw new Error('offline'); } });

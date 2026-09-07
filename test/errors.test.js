@@ -102,17 +102,19 @@ test('recorder.emit stamps at, respects the session cap, and reports drops', () 
   assert.equal(rec.drainRecords().length, 0);
 });
 
-test('a drop is counted and reported on the next record that gets through', () => {
-  // The drop counter emit() stamps is the recorder's one honesty guarantee:
-  // silence must mean nothing was lost. Rate-limit a hitch, then emit.
-  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => 1000 });
+test('a drop is counted and reported: a window\'s losers on its own record, the cap\'s on the next record through', () => {
+  // The drop counter is the recorder's one honesty guarantee: silence must
+  // mean nothing was lost. Two hitches in one second, then an emit.
+  let t = 1000;
+  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
   const frame = (frameMs) => rec.frame({ frameMs, insideRenderMs: frameMs * 0.5, calls: 100, triangles: 5e4, programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 });
   for (let i = 0; i < 60; i++) frame(8);
-  frame(41);                       // the first hitch: recorded
-  frame(41);                       // inside MIN_RECORD_GAP_MS: dropped, counted
+  frame(41);                       // the first hitch opens the window
+  frame(41);                       // inside it, no worse: lost to the first, counted
   assert.equal(rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] }), true);
+  t += 1000; frame(8);             // the window closes
   const recs = rec.drainRecords();
-  assert.equal(recs.length, 2);
-  assert.equal(recs[0].droppedSinceLast, undefined);
-  assert.equal(recs[1].droppedSinceLast, 1);
+  assert.deepEqual(recs.map((r) => r.type), ['hitch', 'error']);
+  assert.equal(recs[0].droppedSinceLast, 1);
+  assert.equal(recs[1].droppedSinceLast, undefined);
 });
