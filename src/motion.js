@@ -90,6 +90,19 @@ export function createMotionMonitor(opts = {}) {
   }
 
   let records = [];
+  // Records leave in MINT order whatever order their windows close: two
+  // tracks that jump in one frame (a unit and the camera that follows it)
+  // open two windows, and the camera's — sampled second, so it may close
+  // first — must still read after the unit's it explains. The order lives
+  // beside the record (nothing extra is serialized).
+  const mintSeq = new WeakMap();
+  let seq = 0;
+  function place(rec) {
+    const s = mintSeq.get(rec);
+    let i = records.length;
+    while (i > 0 && mintSeq.get(records[i - 1]) > s) i--;
+    records.splice(i, 0, rec);
+  }
   let sessionRecords = 0;      // the cap is per session, across tracks
   let droppedSinceLast = 0;
   let totalDropped = 0;
@@ -159,10 +172,10 @@ export function createMotionMonitor(opts = {}) {
   /** The window closed: its biggest jump is the record, its losers ride on
    *  it, and it takes its place in mint order among what was pushed since. */
   function flushOpen(tr) {
-    const { rec, dropped, index } = tr.open;
+    const { rec, dropped } = tr.open;
     tr.open = null;
     if (dropped + droppedSinceLast > 0) { rec.droppedSinceLast = dropped + droppedSinceLast; droppedSinceLast = 0; }
-    records.splice(Math.min(index, records.length), 0, rec);
+    place(rec);
   }
   function flushIfClosed(tr, wall) {
     if (tr.open !== null && wall - tr.open.openedAt >= minGapMs) flushOpen(tr);
@@ -263,9 +276,10 @@ export function createMotionMonitor(opts = {}) {
       cls.push({ guess: 'snap', confidence: 'high',
         evidence: `${fx(f.mag)}${unit} off its trajectory in one ${f.dt.toFixed(1)}ms frame (expected ${fx(f.travel)}${unit} of travel at ${f.speed.toFixed(2)}${unit}/s); motion resumed from the new place` });
     }
+    mintSeq.set(rec, ++seq);
     if (w !== null) { w.rec = rec; w.amplitude = b.amplitude; return; }   // the bigger jump takes the window
     sessionRecords++;
-    tr.open = { rec, amplitude: b.amplitude, openedAt: f.wall, dropped: 0, index: records.length };
+    tr.open = { rec, amplitude: b.amplitude, openedAt: f.wall, dropped: 0 };
   }
 
   return {
@@ -358,7 +372,6 @@ export function createMotionMonitor(opts = {}) {
       for (const tr of tracks.values()) {
         if (tr.open === null) continue;
         if (opts?.final || now() - tr.open.openedAt >= minGapMs) flushOpen(tr);
-        else tr.open.index = 0;
       }
       const r = records; records = []; return r;
     },

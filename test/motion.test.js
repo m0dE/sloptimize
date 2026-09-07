@@ -290,6 +290,20 @@ test('the record for a track\'s second is its BIGGEST jump, not its first', () =
   assert.equal(m.stats().dropped, 2);
 });
 
+test('two tracks that jump in one frame leave in mint order — the unit before the camera that follows it — whatever order their windows close', () => {
+  const { m, setWall } = monitor();
+  const u = line(40, [0, 0, 0], [6, 0, 0]);
+  const c = u.map((p) => ({ ...p, z: p.z + 10 }));
+  for (let i = 0; i < 20; i++) { setWall(u[i].t); m.sample('unit', u[i].x, u[i].y, u[i].z, u[i].t, { phase: 'play' }); m.sample('camera', c[i].x, c[i].y, c[i].z, c[i].t, { phase: 'play' }); }
+  // Both teleport +1 m in the same frame; the camera is sampled SECOND every
+  // frame, so its burst closes and its window flushes after the unit's on
+  // the frame that closes them — and it must still read second.
+  for (let i = 20; i < 40; i++) { setWall(u[i].t); m.sample('unit', u[i].x + 1, u[i].y, u[i].z, u[i].t, { phase: 'play' }); m.sample('camera', c[i].x + 1, c[i].y, c[i].z, c[i].t, { phase: 'play' }); }
+  const recs = m.drainRecords({ final: true });
+  assert.deepEqual(recs.map((r) => r.track), ['unit', 'camera']);
+  assert.equal(recs[1].classification[0].guess, 'follows-track');
+});
+
 test('an open window rides an ordinary drain and a final drain closes it', () => {
   const { m, feed } = monitor();
   let pts = [], x = 0, t = 0;

@@ -91,20 +91,30 @@ test('the record for a second is its WORST hitch, not its first — stamped with
   assert.deepEqual(rec.drainRecords().map((r) => r.frameMs), [40]);
 });
 
-test('an open window rides an interim drain and keeps its mint order among later records', () => {
+test('an open window rides an interim drain and its record leaves in MINT order among later records', () => {
   let t = 0;
   const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
   feed(rec, 120, 8);
   t += 10; hitch(rec, 60);
   assert.equal(rec.drainRecords().length, 0);   // still open: rides
   rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] });
-  t += 500; hitch(rec, 90);                     // the worse one takes the window
+  t += 500; hitch(rec, 30);                     // inside the window, no worse: lost to the 60
   t += 1000;
-  const recs = rec.drainRecords();              // expired by the clock: closes at the drain
-  assert.deepEqual(recs.map((r) => r.type), ['hitch', 'error']);   // minted before the error, listed before it
-  assert.equal(recs[0].frameMs, 90);
+  let recs = rec.drainRecords();                // expired by the clock: closes at the drain
+  assert.deepEqual(recs.map((r) => r.type), ['hitch', 'error']);   // the 60 was minted before the error
+  assert.equal(recs[0].frameMs, 60);
   assert.equal(recs[0].droppedSinceLast, 1);
   assert.equal(recs[1].droppedSinceLast, undefined);
+  // A WORSE hitch after the error takes the window: the record then stands
+  // for that frame, which happened after the error, and reads after it.
+  t += 10; hitch(rec, 60);
+  rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] });
+  t += 500; hitch(rec, 90);
+  t += 1000;
+  recs = rec.drainRecords();
+  assert.deepEqual(recs.map((r) => r.type), ['error', 'hitch']);
+  assert.equal(recs[1].frameMs, 90);
+  assert.equal(recs[1].droppedSinceLast, 1);
 });
 
 test('the session cap: past it, hitches are counted and the count rides the next record through', () => {

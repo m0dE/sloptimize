@@ -53,9 +53,22 @@ export function createRecorder(opts = {}) {
   let records = [];
   let sessionRecords = 0;
   let droppedSinceLast = 0;   // the session cap's drops — reported on the next record through
-  // The open hitch window: the record it will emit, when it opened, the
-  // hitches that lost to it, and where in `records` it belongs (mint order).
+  // The open hitch window: the record it will emit, when it opened, and the
+  // hitches that lost to it.
   let pending = null;
+  // Records leave in MINT order whatever order they land in `records`: a
+  // window's record is minted at its hitch but pushed when the window closes,
+  // after anything emitted meanwhile. The order lives beside the record, not
+  // on it (nothing extra is serialized).
+  const mintSeq = new WeakMap();
+  let seq = 0;
+  const minted = (rec) => { mintSeq.set(rec, ++seq); return rec; };
+  function place(rec) {
+    const s = mintSeq.get(rec) ?? ++seq;
+    let i = records.length;
+    while (i > 0 && (mintSeq.get(records[i - 1]) ?? 0) > s) i--;
+    records.splice(i, 0, rec);
+  }
   let lastPhase;   // most recent s.phase seen by frame(), for emit()'s stamping
   let lastCtx;     // most recent s.ctx seen by frame(), for emit()'s stamping
 
@@ -88,10 +101,10 @@ export function createRecorder(opts = {}) {
   /** The window closed: its worst hitch becomes the record, its losers ride
    *  on it, and it takes its place in mint order among what was pushed since. */
   function flushPending() {
-    const { rec, dropped, index } = pending;
+    const { rec, dropped } = pending;
     pending = null;
     if (dropped + droppedSinceLast > 0) { rec.droppedSinceLast = dropped + droppedSinceLast; droppedSinceLast = 0; }
-    records.splice(Math.min(index, records.length), 0, rec);
+    place(rec);
   }
 
   return {
@@ -129,7 +142,7 @@ export function createRecorder(opts = {}) {
       for (const f of ['calls', 'triangles', 'programs', 'textures', 'geometries']) {
         delta[f] = count > 1 ? lanes[f][idx] - lanes[f][prev] : 0;
       }
-      const rec = {
+      const rec = minted({
         type: 'hitch',
         at: new Date().toISOString(),
         frame: frameNo,
@@ -141,7 +154,7 @@ export function createRecorder(opts = {}) {
           frameMs: s.frameMs, medianMs: median, insideRenderMs: s.insideRenderMs ?? 0,
           delta, spawned: s.spawned ?? 0, memorySampled: !!s.memorySampled,
         }),
-      };
+      });
       if (s.world) rec.world = s.world;
       // Phase is a string the HOST passes per frame (menu/boot/launch/match…)
       // — stamped at mint time so the record names the moment the hitch
@@ -153,7 +166,7 @@ export function createRecorder(opts = {}) {
       if (s.ctx) rec.ctx = s.ctx;
       if (pending !== null) { pending.rec = rec; return; }   // the worse hitch takes the window
       sessionRecords++;
-      pending = { rec, openedAt: t, dropped: 0, index: records.length };
+      pending = { rec, openedAt: t, dropped: 0 };
     },
 
     /** SPEC §3.2 — the rolling summary. Absent fields stay absent. */
@@ -254,7 +267,7 @@ export function createRecorder(opts = {}) {
       if (meta.ctx) mark.ctx = meta.ctx;
       if (meta.inputsHeld) mark.inputsHeld = meta.inputsHeld;
       if (meta.world) mark.world = meta.world;
-      records.push(mark);
+      records.push(minted(mark));
       return mark;
     },
 
@@ -267,7 +280,7 @@ export function createRecorder(opts = {}) {
       if (rec.phase === undefined && lastPhase) rec.phase = lastPhase;
       if (rec.ctx === undefined && lastCtx) rec.ctx = lastCtx;
       if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
-      records.push(rec);
+      records.push(minted(rec));
       return true;
     },
 
@@ -275,10 +288,7 @@ export function createRecorder(opts = {}) {
      *  A hitch window still open rides to the next drain (its record is not
      *  decided yet); `{ final: true }` — the host is going away — closes it now. */
     drainRecords(opts) {
-      if (pending !== null) {
-        if (opts?.final || now() - pending.openedAt >= MIN_RECORD_GAP_MS) flushPending();
-        else pending.index = 0;
-      }
+      if (pending !== null && (opts?.final || now() - pending.openedAt >= MIN_RECORD_GAP_MS)) flushPending();
       const r = records; records = []; return r;
     },
   };
