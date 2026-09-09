@@ -203,6 +203,29 @@ prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
 `docs/INTEGRATION.md` §5. Wire it into a `SessionStart` hook and every
 session arms it by itself.
 
+## Electron games
+
+An Electron renderer is a Chromium page, so everything above applies. What
+Electron adds is a main process that can host the sink itself (no dev
+server) and see what a browser hides — per-process CPU and the GPU side:
+
+```js
+// main.js
+import { app, ipcMain, contentTracing } from 'electron';
+import { createElectronSink, attachInApp } from 'sloptimize/electron';
+const sink = createElectronSink({ ipcMain, app });        // .sloptimize/ via IPC; hitches carry GPU/renderer CPU
+const session = await attachInApp({ webContents: win.webContents, app, contentTracing, trace: true }); // tier 0, no debug port
+
+// preload.js
+import { contextBridge, ipcRenderer } from 'electron';
+import { exposeSloptimizeBridge } from 'sloptimize/electron/preload';
+exposeSloptimizeBridge({ contextBridge, ipcRenderer });   // window.sloptimizeSink.post / .history
+```
+
+Then `sloptimize report`, the hook and the MCP server read the same files.
+`docs/ELECTRON.md` has the full recipe, and `sloptimize attach --port 9222`
+still works against an app started with `--remote-debugging-port=9222`.
+
 ## Cloud (optional, hosted)
 
 Everything above is local: one machine's `.sloptimize/` directory, read by
@@ -323,7 +346,7 @@ burns a loop on them.
 - `docs/SPEC.md` — the founding specification (recorder, census, bench, anti-gaming posture)
 - `docs/SPEC-attach.md` — v2: the incident pipeline, tier-0 attach, measured exit criteria
 - `docs/INTEGRATION.md` — wiring a real game + Claude Code session, with the reference deployment's traps
-- `docs/ELECTRON.md` — running under Electron: what works unchanged, the IPC sink, attach via --port, Electron-only signal worth adding
+- `docs/ELECTRON.md` — Electron games: the IPC sink (`sloptimize/electron`), in-app attach with GPU traces, per-process CPU on every hitch
 - `docs/DESIGN-mecharoyale-v0.md` — the first field deployment's decision record
 
 ## Status

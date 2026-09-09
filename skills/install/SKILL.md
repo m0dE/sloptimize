@@ -100,6 +100,13 @@ knows what it is.
   raw JSONL) for the debugger's history tabs. Prefer arming by topology (the presence of
   `.sloptimize/budgets.json` in the server cwd) with env overrides, over
   a bare env flag someone must remember.
+- Electron host: no HTTP endpoint. `createElectronSink({ ipcMain, app })`
+  from `sloptimize/electron` in main and `exposeSloptimizeBridge({
+  contextBridge, ipcRenderer })` from `sloptimize/electron/preload` in the
+  preload script; the game's drain calls `window.sloptimizeSink.post` and
+  the panel gets `history: window.sloptimizeSink.history`. Arm on the
+  bridge's presence. Feed `paused: true` while `document.visibilityState`
+  is hidden — a minimized window stops rAF. Full recipe: `docs/ELECTRON.md`.
 - **MUST NOT die silently**: once armed, a refused or failed post flips
   the feed DARK — buffer (bounded, count drops), retry on the backoff,
   and SHOW the state on the chip. The first deployment lost an hour of

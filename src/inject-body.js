@@ -149,4 +149,10 @@ function tick(ts) {
   }
 }
 requestAnimationFrame(tick);
+// A hidden window (minimized Electron BrowserWindow, background tab) stops
+// rAF entirely; without this the first frame back would report the whole
+// hidden span as one hitch. Re-seed the clock on either edge.
+try {
+  document.addEventListener('visibilitychange', () => { lastRaf = -1; });
+} catch { /* no document */ }
 emit({ type: 'armed', at: new Date().toISOString(), url: location.href });

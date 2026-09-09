@@ -177,6 +177,8 @@ if (cmd === 'doctor') {
   console.log('  stated limits: no per-draw GPU timing; bisection ranks, never sums; workload repro not trajectory repro;');
   console.log('  gpu:* instruments fire only under a real WebGPU backend — a WebGL2-fallback session reads them as zeros, honestly;');
   console.log('  bench/gate (M3) not built yet in this install — verify fixes with counters (exact grade) + real-hardware sessions.');
+  const em = readJsonl('perf.jsonl', 400).filter((r) => r.type === 'electron-metrics').at(-1);
+  if (em) console.log(`  electron: sink active (last process sample ${em.at}: gpu ${em.cpu?.gpu}% renderer ${em.cpu?.renderer}% cpu) — hitches carry .processes`);
   const cfg = (await import('../src/cloud-client.js')).cloudConfig(process.env, args);
   console.log(cfg ? `  cloud: configured (${cfg.endpoint})` : '  cloud: not configured (SLOPTIMIZE_KEY, SLOPTIMIZE_ENDPOINT)');
   process.exit(0);
