@@ -187,9 +187,26 @@ Classification vocabulary (closed set, extensible only by spec change):
 programs 0), `spawn-burst` (spawned length above threshold),
 `gc-or-upload-by-elimination` (no counter moved), `long-render`
 (insideRenderMs dominates), `long-script` (frame delta dominates,
-insideRenderMs small). Multiple guesses allowed, ranked. `confidence` is
+insideRenderMs small), `host-attributed` (a span the HOST's own instrument
+measured inside the gap explains at least half of the frame's excess over
+its median — see below). Multiple guesses allowed, ranked. `confidence` is
 `low | medium | high` and the `evidence` string is mandatory — a guess
 without its reason is banned by principle 4.
+
+`host-attributed` ranks FIRST whenever it applies, ahead of every
+counter-derived guess, and by-elimination is never appended behind it: a
+name the host measured beats a shape inferred from deltas. It is normally
+absent at mint time — a host seals its own attribution after the frame —
+and is reached through `reclassify(rec, spans)` at drain, which stamps the
+spans on the record (`attributed`, largest first, at most three) and re-runs
+the verdict. Its evidence prints both numbers (`mesh:step 12.3ms of 14.1ms
+excess, host-instrumented`); confidence is `high` at four fifths of the
+excess, `medium` at half; a span under 2 ms is noise whatever its share. The
+footprint (§3.7) keys such a hitch on the span (`span:<label>`), ahead of
+mints and sections. The record that motivated this: a game stepping its
+whole match server in a promise continuation between frames, ~10 ms a tick,
+filed 4,338 times as `gc-or-upload-by-elimination` while the host's stall
+recorder could have named it on every one.
 
 Rate limit: at most 1 record per second and 500 per session. The second is
 a WINDOW and its record is its WORST hitch: a hitch opens the window, a

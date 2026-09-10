@@ -247,6 +247,37 @@ long-script|section:sim.world.greenery`), so the catalogue shows one row per
 cause instead of one row per phase; mints, when a hitch has them, still win.
 Extra fields (`sectionCoverage`, `offLoop`, …) ride along as evidence.
 
+### …and lets that profile decide the verdict
+
+Sections are a site; they do not change the guess. When the host has
+MEASURED what spent the frame — a loop section over its baseline, a tagged
+activity that ran between frames (a shader warm, a server tick stepped on
+the render thread, a scenery build), an attributed long task — hand those
+spans to `reclassify` before the drain and the classifier takes a second
+look with them:
+
+```js
+import { reclassify } from 'sloptimize';
+reclassify(rec, [
+  { label: 'mesh:step',   ms: 12.3 },   // what ran during the gap, by tag
+  { label: 'net:DELTA',   ms: 2.1 },
+  { label: 'crowd.bodies', ms: 3.9 },   // a section's excess over baseline
+]);
+// rec.classification[0] → { guess: 'host-attributed', confidence: 'high',
+//   evidence: 'mesh:step 12.3ms of 14.1ms excess, host-instrumented' }
+// rec.attributed → the spans, largest first (at most three)
+// footprint → hitch|play|host-attributed|span:mesh:step
+```
+
+A span has to explain at least half of the frame's excess over its median
+to become the verdict (SPEC §3.3); smaller ones still ride on the record as
+evidence. Do this at drain time, not at mint: the browser's long-task and
+long-animation-frame entries for a frame arrive a drain or two after it, and
+a loop's section table closes at the end of the body. Without this step a
+hitch whose cost was entirely off-loop and unnamed by any counter reads
+`gc-or-upload-by-elimination` — which is what a game whose match server ran
+on the render thread saw 4,338 times before the step was tagged.
+
 ## 3. The CLI (the agent's shell surface)
 
 `sloptimize report|check|census|doctor --dir <game>/.sloptimize` — no

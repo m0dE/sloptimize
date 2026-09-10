@@ -147,6 +147,16 @@ function mintSite(rec) {
  *  with neither is one row per phase; with a section it is one row per cause,
  *  which is what makes a hundred players' "long-script in play" workable. */
 function hitchSite(rec) {
+  // A verdict the host's own measurement carried (classify.js `reclassify`)
+  // names its site by that measurement: the cause IS the span. Ahead of the
+  // mints because a compile that happens inside a tagged warm is the warm's
+  // row, and ahead of the section because a section is where the loop was
+  // when the time went, while the span is what the host says spent it.
+  if (topGuess(rec) === 'host-attributed') {
+    const top = Array.isArray(rec.attributed) ? rec.attributed[0] : undefined;
+    const label = top && typeof top.label === 'string' ? top.label.trim() : '';
+    if (label) return `span:${label.replace(/[|,]/g, '_').slice(0, 60)}`;
+  }
   const mints = mintSite(rec);
   if (mints) return mints;
   const top = Array.isArray(rec.sections) ? rec.sections[0] : undefined;
@@ -235,6 +245,7 @@ export function describeFootprint(key) {
 /** How a hitch's site reads: a section by name, mints by count. */
 function hitchSiteLabel(site) {
   if (!site) return '';
+  if (site.startsWith('span:')) return ` · ${site.slice('span:'.length)}`;
   if (site.startsWith('section:')) return ` · ${site.slice('section:'.length)}`;
   return ` · ${site.split(',').length} mint site(s)`;
 }
