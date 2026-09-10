@@ -164,27 +164,28 @@ panel.open();
 Flush cadence: post `profile` every ~2s, drain records with it.
 Gitignore `.sloptimize/*` except `budgets.json`.
 
-### Cloud sink (optional, hosted)
+### Cloud sink (optional — [sloptimizejs.com](https://sloptimizejs.com))
 
 The dev-endpoint sink above stays the default: it is what makes the files
-useful with nobody watching. sloptimize cloud is a separate, additive tee —
-never a replacement — that ships the same records to a service so the
-catalogue spans every player and build, not just this machine. The
-`<publishable key>` and `<endpoint>` below come from your project's
-**keys & setup** page on [sloptimizejs.com](https://sloptimizejs.com)
-(Projects → your project → Settings), which also prints this snippet
-filled in. Run it BESIDE the local `post()`, never instead of it:
+useful with nobody watching. sloptimize cloud is an additive tee — never a
+replacement — that ships the same records to the service so the catalogue
+spans every player and build, not just this machine. Sign in with GitHub,
+create a project, and its settings page hands you the publishable key. Run
+the sink BESIDE the local `post()`, never instead of it:
 
 ```js
 import { createCloudSink } from 'sloptimize/cloud';
-const cloud = createCloudSink({ key: '<publishable key>', endpoint: '<endpoint>', build });   // publishable: safe in the client bundle
+const cloud = createCloudSink({ key: 'pk_live_…', endpoint: 'https://sloptimizejs.com/v1/ingest', build });   // publishable: safe in the client bundle
 // wherever the local sink drains and posts:
 const batch = [...rec.drainRecords(), ...motion.drainRecords()];
 post('records', batch);   // unchanged: the local ledger, still the source of truth
 cloud.enqueue(batch);     // same records, teed to the cloud sink's own queue and flush timer
 ```
 
-`enqueue(records)` just appends to the sink's internal queue (capped at
+Every record the sink sends is stamped with a `session` id (12 chars, minted
+once per sink — a tab's lifetime), which is what the service's Sessions view
+groups by; pass `session: '<id>'` to pin one, and a record that already
+carries a `session` keeps it. `enqueue(records)` just appends to the sink's internal queue (capped at
 `maxQueue`, oldest dropped and counted honestly) — it does not fetch or
 flush itself; the sink's own timer (and `pagehide`/`visibilitychange`) drain
 and post it on the usual backoff. Pair it with `createErrorMonitor(rec)` —
@@ -192,7 +193,7 @@ the SAME recorder from §1, not a bare call — so uncaught client errors land
 in `rec` via `recorder.emit()` and ride `rec.drainRecords()` into `batch`
 above like any hitch, with no separate wiring to the cloud sink needed.
 
-### Game server (optional, hosted)
+### Game server (optional — the same project's secret key)
 
 The server side of the same catalogue: ticks that overran their budget,
 event-loop stalls the runtime itself measured, and uncaught errors — each
@@ -201,7 +202,7 @@ the browser uses.
 
 ```js
 import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<secret key>', endpoint: '<endpoint>', build, tickBudgetMs: 16 });
+const server = createServerRuntime({ key: process.env.SLOPTIMIZE_KEY, endpoint: 'https://sloptimizejs.com/v1/ingest', build, tickBudgetMs: 16 });
 
 function gameLoop() {
   server.tick(() => {          // wraps one tick; records a server-hitch if it overran tickBudgetMs
@@ -222,6 +223,61 @@ captured: `uncaughtExceptionMonitor` sees them only in Node's default
 `throw` mode. Call `await server.close()` on shutdown to
 flush the queue; a `beforeExit` hook already races a best-effort flush so a
 clean exit does not lose the last batch.
+
+The sampler is a rolling window, bounded in time: V8 keeps every sample of a
+running profile in memory until it is stopped, so the runtime rolls the
+profiler over every 10 s when no hitch has read it. A server that runs quiet
+for hours (an empty lobby) holds at most one window of samples — never the
+whole day's — and each hitch is attributed by the frames of the seconds
+leading up to it, not by everything the process did since the last one.
+`profile: false` turns the sampler off altogether (attribution `off`).
+
+### A host that profiles itself (optional)
+
+A `long-script` hitch is the one verdict sloptimize cannot take further in a
+player's tab — there is no profiler there. If the game keeps its own per-frame
+sections, put the top ones on the record before it is drained:
+
+```js
+rec.sections = [{ label: 'sim.world.greenery', excessMs: 41.2, baselineMs: 1.1 },
+                { label: 'terrain',            excessMs: 9.6,  baselineMs: 0.4 }];
+```
+
+The first section becomes the hitch's SITE in its footprint (`hitch|play|
+long-script|section:sim.world.greenery`), so the catalogue shows one row per
+cause instead of one row per phase; mints, when a hitch has them, still win.
+Extra fields (`sectionCoverage`, `offLoop`, …) ride along as evidence.
+
+### …and lets that profile decide the verdict
+
+Sections are a site; they do not change the guess. When the host has
+MEASURED what spent the frame — a loop section over its baseline, a tagged
+activity that ran between frames (a shader warm, a server tick stepped on
+the render thread, a scenery build), an attributed long task — hand those
+spans to `reclassify` before the drain and the classifier takes a second
+look with them:
+
+```js
+import { reclassify } from 'sloptimize';
+reclassify(rec, [
+  { label: 'mesh:step',   ms: 12.3 },   // what ran during the gap, by tag
+  { label: 'net:DELTA',   ms: 2.1 },
+  { label: 'crowd.bodies', ms: 3.9 },   // a section's excess over baseline
+]);
+// rec.classification[0] → { guess: 'host-attributed', confidence: 'high',
+//   evidence: 'mesh:step 12.3ms of 14.1ms excess, host-instrumented' }
+// rec.attributed → the spans, largest first (at most three)
+// footprint → hitch|play|host-attributed|span:mesh:step
+```
+
+A span has to explain at least half of the frame's excess over its median
+to become the verdict (SPEC §3.3); smaller ones still ride on the record as
+evidence. Do this at drain time, not at mint: the browser's long-task and
+long-animation-frame entries for a frame arrive a drain or two after it, and
+a loop's section table closes at the end of the body. Without this step a
+hitch whose cost was entirely off-loop and unnamed by any counter reads
+`gc-or-upload-by-elimination` — which is what a game whose match server ran
+on the render thread saw 4,338 times before the step was tagged.
 
 ## 3. The CLI (the agent's shell surface)
 

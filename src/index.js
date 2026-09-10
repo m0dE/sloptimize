@@ -1,7 +1,7 @@
 // sloptimize — public in-page runtime surface (SPEC §1).
 export { createRecorder } from './recorder.js';
 export { buildCensus } from './census.js';
-export { classifyHitch } from './classify.js';
+export { classifyHitch, reclassify, attributedGuess } from './classify.js';
 export { createMotionMonitor } from './motion.js';
 export { createErrorMonitor } from './errors.js';
 export { createCloudSink } from './cloud-sink.js';

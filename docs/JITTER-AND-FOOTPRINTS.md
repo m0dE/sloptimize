@@ -105,7 +105,8 @@ Rules the reference keeps, each learned the hard way:
   camera twice.
 - **Drain beside the recorder**, same pipe, same ledger:
   `post('records', [...rec.drainRecords(), ...motion.drainRecords()])`.
-- **Rate limit is per track, 1/s, 200/session**, drops counted onto the next
+- **Rate limit is per track, 1/s, 200/session.** The second is a window and
+  its record is the track's biggest jump in it, the losers counted onto that
   record. A unit that teleports takes its camera with it in the same frame;
   a shared gap would drop exactly the camera's explanatory record.
 

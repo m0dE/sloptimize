@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { foldProfile } from '../src/node/profiler.js';
 import { createServerRuntime } from '../src/node/index.js';
 
-test('foldProfile ranks self time per (url, function), excludes runtime and VM frames, strips file://', () => {
+test('foldProfile ranks self time per (url, function), excludes runtime, VM and inspector frames, strips file://', () => {
   const profile = {
     nodes: [
       { id: 1, callFrame: { functionName: '(root)', url: '' } },
@@ -12,9 +12,11 @@ test('foldProfile ranks self time per (url, function), excludes runtime and VM f
       { id: 3, callFrame: { functionName: 'query', url: 'file:///srv/db.js' } },
       { id: 4, callFrame: { functionName: 'take', url: 'file:///x/node_modules/sloptimize/src/node/profiler.js' } },
       { id: 5, callFrame: { functionName: '(garbage collector)', url: '' } },
+      // The window roll's own Profiler.stop parse: the sampler's cost, never the game's.
+      { id: 6, callFrame: { functionName: 'post', url: 'node:inspector' } },
     ],
-    samples: [2, 2, 3, 4, 5, 2],
-    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000],
+    samples: [2, 2, 3, 4, 5, 2, 6, 6, 6, 6],
+    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
   };
   assert.deepEqual(foldProfile(profile, '/sloptimize/src/node/'), [
     { file: '/srv/world.js', fn: 'step', selfMs: 3 },
@@ -44,7 +46,7 @@ function harness() {
   const posted = [];
   const fetch = async (url, init) => { posted.push(JSON.parse(init.body)); return { ok: true, status: 202, headers: { get: () => null }, json: async () => ({}) }; };
   const monitor = { percentiles: new Map([[50, 1e6], [99, 1e6]]), max: 1e6, reset() {}, enable() {}, disable() {} };
-  const profiler = { started: 0, start() { this.started++; }, async take() { return [{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]; }, stop() {} };
+  const profiler = { started: 0, frames: [{ file: '/srv/world.js', fn: 'step', selfMs: 30 }], start() { this.started++; }, async take() { return this.frames; }, stop() {} };
   const handlers = {};
   const proc = { on: (k, f) => { handlers[k] = f; }, off: () => {}, emit: (k, ...a) => handlers[k]?.(...a) };
   const timers = [];
@@ -60,12 +62,16 @@ test('a tick over budget records server-hitch with frames, phase, ctx; under bud
   const rt = mk(h);
   rt.tick(() => h.tick(40));
   rt.tick(() => h.tick(5));
-  rt.tick(() => h.tick(40));            // within 1s of the first → dropped
+  rt.tick(() => h.tick(40));            // within 1s of the first, no worse → lost to it, counted
+  await rt.flush();
+  assert.equal(h.posted.length, 0);     // the second is not over: the record is not decided yet
+  h.tick(1000); rt.tick(() => h.tick(5));   // the first tick past the window closes it
   await rt.flush();
   assert.equal(h.posted.length, 1);
   const [r] = h.posted[0].records;
   assert.equal(r.type, 'server-hitch');
   assert.equal(r.tickMs, 40); assert.equal(r.budgetMs, 16);
+  assert.equal(r.droppedSinceLast, 1);
   assert.equal(r.phase, 'match'); assert.equal(r.ctx, 'mode=ranked');
   assert.deepEqual(r.frames, [{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]);
   assert.equal(r.attribution, 'profiler');
@@ -74,10 +80,37 @@ test('a tick over budget records server-hitch with frames, phase, ctx; under bud
   assert.equal(rt.stats().droppedByRate, 1);
 });
 
+test('the record for a second is its WORST tick, with the frames taken for that tick', async () => {
+  const h = harness();
+  const rt = mk(h);
+  rt.tick(() => h.tick(40));            // opens the window
+  h.profiler.frames = [{ file: '/srv/world.js', fn: 'settleStorm', selfMs: 850 }];
+  rt.tick(() => h.tick(900));           // the freeze, 40 ms later: takes the window, its own profile
+  rt.tick(() => h.tick(30));
+  h.tick(1000); rt.tick(() => h.tick(5));
+  await rt.flush();
+  const [r] = h.posted[0].records;
+  assert.equal(r.tickMs, 900);
+  assert.equal(r.droppedSinceLast, 2);
+  assert.deepEqual(r.frames, [{ file: '/srv/world.js', fn: 'settleStorm', selfMs: 850 }]);
+  assert.equal(rt.stats().hitches, 1);
+  assert.equal(rt.stats().droppedByRate, 2);
+});
+
+test('close() lets an open window land its record before the last flush', async () => {
+  const h = harness();
+  const rt = mk(h);
+  rt.tick(() => h.tick(40));
+  await rt.close();
+  assert.equal(h.posted.length, 1);
+  assert.equal(h.posted[0].records[0].tickMs, 40);
+});
+
 test('beginTick/endTick pair works like tick; profile:false yields attribution off', async () => {
   const h = harness();
   const rt = mk(h, { profile: false });
   const tok = rt.beginTick(); h.tick(30); rt.endTick(tok);
+  h.tick(1000); rt.endTick(rt.beginTick());
   await rt.flush();
   const [r] = h.posted[0].records;
   assert.equal(r.attribution, 'off');
@@ -90,11 +123,17 @@ test('event-loop delay p99 over stallMs records server-stall once per 5s', async
   h.monitor.percentiles = new Map([[50, 5e6], [99, 80e6]]); h.monitor.max = 90e6;
   const sample = h.timers.find((t) => t.ms === 1000).fn;
   sample();                          // the 1s sampler
-  sample();                          // still inside 5s → suppressed
+  h.tick(1000);
+  h.monitor.percentiles = new Map([[50, 5e6], [99, 60e6]]); h.monitor.max = 70e6;
+  sample();                          // still inside 5s, no worse → lost to the first, counted
+  h.tick(4000);
+  h.monitor.percentiles = new Map([[50, 5e6], [99, 1e6]]);
+  sample();                          // quiet, and past the window: closes it
   await rt.flush();
   const stalls = h.posted[0].records.filter((r) => r.type === 'server-stall');
   assert.equal(stalls.length, 1);
   assert.equal(stalls[0].p99Ms, 80); assert.equal(stalls[0].maxMs, 90); assert.equal(stalls[0].p50Ms, 5);
+  assert.equal(stalls[0].droppedSinceLast, 1);
 });
 
 test('uncaughtExceptionMonitor produces a server error record and nothing else is registered', async () => {
@@ -122,6 +161,7 @@ test('a hitch recorded while an injected profiler is still starting still gets a
   const rt = mk(h, { profiler: deferredProfiler });
   rt.tick(() => h.tick(40));            // hitch recorded while profiler.start() is still pending
   resolveStart();
+  h.tick(1000); rt.tick(() => h.tick(5));   // the window closes
   await rt.flush();
   assert.equal(h.posted.length, 1);
   const [r] = h.posted[0].records;
@@ -133,6 +173,7 @@ test('a throwing phase() does not crash the record or tick(); leaves phase unset
   const h = harness();
   const rt = mk(h, { phase: () => { throw new Error('boom'); } });
   assert.doesNotThrow(() => rt.tick(() => h.tick(40)));
+  h.tick(1000); rt.tick(() => h.tick(5));   // the window closes
   await rt.flush();
   assert.equal(h.posted.length, 1);
   const [r] = h.posted[0].records;
@@ -165,7 +206,7 @@ test('a frame promise that resolves after close() never lands in the queue', asy
   const h = harness();
   let resolveTake;
   const profiler = { start() {}, take: () => new Promise((r) => { resolveTake = r; }), stop() {} };
-  const rt = mk(h, { profiler });
+  const rt = mk(h, { profiler, exitBudgetMs: 0 });      // close() waits for the take no longer than this
   const s = rt.beginTick(); h.tick(40); rt.endTick(s);   // a hitch, waiting on frames()
   await rt.close();
   resolveTake([{ file: '/srv/world.js', fn: 'step', selfMs: 30 }]);

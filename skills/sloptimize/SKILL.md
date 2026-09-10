@@ -13,7 +13,9 @@ The playbook, in order:
    recorded hitches (each classified WITH evidence), usermarks (the human's
    Ctrl+F11 "it felt wrong here" captures), and census hints.
 2. Classify before touching code: shader-compile / texture-upload /
-   spawn-burst / long-render / long-script / gc-or-upload-by-elimination.
+   spawn-burst / long-render / long-script / gc-or-upload-by-elimination /
+   host-attributed (the host's own instrument named the span — `attributed`
+   on the record says which; that name IS the workload, go straight to it).
    The record's `evidence` string says why the guess exists.
 3. `sloptimize census` — per-entity meshes/triangles/materials/shadow
    casters, plus the closed hint vocabulary (instancing-candidate,

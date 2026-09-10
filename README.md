@@ -226,25 +226,29 @@ Then `sloptimize report`, the hook and the MCP server read the same files.
 `docs/ELECTRON.md` has the full recipe, and `sloptimize attach --port 9222`
 still works against an app started with `--remote-debugging-port=9222`.
 
-## Cloud (optional, hosted)
+## Cloud — [sloptimizejs.com](https://sloptimizejs.com)
 
 Everything above is local: one machine's `.sloptimize/` directory, read by
 that machine's shell and that machine's Claude Code session. sloptimize
-cloud is a separate, optional, hosted service that widens the same
-catalogue to **every player, every build** — not just the one in front of
-you: 24h/7d/30d or any custom range, client incidents and server incidents
-(`sloptimize/node`) folded into the same footprint identity, plus uncaught
-errors (`sloptimize/errors`) as their own incident kind. The local product
-stays the default story — nothing below changes what a project with no
-cloud key does.
+cloud widens the same catalogue to **every player, every build** — not just
+the one in front of you: an issues catalogue across 24h/7d/30d or any range,
+a timeline of p95 frame time, draw calls and incidents across all tabs with
+build boundaries and fix markers, one page per player session, and every fix
+measured against what players saw. Client incidents and server incidents
+(`sloptimize/node`) fold into the same footprint identity; uncaught errors
+(`createErrorMonitor`) are their own incident kind. The local product stays
+the default story — nothing below changes what a project with no cloud key
+does.
 
-**Where the endpoint and keys live**: sign in with GitHub at
-[sloptimizejs.com](https://sloptimizejs.com), create a project (**Projects →
-New project**), and you land on its **keys & setup** page — the Settings tab
-of every project. That page shows the ingest endpoint, the publishable key
-(created with the project), a button that mints the secret key (shown
-once, copy it then), and the three snippets below already filled in for
-your project:
+Getting on it takes three steps:
+
+1. Sign in at [sloptimizejs.com](https://sloptimizejs.com) with GitHub. The
+   free plan (5,000 incidents a month, 7 days of raw records, one project)
+   needs no card; Pro and Team lift the limits.
+2. Create a project and open its settings page: it holds the two keys and the
+   same three snippets below, filled in.
+3. Paste the snippets. The endpoint is `https://sloptimizejs.com/v1/ingest`
+   for both sinks; the CLI and MCP take the base, `SLOPTIMIZE_ENDPOINT=https://sloptimizejs.com`.
 
 ```js
 // browser: the cloud sink is a TEE beside your existing drain, never instead
@@ -252,7 +256,7 @@ your project:
 import { createRecorder, createErrorMonitor, createCloudSink } from 'sloptimize';
 const rec = createRecorder({ budgetFrameMs: 16.7 });
 createErrorMonitor(rec);
-const cloud = createCloudSink({ key: '<publishable key from settings>', endpoint: '<endpoint from settings>', build });
+const cloud = createCloudSink({ key: 'pk_live_…', endpoint: 'https://sloptimizejs.com/v1/ingest', build });
 // in the ~2s drain you already have (docs/INTEGRATION.md §1):
 const batch = rec.drainRecords();
 post('records', batch);   // unchanged: .sloptimize/perf.jsonl, still the source of truth
@@ -266,7 +270,8 @@ own `drainRecords()`.)
 ```js
 // game server (Node): ticks, event-loop stalls, and uncaught errors
 import { createServerRuntime } from 'sloptimize/node';
-const server = createServerRuntime({ key: '<secret key from settings>', endpoint: '<endpoint from settings>', build });
+const server = createServerRuntime({ key: process.env.SLOPTIMIZE_KEY, endpoint: 'https://sloptimizejs.com/v1/ingest', build, tickBudgetMs: 16 });
+server.tick(() => stepWorld());   // a tick over budget is a server-hitch, attributed by the V8 sampler
 ```
 
 The server runtime registers `uncaughtExceptionMonitor` only, so it observes
@@ -278,7 +283,7 @@ your process relies on.
 
 ```bash
 # CLI: read the cloud catalogue instead of this machine's ledger
-export SLOPTIMIZE_KEY=<secret key from settings> SLOPTIMIZE_ENDPOINT=<endpoint from settings>
+export SLOPTIMIZE_KEY=sk_live_… SLOPTIMIZE_ENDPOINT=https://sloptimizejs.com
 npx sloptimize issues --cloud --preset 7d
 npx sloptimize fix --title "…" --push   # records locally, then pushes
 ```

@@ -27,7 +27,10 @@ test('a frame past max(2x median, 1.5x budget) is a hitch, classified with evide
   feed(rec, 120, 8);
   rec.frame({ frameMs: 41, insideRenderMs: 6, calls: 112, triangles: 98000,
     programs: 13, textures: 7, geometries: 50, paused: false, spawned: 2 });
-  const recs = rec.drainRecords();
+  // The hitch's one-second window is still open: an ordinary drain leaves it
+  // undecided, a final drain (the host is going away) closes it.
+  assert.equal(rec.drainRecords().length, 0);
+  const recs = rec.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   const h = recs[0];
   assert.equal(h.type, 'hitch');
@@ -52,18 +55,78 @@ test('paused frames are kept for continuity but never hitch', () => {
   assert.equal(rec.summary().window.frames > 0, true);
 });
 
+const hitch = (rec, frameMs) => rec.frame({ frameMs, insideRenderMs: 30, calls: 100, triangles: 1, programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 });
+
 test('rate limit: at most 1 record/second, and the drop count is said out loud', () => {
   let t = 0;
   const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
   feed(rec, 120, 8);
-  for (let i = 0; i < 10; i++) { t += 20; rec.frame({ frameMs: 60, insideRenderMs: 30, calls: 100, triangles: 1, programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 }); }
-  const recs = rec.drainRecords();
-  assert.equal(recs.length, 1);           // all 10 hitches inside one second
+  for (let i = 0; i < 10; i++) { t += 20; hitch(rec, 60); }
+  assert.equal(rec.drainRecords().length, 0);   // the second is not over: nothing decided yet
   t += 2000;
-  rec.frame({ frameMs: 60, insideRenderMs: 30, calls: 100, triangles: 1, programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 });
-  const later = rec.drainRecords();
-  assert.equal(later.length, 1);
-  assert.equal(later[0].droppedSinceLast, 9); // silence must mean nothing was dropped
+  feed(rec, 1, 8);                              // the first frame past the window closes it
+  const recs = rec.drainRecords();
+  assert.equal(recs.length, 1);                 // all 10 hitches inside one second → one record
+  assert.equal(recs[0].droppedSinceLast, 9);    // silence must mean nothing was dropped
+});
+
+test('the record for a second is its WORST hitch, not its first — stamped with the worst frame\'s own moment', () => {
+  let t = 0;
+  const rec = createRecorder({ budgetFrameMs: 8.33, now: () => t });
+  feed(rec, 120, 8.3);
+  t += 8; hitch(rec, 17);                      // one dropped frame at 120 Hz: a hitch at this grade
+  const openedAt = t;
+  t += 200; hitch(rec, 300);                   // the freeze the player felt, 200 ms later
+  t += 300; hitch(rec, 25);
+  t += 1000; feed(rec, 1, 8.3);
+  const recs = rec.drainRecords();
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].frameMs, 300);
+  assert.equal(recs[0].droppedSinceLast, 2);   // the 17 and the 25 lost to it
+  assert.equal(recs[0].frame, 122);            // the 300 ms frame's own number, not the window opener's
+  // The window is measured from its opener, so a hitch a full second after
+  // the 17 ms frame opens a NEW window even though the 300 sits between.
+  t = openedAt + 1000; hitch(rec, 40);
+  t += 1000; feed(rec, 1, 8.3);
+  assert.deepEqual(rec.drainRecords().map((r) => r.frameMs), [40]);
+});
+
+test('an open window rides an interim drain and its record leaves in MINT order among later records', () => {
+  let t = 0;
+  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
+  feed(rec, 120, 8);
+  t += 10; hitch(rec, 60);
+  assert.equal(rec.drainRecords().length, 0);   // still open: rides
+  rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] });
+  t += 500; hitch(rec, 30);                     // inside the window, no worse: lost to the 60
+  t += 1000;
+  let recs = rec.drainRecords();                // expired by the clock: closes at the drain
+  assert.deepEqual(recs.map((r) => r.type), ['hitch', 'error']);   // the 60 was minted before the error
+  assert.equal(recs[0].frameMs, 60);
+  assert.equal(recs[0].droppedSinceLast, 1);
+  assert.equal(recs[1].droppedSinceLast, undefined);
+  // A WORSE hitch after the error takes the window: the record then stands
+  // for that frame, which happened after the error, and reads after it.
+  t += 10; hitch(rec, 60);
+  rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] });
+  t += 500; hitch(rec, 90);
+  t += 1000;
+  recs = rec.drainRecords();
+  assert.deepEqual(recs.map((r) => r.type), ['error', 'hitch']);
+  assert.equal(recs[1].frameMs, 90);
+  assert.equal(recs[1].droppedSinceLast, 1);
+});
+
+test('the session cap: past it, hitches are counted and the count rides the next record through', () => {
+  let t = 0;
+  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
+  feed(rec, 120, 8);
+  for (let i = 0; i < 500; i++) { t += 1100; hitch(rec, 60); feed(rec, 3, 8); }   // steady frames keep the median honest
+  t += 1100; feed(rec, 1, 8);
+  assert.equal(rec.drainRecords().length, 500);
+  for (let i = 0; i < 7; i++) { t += 1100; hitch(rec, 60); feed(rec, 3, 8); }    // over the cap: dropped, counted
+  assert.equal(rec.drainRecords({ final: true }).length, 0);
+  assert.equal(rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] }), false);   // the cap is the cap
 });
 
 test('summary reports median/p95/counters and never invents absent fields', () => {
@@ -108,7 +171,7 @@ test('a hitch carries the phase the HOST fed on that frame — mint time, not dr
   rec.frame({ frameMs: 90, insideRenderMs: 8, calls: 100, triangles: 50000,
     programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0,
     phase: 'launch' });
-  const recs = rec.drainRecords();
+  const recs = rec.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].phase, 'launch');
 });
@@ -121,7 +184,7 @@ test('a usermark carries meta.phase; records without a phase stay clean', () => 
   rec.drainRecords();
   rec.frame({ frameMs: 90, insideRenderMs: 8, calls: 100, triangles: 50000,
     programs: 10, textures: 5, geometries: 50, paused: false, spawned: 0 });
-  const recs = rec.drainRecords();
+  const recs = rec.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal('phase' in recs[0], false);
 });

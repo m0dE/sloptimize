@@ -187,14 +187,38 @@ Classification vocabulary (closed set, extensible only by spec change):
 programs 0), `spawn-burst` (spawned length above threshold),
 `gc-or-upload-by-elimination` (no counter moved), `long-render`
 (insideRenderMs dominates), `long-script` (frame delta dominates,
-insideRenderMs small). Multiple guesses allowed, ranked. `confidence` is
+insideRenderMs small), `host-attributed` (a span the HOST's own instrument
+measured inside the gap explains at least half of the frame's excess over
+its median — see below). Multiple guesses allowed, ranked. `confidence` is
 `low | medium | high` and the `evidence` string is mandatory — a guess
 without its reason is banned by principle 4.
 
-Rate limit: at most 1 record per second and 500 per session; when the limit
-truncates, the *last* record of the session says how many were dropped
-(silence must mean nothing was dropped — the inspector's selection-block
-rule, inherited).
+`host-attributed` ranks FIRST whenever it applies, ahead of every
+counter-derived guess, and by-elimination is never appended behind it: a
+name the host measured beats a shape inferred from deltas. It is normally
+absent at mint time — a host seals its own attribution after the frame —
+and is reached through `reclassify(rec, spans)` at drain, which stamps the
+spans on the record (`attributed`, largest first, at most three) and re-runs
+the verdict. Its evidence prints both numbers (`mesh:step 12.3ms of 14.1ms
+excess, host-instrumented`); confidence is `high` at four fifths of the
+excess, `medium` at half; a span under 2 ms is noise whatever its share. The
+footprint (§3.7) keys such a hitch on the span (`span:<label>`), ahead of
+mints and sections. The record that motivated this: a game stepping its
+whole match server in a promise continuation between frames, ~10 ms a tick,
+filed 4,338 times as `gc-or-upload-by-elimination` while the host's stall
+recorder could have named it on every one.
+
+Rate limit: at most 1 record per second and 500 per session. The second is
+a WINDOW and its record is its WORST hitch: a hitch opens the window, a
+bigger frame inside it takes the record over, and the hitches that lost are
+counted onto that record's `droppedSinceLast`. The record leaves on the
+first frame after the window closes; `drainRecords({ final: true })` — the
+host is going away — closes it early. Past the session cap, hitches are
+counted onto the next record through (silence must mean nothing was dropped
+— the inspector's selection-block rule, inherited). Keeping the FIRST hitch
+of a second instead would blind the instrument exactly when it matters: a
+tab dropping one frame a second at a 120 Hz grade would swallow the 300 ms
+freeze that landed 200 ms after one of them.
 
 ### 3.5 Usermarks — the human's half of hitch detection
 
@@ -291,7 +315,9 @@ and when the view was CUT on purpose (camera mode flip, spectate target
 change, respawn, session boundary) — the detector never guesses intent.
 Rate limits: one record per second PER TRACK (a unit that teleports takes
 its camera with it in the same frame, and the camera's record is the one
-that says so), 200 per session, drops counted onto the next record.
+that says so), 200 per session. The second is a window and its record is
+the track's BIGGEST jump in it, the losers counted onto that record (§3.3);
+the session cap's drops ride the next record through.
 
 Stated limits: a pure rotation pop (a yaw snap) moves no coordinate and is
 not detected; a snap that coincides with an equal-and-opposite velocity

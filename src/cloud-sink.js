@@ -22,6 +22,12 @@ export function createCloudSink(opts = {}) {
   const setI = opts.setInterval ?? globalThis.setInterval, clearI = opts.clearInterval ?? globalThis.clearInterval;
   const now = opts.now ?? (() => Date.now());
 
+  // THE SESSION (cloud §1.4): one id per sink, minted once, stamped on every
+  // record that lacks one. A sink lives as long as its page, so the id names a
+  // tab's lifetime — the unit the service's Sessions view lists — without the
+  // host threading anything through. 12 base-62 chars: no two tabs collide.
+  // `session: false` opts out — the server runtime's records are a process's, not a tab's.
+  const session = opts.session === false ? null : typeof opts.session === 'string' && opts.session ? opts.session : mintSession();
   let queue = [];
   let droppedLocally = 0;
   let failures = 0, backoffUntil = 0, inflight = false;
@@ -30,10 +36,18 @@ export function createCloudSink(opts = {}) {
   function trim() {
     if (queue.length > maxQueue) { droppedLocally += queue.length - maxQueue; queue = queue.slice(queue.length - maxQueue); }
   }
-  function drain() {
+  function stamp(records) {
+    if (session === null) return records;
+    for (const r of records) if (r && typeof r === 'object' && r.session === undefined) r.session = session;
+    return records;
+  }
+  // A source may hold a record it has not decided yet (the recorder's open
+  // hitch window); the unload drain is the last one, so it says so.
+  const FINAL = Object.freeze({ final: true });
+  function drain(final = false) {
     for (const s of sources) {
-      let r; try { r = s.drainRecords(); } catch { continue; }
-      if (r && r.length) queue.push(...r);
+      let r; try { r = s.drainRecords(final ? FINAL : undefined); } catch { continue; }
+      if (r && r.length) queue.push(...stamp(r));
     }
     trim();
   }
@@ -122,7 +136,7 @@ export function createCloudSink(opts = {}) {
   }
   function onHide() {
     try {
-      drain();
+      drain(true);
       if (queue.length === 0 || !beacon) return;
       // Any batch currently in flight via flush() was already spliced out of
       // `queue`, so what's here is guaranteed disjoint from it — no duplicate
@@ -150,10 +164,23 @@ export function createCloudSink(opts = {}) {
       // A host tee that hands over something other than an array is a wiring
       // bug in the host, not a reason to throw into its drain loop.
       if (!Array.isArray(records)) { stats.lastError = 'enqueue: expected an array of records'; return; }
-      if (records.length) queue.push(...records);
+      if (records.length) queue.push(...stamp(records));
       trim();
     },
+    /** The id every record of this sink is stamped with. */
+    session: () => session,
     stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
     dispose() { clearI(timer); target.removeEventListener?.('pagehide', onHide); target.removeEventListener?.('visibilitychange', onVis); },
   };
+}
+
+const SESSION_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+function mintSession() {
+  const bytes = new Uint8Array(12);
+  const c = globalThis.crypto;
+  if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  let s = '';
+  for (const b of bytes) s += SESSION_ALPHABET[b % 62];
+  return s;
 }

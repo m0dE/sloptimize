@@ -75,6 +75,18 @@ test('pagehide flushes via sendBeacon with the key in the query', () => {
   assert.equal(h.beacons[0].url, 'https://c.example/v1/ingest?key=pk_live_x');
 });
 
+test('the unload drain is FINAL — a source closes its open window; a periodic drain does not', async () => {
+  const h = harness();
+  const drains = [];
+  h.source.drainRecords = function (opts) { drains.push(opts); const r = this.pending; this.pending = []; return r; };
+  const sink = mk(h);
+  h.source.pending.push({ type: 'hitch', at: 'a' });
+  await sink.flush();
+  h.source.pending.push({ type: 'hitch', at: 'b' });
+  h.target.fire('pagehide', {});
+  assert.deepEqual(drains, [undefined, { final: true }]);
+});
+
 test('fetch throwing never escapes; it lands in stats().lastError', async () => {
   const h = harness();
   const sink = mk(h, { fetch: async () => { throw new Error('offline'); } });
@@ -216,13 +228,13 @@ test('the periodic flush sends no keepalive (it caps the body at 64 KiB)', async
 
 test('a batch is split by bytes, not just by count', async () => {
   const h = harness();
-  // envelope {"records":[],"build":"b1"} is 27 bytes; each record is 134, so
-  // two fit under 300 and the third does not.
-  const sink = mk(h, { maxBatchBytes: 300 });
+  // envelope {"records":[],"build":"b1"} is 27 bytes; each record is 134 plus
+  // the 25-byte session stamp = 159, so two fit under 350 and the third does not.
+  const sink = mk(h, { maxBatchBytes: 350 });
   for (let i = 0; i < 3; i++) h.source.pending.push({ type: 'hitch', at: String(i), pad: 'a'.repeat(100) });
   await sink.flush();
   assert.deepEqual(h.calls[0].body.records.map((r) => r.at), ['0', '1']);
-  assert.ok(JSON.stringify(h.calls[0].body).length <= 300);
+  assert.ok(JSON.stringify(h.calls[0].body).length <= 350);
   await sink.flush();
   assert.deepEqual(h.calls[1].body.records.map((r) => r.at), ['2']);
   assert.equal(sink.stats().queued, 0);
@@ -272,4 +284,30 @@ test('enqueue with a non-array never throws into the host', () => {
   sink.enqueue('records');
   assert.equal(sink.stats().queued, 0);
   assert.match(sink.stats().lastError, /expected an array/);
+});
+
+test('every record is stamped with the sink\'s session id — drained or enqueued — unless it carries one', async () => {
+  const h = harness();
+  const sink = mk(h);
+  assert.match(sink.session(), /^[0-9A-Za-z]{12}$/);
+  h.source.pending.push({ type: 'hitch', at: 'x' });
+  sink.enqueue([{ type: 'jitter', at: 'y' }, { type: 'error', at: 'z', session: 'mine' }]);
+  h.runTimers();
+  await sink.flush();
+  // Enqueued records sit ahead of the drain that the timer runs later.
+  const recs = h.calls[0].body.records;
+  assert.deepEqual(recs.map((r) => [r.type, r.session]), [['jitter', sink.session()], ['error', 'mine'], ['hitch', sink.session()]]);
+  // Two sinks never share an id; a host may pin one.
+  assert.notEqual(mk(harness()).session(), sink.session());
+  assert.equal(mk(harness(), { session: 'tab-7' }).session(), 'tab-7');
+});
+
+test('session: false stamps nothing — the server runtime\'s records are a process\'s, not a tab\'s', async () => {
+  const h = harness();
+  const sink = mk(h, { session: false });
+  assert.equal(sink.session(), null);
+  h.source.pending.push({ type: 'server-hitch', at: 'x' });
+  h.runTimers();
+  await sink.flush();
+  assert.equal('session' in h.calls[0].body.records[0], false);
 });

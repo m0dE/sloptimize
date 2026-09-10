@@ -90,6 +90,19 @@ export function createMotionMonitor(opts = {}) {
   }
 
   let records = [];
+  // Records leave in MINT order whatever order their windows close: two
+  // tracks that jump in one frame (a unit and the camera that follows it)
+  // open two windows, and the camera's — sampled second, so it may close
+  // first — must still read after the unit's it explains. The order lives
+  // beside the record (nothing extra is serialized).
+  const mintSeq = new WeakMap();
+  let seq = 0;
+  function place(rec) {
+    const s = mintSeq.get(rec);
+    let i = records.length;
+    while (i > 0 && mintSeq.get(records[i - 1]) > s) i--;
+    records.splice(i, 0, rec);
+  }
   let sessionRecords = 0;      // the cap is per session, across tracks
   let droppedSinceLast = 0;
   let totalDropped = 0;
@@ -100,8 +113,10 @@ export function createMotionMonitor(opts = {}) {
       samples: 0, held: 0, cuts: 0, events: 0, bursts: 0,
       // The 1/s gap is PER TRACK: a unit that teleports takes its camera with
       // it in the same frame, and the camera's record is the one that says so
-      // (`follows-track`) — a shared gap would drop exactly that record.
-      lastRecordAt: -Infinity,
+      // (`follows-track`) — a shared gap would drop exactly that record. The
+      // gap is a WINDOW whose record is the track's BIGGEST jump in it (the
+      // recorder's rule, see recorder.js): `open` is that window while it lasts.
+      open: null,
       // The last two samples (p0 older, p1 newer) and their times.
       seeds: 0, p0x: 0, p0y: 0, p0z: 0, p1x: 0, p1y: 0, p1z: 0, t0: 0, t1: 0,
       reach1: NaN,             // reach at p1 (NaN = not sampled)
@@ -154,6 +169,18 @@ export function createMotionMonitor(opts = {}) {
     if (p.mag > b.amplitude) b.amplitude = p.mag;
   }
 
+  /** The window closed: its biggest jump is the record, its losers ride on
+   *  it, and it takes its place in mint order among what was pushed since. */
+  function flushOpen(tr) {
+    const { rec, dropped } = tr.open;
+    tr.open = null;
+    if (dropped + droppedSinceLast > 0) { rec.droppedSinceLast = dropped + droppedSinceLast; droppedSinceLast = 0; }
+    place(rec);
+  }
+  function flushIfClosed(tr, wall) {
+    if (tr.open !== null && wall - tr.open.openedAt >= minGapMs) flushOpen(tr);
+  }
+
   function hadEventAt(tr, t) {
     const n = Math.min(tr.eventN, EVENT_RING);
     for (let i = 0; i < n; i++) if (tr.eventT[i] === t) return true;
@@ -167,13 +194,19 @@ export function createMotionMonitor(opts = {}) {
     const f = b.first;
     b.first = null;
     // Rate limits first (the recorder's own contract): silence must mean
-    // nothing was dropped, so drops are counted onto the NEXT record.
-    if (f.wall - tr.lastRecordAt < minGapMs || sessionRecords >= maxRecords) {
+    // nothing was dropped. A burst inside the track's open window competes
+    // for its one record and only a bigger jump takes it over; the losers
+    // are counted onto that record, the session cap's drops onto the next
+    // record through.
+    flushIfClosed(tr, f.wall);
+    const w = tr.open;
+    if (w !== null) {
+      w.dropped++; totalDropped++;
+      if (b.amplitude <= w.amplitude) return;
+    } else if (sessionRecords >= maxRecords) {
       droppedSinceLast++; totalDropped++;
       return;
     }
-    tr.lastRecordAt = f.wall;
-    sessionRecords++;
 
     const kind = b.events >= 2 ? 'oscillation' : 'snap';
     const durationMs = b.lastWall - b.firstWall;
@@ -243,8 +276,10 @@ export function createMotionMonitor(opts = {}) {
       cls.push({ guess: 'snap', confidence: 'high',
         evidence: `${fx(f.mag)}${unit} off its trajectory in one ${f.dt.toFixed(1)}ms frame (expected ${fx(f.travel)}${unit} of travel at ${f.speed.toFixed(2)}${unit}/s); motion resumed from the new place` });
     }
-    if (droppedSinceLast > 0) { rec.droppedSinceLast = droppedSinceLast; droppedSinceLast = 0; }
-    records.push(rec);
+    mintSeq.set(rec, ++seq);
+    if (w !== null) { w.rec = rec; w.amplitude = b.amplitude; return; }   // the bigger jump takes the window
+    sessionRecords++;
+    tr.open = { rec, amplitude: b.amplitude, openedAt: f.wall, dropped: 0 };
   }
 
   return {
@@ -260,6 +295,7 @@ export function createMotionMonitor(opts = {}) {
       const tr = tracks.get(track);
       if (!tr) throw new Error(`unknown motion track "${track}"`);
       tr.samples++;
+      if (tr.open !== null) flushIfClosed(tr, now());
       const reach = meta && typeof meta.reach === 'number' ? meta.reach : NaN;
       const phase = meta ? meta.phase : undefined;
       if (meta && meta.held) {
@@ -329,8 +365,16 @@ export function createMotionMonitor(opts = {}) {
       for (const tr of list) { tr.cuts++; closeBurst(tr); tr.seeds = 0; tr.pend.active = false; }
     },
 
-    /** Hand back accumulated records and clear — the host owns transport. */
-    drainRecords() { const r = records; records = []; return r; },
+    /** Hand back accumulated records and clear — the host owns transport.
+     *  A track's window still open rides to the next drain (its record is not
+     *  decided yet); `{ final: true }` — the host is going away — closes it now. */
+    drainRecords(opts) {
+      for (const tr of tracks.values()) {
+        if (tr.open === null) continue;
+        if (opts?.final || now() - tr.open.openedAt >= minGapMs) flushOpen(tr);
+      }
+      const r = records; records = []; return r;
+    },
 
     /** Counters for probes: did the instrument see anything at all? */
     stats() {

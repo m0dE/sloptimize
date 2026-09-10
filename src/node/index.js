@@ -25,17 +25,60 @@ export function createServerRuntime(opts = {}) {
   const proc = opts.process ?? process;
   const setI = opts.setInterval ?? setInterval, clearI = opts.clearInterval ?? clearInterval;
   const profileOn = opts.profile !== false;
+  // How long an exit (beforeExit, close()) waits for the last flush and for
+  // frame takes still in flight — a bound, never a wait the host can feel.
+  const exitBudgetMs = opts.exitBudgetMs ?? 2000;
   let closed = false;
 
   const pending = [];
-  const source = { drainRecords() { return pending.splice(0, pending.length); } };
+  const source = { drainRecords(o) { closeExpired(now(), !!(o && o.final)); return pending.splice(0, pending.length); } };
+  // A server process is not a session (cloud §1.4): no session stamp on its records.
   const sink = createCloudSink({
-    key: opts.key, endpoint: opts.endpoint, build: opts.build, sources: [source], flushMs: opts.flushMs ?? 5000,
+    key: opts.key, endpoint: opts.endpoint, build: opts.build, sources: [source], flushMs: opts.flushMs ?? 5000, session: false,
     fetch: opts.fetch, sendBeacon: null, target: { addEventListener() {}, removeEventListener() {} }, setInterval: setI, clearInterval: clearI, now,
   });
 
   const stats = { hitches: 0, stalls: 0, errors: 0, droppedByRate: 0, hostErrors: 0 };
-  let lastHitchAt = -Infinity, lastStallAt = -Infinity;
+  // The rate limits are WINDOWS whose record is the WORST incident in them
+  // (the recorder's rule, see ../recorder.js): a tick hitch opens a 1 s
+  // window, a stall a 5 s one; a worse one inside takes the record over and
+  // the losers are counted onto it (`droppedSinceLast`, and droppedByRate).
+  // The frames are the profiler's take for the record that STANDS — taken
+  // when that incident happened, so they lead up to it, not to the flush.
+  const GAP_MS = { hitch: 1000, stall: 5000 };
+  const windows = { hitch: null, stall: null };
+  const landing = new Set();   // frame takes still in flight for closed windows
+  function closeWindow(kind) {
+    const w = windows[kind];
+    windows[kind] = null;
+    if (w.dropped > 0) w.rec.droppedSinceLast = w.dropped;
+    if (!w.frames) { pending.push(w.rec); return; }
+    const p = w.frames.then((f) => {
+      landing.delete(p);
+      if (closed) return;
+      w.rec.frames = f.frames; w.rec.attribution = f.attribution; pending.push(w.rec);
+    });
+    landing.add(p);
+  }
+  function closeExpired(t, final) {
+    for (const kind of ['hitch', 'stall']) {
+      const w = windows[kind];
+      if (w !== null && (final || t - w.openedAt >= GAP_MS[kind])) closeWindow(kind);
+    }
+  }
+  /** An incident: opens its window, or competes for it — the worse one
+   *  (by `worth`: tick ms, stall p99) takes it and the loser is counted. */
+  function file(kind, rec, worth, t) {
+    const w = windows[kind];
+    if (w !== null) {
+      w.dropped++; stats.droppedByRate++;
+      if (worth <= w.worth) return;
+      w.rec = rec; w.worth = worth; w.frames = profileOn ? frames() : null;
+      return;
+    }
+    stats[kind === 'hitch' ? 'hitches' : 'stalls']++;
+    windows[kind] = { rec, worth, frames: profileOn ? frames() : null, openedAt: t, dropped: 0 };
+  }
 
   // The profiler: injectable for tests (never touches node:inspector), or
   // lazily imported for real use so the fake-profiler test path never loads
@@ -77,44 +120,29 @@ export function createServerRuntime(opts = {}) {
     rec.at = new Date().toISOString();
     return rec;
   }
-  function pushAsync(rec, withFrames) {
-    // After close() the sink is disposed and nothing will ever drain `pending`
-    // again: a frame promise that resolves later must not grow it forever.
-    if (closed) return;
-    if (!withFrames) { pending.push(rec); return; }
-    frames().then((f) => {
-      if (closed) return;
-      rec.frames = f.frames; rec.attribution = f.attribution; pending.push(rec);
-    });
-  }
-
   function endTick(startMs) {
     try {
-      const tickMs = now() - startMs;
-      if (tickMs <= tickBudgetMs) return;
       const t = now();
-      if (t - lastHitchAt < 1000) { stats.droppedByRate++; return; }
-      lastHitchAt = t; stats.hitches++;
-      const rec = stamp({ type: 'server-hitch', tickMs: +tickMs.toFixed(2), budgetMs: tickBudgetMs, frames: [], attribution: 'off' });
-      pushAsync(rec, profileOn);
+      closeExpired(t, false);
+      const tickMs = t - startMs;
+      if (tickMs <= tickBudgetMs) return;
+      file('hitch', stamp({ type: 'server-hitch', tickMs: +tickMs.toFixed(2), budgetMs: tickBudgetMs, frames: [], attribution: 'off' }), tickMs, t);
     } catch { stats.hostErrors++; }
   }
 
   // Event-loop delay: sampled every second, an incident when p99 crosses
-  // stallMs, rate-limited to one record per 5s.
+  // stallMs, one record per 5 s window — the worst p99 in it.
   const monitor = opts.monitor ?? monitorEventLoopDelay({ resolution: 20 });
   monitor?.enable?.();
   const sampler = setI(() => {
     try {
+      const t = now();
+      closeExpired(t, false);
       if (!monitor) return;
       const p99 = monitor.percentiles.get(99) / 1e6, p50 = monitor.percentiles.get(50) / 1e6, max = monitor.max / 1e6;
       monitor.reset();
       if (!(p99 > stallMs)) return;
-      const t = now();
-      if (t - lastStallAt < 5000) { stats.droppedByRate++; return; }
-      lastStallAt = t; stats.stalls++;
-      const rec = stamp({ type: 'server-stall', p50Ms: +p50.toFixed(1), p99Ms: +p99.toFixed(1), maxMs: +max.toFixed(1), frames: [], attribution: 'off' });
-      pushAsync(rec, profileOn);
+      file('stall', stamp({ type: 'server-stall', p50Ms: +p50.toFixed(1), p99Ms: +p99.toFixed(1), maxMs: +max.toFixed(1), frames: [], attribution: 'off' }), p99, t);
     } catch { stats.hostErrors++; }
   }, 1000);
   sampler?.unref?.();
@@ -134,7 +162,7 @@ export function createServerRuntime(opts = {}) {
   // attempt (and, since that can make the loop look non-empty again,
   // potentially re-trigger beforeExit indefinitely).
   const onBeforeExit = () => {
-    Promise.race([sink.flush(), new Promise((r) => { const t = setTimeout(r, 2000); t?.unref?.(); })]).catch(() => {});
+    Promise.race([sink.flush(), new Promise((r) => { const t = setTimeout(r, exitBudgetMs); t?.unref?.(); })]).catch(() => {});
   };
   proc.on('beforeExit', onBeforeExit);
 
@@ -151,6 +179,11 @@ export function createServerRuntime(opts = {}) {
     async flush() { await new Promise((r) => setTimeout(r, 0)); await sink.flush(); },
     stats() { return { ...stats, sink: sink.stats() }; },
     async close() {
+      // The windows close as they stand; their frame takes get a bounded
+      // moment to land before the sink's last flush (the beforeExit budget).
+      // (The host awaits close(), so this timer may hold the loop: bounded.)
+      closeExpired(now(), true);
+      if (landing.size > 0) await Promise.race([Promise.allSettled([...landing]), new Promise((r) => setTimeout(r, exitBudgetMs))]);
       closed = true;
       clearI(sampler);
       monitor?.disable?.();

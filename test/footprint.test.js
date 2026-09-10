@@ -45,6 +45,24 @@ test('what distinguishes causes distinguishes footprints: phase, verdict, mint s
   assert.notEqual(footprintOf(jitter({ classification: [{ guess: 'long-frame-catch-up', evidence: 'e' }] })).id, j);
 });
 
+test('a long-script hitch keys on the host\'s own SECTION when it carries one, and mints win over sections', () => {
+  const bare = footprintOf(hitch({ classification: [{ guess: 'long-script' }] }));
+  const greenery = footprintOf(hitch({ classification: [{ guess: 'long-script' }], sections: [{ label: 'sim.world.greenery', excessMs: 41.2, baselineMs: 1.1 }, { label: 'terrain', excessMs: 9.6, baselineMs: 0.4 }] }));
+  const terrain = footprintOf(hitch({ classification: [{ guess: 'long-script' }], sections: [{ label: 'terrain', excessMs: 30, baselineMs: 0.4 }] }));
+  assert.notEqual(greenery.id, bare.id);
+  assert.notEqual(greenery.id, terrain.id);
+  assert.equal(greenery.key.split('|')[3], 'section:sim.world.greenery');
+  // The second section is a witness, never part of the identity.
+  const greeneryAlone = footprintOf(hitch({ classification: [{ guess: 'long-script' }], sections: [{ label: 'sim.world.greenery', excessMs: 20, baselineMs: 1.1 }] }));
+  assert.equal(greeneryAlone.id, greenery.id);
+  // A compile that also carries a section is still the material's row.
+  const minted = footprintOf(hitch({ mints: [{ material: 'house-dark', object: 'Mesh', ms: 1 }], sections: [{ label: 'render', excessMs: 30, baselineMs: 5 }] }));
+  assert.equal(minted.key.split('|')[3], 'house-dark@Mesh');
+  // A label carrying the key's own separators cannot break the key.
+  const odd = footprintOf(hitch({ classification: [{ guess: 'long-script' }], sections: [{ label: 'a|b,c', excessMs: 1, baselineMs: 0 }] }));
+  assert.equal(odd.key.split('|').length, 4);
+});
+
 test('every incident type has a footprint; heartbeats, arm-probes and settled waits have none', () => {
   assert.equal(footprintKey({ type: 'warm', tag: 'post', kind: 'batched', phase: 'boot:shaders', worstBatchMs: 2350 }), 'warm|post|batched|boot:shaders');
   assert.equal(footprintKey({ type: 'gpu-stall', phase: 'page-load', queueDoneMs: 878 }), 'gpu-stall|page-load');
@@ -90,6 +108,7 @@ test('the host\'s situation facets are part of the cause: same hitch, different 
 test('describeFootprint gives each type its glyph and a short label', () => {
   assert.deepEqual(describeFootprint('jitter|unit|snap|play|snap|horizontal'), { glyph: '↯', label: 'jitter · unit snap · snap · horizontal', phase: 'play', ctx: {} });
   assert.deepEqual(describeFootprint('hitch|boot:shaders|long-script|a@b,c@d'), { glyph: '⚡', label: 'hitch · long-script · 2 mint site(s)', phase: 'boot:shaders', ctx: {} });
+  assert.deepEqual(describeFootprint('hitch|play|long-script|section:sim.world.greenery'), { glyph: '⚡', label: 'hitch · long-script · sim.world.greenery', phase: 'play', ctx: {} });
   assert.equal(describeFootprint('warm|post|batched|boot:shaders').glyph, '🔥');
   assert.equal(describeFootprint('gpu-stall|page-load').label, 'gpu-process stall');
 });

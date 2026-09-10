@@ -11,6 +11,9 @@ import assert from 'node:assert/strict';
 import { createMotionMonitor } from '../src/motion.js';
 
 const DT = 1000 / 60;
+// Records are read with a FINAL drain: a jump opens a one-second window whose
+// record is undecided until the window closes, and these pins judge the jump
+// they fed, not the clock. The window itself is pinned at the end of the file.
 function monitor(extra = {}) {
   let wall = Date.parse('2026-01-01T00:00:00.000Z');
   const m = createMotionMonitor({
@@ -54,7 +57,7 @@ test('constant velocity, hard acceleration and a fast orbit are all silent', () 
   const orbit = [];
   for (let i = 0; i < 300; i++) { const t = i * DT, a = 4 * t / 1000; orbit.push({ x: 10 * Math.cos(a), y: 0, z: 10 * Math.sin(a), t: 10000 + t }); }
   feed('camera', orbit);
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   assert.equal(m.stats().tracks.unit.events, 0);
 });
 
@@ -65,7 +68,7 @@ test('a teleport mid-motion is exactly one snap, with the displacement vector an
   const last = a[a.length - 1];
   const b = line(60, [last.x + 8 * DT / 1000 + 0.6, 0.3, 0], [8, 0, 0], { t0: last.t + DT });
   feed('unit', [...a, ...b]);
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   const r = recs[0];
   assert.equal(r.type, 'jitter');
@@ -88,11 +91,11 @@ test('a velocity step (motion starting) is not a jump; a teleport followed by st
   // Stand still, then move at 30 m/s from one frame to the next: 0.5m of
   // residual on the onset frame, never reversed.
   feed('unit', [...line(60, [0, 0, 0], [0, 0, 0]), ...line(60, [0, 0, 0], [30, 0, 0], { t0: 60 * DT })]);
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   m.cut('unit');
   // Stand still, teleport 2m, stand still.
   feed('unit', [...line(60, [0, 0, 0], [0, 0, 0], { t0: 5000 }), ...line(60, [2, 0, 0], [0, 0, 0], { t0: 5000 + 60 * DT })]);
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].kind, 'snap');
   assert.deepEqual(recs[0].jump, [2, 0, 0]);
@@ -105,7 +108,7 @@ test('a 30Hz sim drawn at 60Hz without interpolation is one oscillation record, 
   for (let i = 0; i < 300; i++) pts.push({ x: Math.floor(i / 2) * 0.3, y: 0, z: 0, t: i * DT });  // 9 m/s, stepping every other frame
   feed('unit', pts);
   // 300 frames = 5s; bursts cap at 2s, and the rate limit allows one record a second.
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.ok(recs.length >= 2, `records ${recs.length}`);
   assert.equal(recs[0].kind, 'oscillation');
   assert.equal(recs[0].classification[0].guess, 'oscillation');
@@ -118,14 +121,14 @@ test('a long frame with dt-scaled motion is silent; with clamped motion it is a 
   const { m, feed } = monitor();
   // 120 steady frames, one 400ms frame in which the point moved the full 400ms worth.
   feed('unit', line(122, [0, 0, 0], [10, 0, 0], { dtOf: (i) => (i === 119 ? 400 : DT) }));
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   m.cut('unit');
   // The same, but the sim clamped its dt to 100ms across the stall.
   const pts = line(120, [0, 0, 0], [10, 0, 0], { t0: 10000 });
   const last = pts[pts.length - 1];
   const after = line(30, [last.x + 10 * 0.1, 0, 0], [10, 0, 0], { t0: last.t + 400 });
   feed('unit', [...pts, ...after]);
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].kind, 'snap');
   assert.equal(recs[0].classification[0].guess, 'long-frame-catch-up');
@@ -143,7 +146,7 @@ test('a frame at or past longFrameMs is the clamp\'s, whatever the median: every
   let t = 0, x = 0;
   for (let i = 0; i < 40; i++) { pts.push({ x, y: 0, z: 0, t }); t += i % 2 ? 1900 : 1100; x += 0.3; }
   feed('unit', pts);
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.ok(recs.length >= 1, 'the wobble produces candidates');
   for (const r of recs) assert.equal(r.classification[0].guess, 'long-frame-catch-up', JSON.stringify(r.classification));
   assert.match(recs[0].classification[0].evidence, /past the 50ms the sim integrates/);
@@ -157,20 +160,20 @@ test('held frames are not judged and re-seed the track; a cut forgets the trajec
   feed('camera', a);
   feed('camera', swung.slice(0, 1), { meta: () => ({ held: true }) });
   feed('camera', swung.slice(1));
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   assert.equal(m.stats().tracks.camera.held, 1);
   // Cut: the same 3m displacement with no held frame, declared instead.
   m.cut('camera');
   feed('camera', line(60, [0, 0, 0], [5, 0, 0], { t0: 5000 }));
   m.cut('camera');
   feed('camera', line(60, [3, 0, 3], [5, 0, 0], { t0: 5000 + 60 * DT }));
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   assert.equal(m.stats().tracks.camera.cuts, 2);
   // …and undeclared, it is a snap.
   m.cut('camera');
   feed('camera', line(60, [0, 0, 0], [5, 0, 0], { t0: 9000 }));
   feed('camera', line(60, [3, 0, 3], [5, 0, 0], { t0: 9000 + 60 * DT }));
-  assert.equal(m.drainRecords().length, 1);
+  assert.equal(m.drainRecords({ final: true }).length, 1);
 });
 
 test('the reversal is judged in velocity: a jump landing in a long frame is confirmed by the short frame after it', () => {
@@ -181,7 +184,7 @@ test('the reversal is judged in velocity: a jump landing in a long frame is conf
   const last = a[a.length - 1];
   const b = line(30, [last.x + 4 * 0.2 + 1.5, 0, 0], [4, 0, 0], { t0: last.t + 200 });
   feed('unit', [...a, ...b]);
-  const recs = m.drainRecords();
+  const recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].kind, 'snap');
   assert.deepEqual(recs[0].jump, [1.5, 0, 0]);
@@ -207,7 +210,7 @@ test('a camera that jumps with its pivot is explained by follows-track; a boom c
     m.sample('unit', u2[i].x, u2[i].y, u2[i].z, u2[i].t, {});
     m.sample('camera', c2[i].x, c2[i].y, c2[i].z, c2[i].t, { reach: 10 });
   }
-  let recs = m.drainRecords();
+  let recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 2);
   const unit = recs.find((r) => r.track === 'unit'), cam = recs.find((r) => r.track === 'camera');
   assert.equal(unit.classification[0].guess, 'snap');          // the cause: never called a passenger
@@ -227,7 +230,7 @@ test('a camera that jumps with its pivot is explained by follows-track; a boom c
     m.sample('unit', u3[i].x, u3[i].y, u3[i].z, u3[i].t, {});
     m.sample('camera', u3[i].x, u3[i].y, u3[i].z + reach, u3[i].t, { reach });
   }
-  recs = m.drainRecords();
+  recs = m.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].track, 'camera');
   assert.equal(recs[0].classification[0].guess, 'reach-change');
@@ -243,13 +246,13 @@ test('at speed, a pop under a quarter of one frame of travel is not a jump', () 
   const last = a[a.length - 1];
   const b = line(30, [last.x + 1, 0, 0.2], [60, 0, 0], { t0: last.t + DT });
   feed('unit', [...a, ...b]);
-  assert.deepEqual(m.drainRecords(), []);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
   m.cut('unit');
   // The same pop at walking pace is one.
   const c = line(60, [0, 0, 0], [3, 0, 0], { t0: 5000 });
   const lastC = c[c.length - 1];
   feed('unit', [...c, ...line(30, [lastC.x + 3 * DT / 1000, 0, 0.2], [3, 0, 0], { t0: lastC.t + DT })]);
-  assert.equal(m.drainRecords().length, 1);
+  assert.equal(m.drainRecords({ final: true }).length, 1);
 });
 
 test('rate limits: one record a second, a session cap, and the drops counted onto the next record', () => {
@@ -261,14 +264,55 @@ test('rate limits: one record a second, a session cap, and the drops counted ont
     for (let i = 0; i < 12; i++) { pts.push({ x, y: 0, z: 0, t }); x += 5 * DT / 1000; t += DT; }
     x += 1;
   }
-  pts.push(...line(10, [x, 0, 0], [5, 0, 0], { t0: t }));
+  pts.push(...line(70, [x, 0, 0], [5, 0, 0], { t0: t }));   // long enough for the last window to close
   feed('unit', pts);
   const recs = m.drainRecords();
   assert.equal(recs.length, 3);                       // the cap
-  assert.equal(recs[0].droppedSinceLast, undefined);
-  assert.ok(recs[1].droppedSinceLast >= 3, `dropped ${recs[1].droppedSinceLast}`);   // the 1/s limit swallowed the ones between
+  assert.ok(recs[0].droppedSinceLast >= 3, `dropped ${recs[0].droppedSinceLast}`);   // the 1/s window folded the ones between onto ITS record
+  assert.ok(recs[1].droppedSinceLast >= 3, `dropped ${recs[1].droppedSinceLast}`);
   assert.ok(m.stats().dropped >= 10);
   assert.equal(m.stats().records, 3);
+});
+
+test('the record for a track\'s second is its BIGGEST jump, not its first', () => {
+  const { m, feed } = monitor();
+  // A 0.2 m pop, then a 4 m teleport 300 ms later, then a 0.3 m pop — one second, one record.
+  let pts = [], x = 0, t = 0;
+  const run = (frames) => { for (let i = 0; i < frames; i++) { pts.push({ x, y: 0, z: 0, t }); x += 5 * DT / 1000; t += DT; } };
+  run(30); x += 0.2; run(18); x += 4; run(18); x += 0.3; run(90);
+  feed('unit', pts);
+  const recs = m.drainRecords();
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].kind, 'snap');
+  assert.ok(recs[0].units > 3.5 && recs[0].units < 4.5, `units ${recs[0].units}`);
+  assert.equal(recs[0].droppedSinceLast, 2);
+  assert.equal(m.stats().records, 1);
+  assert.equal(m.stats().dropped, 2);
+});
+
+test('two tracks that jump in one frame leave in mint order — the unit before the camera that follows it — whatever order their windows close', () => {
+  const { m, setWall } = monitor();
+  const u = line(40, [0, 0, 0], [6, 0, 0]);
+  const c = u.map((p) => ({ ...p, z: p.z + 10 }));
+  for (let i = 0; i < 20; i++) { setWall(u[i].t); m.sample('unit', u[i].x, u[i].y, u[i].z, u[i].t, { phase: 'play' }); m.sample('camera', c[i].x, c[i].y, c[i].z, c[i].t, { phase: 'play' }); }
+  // Both teleport +1 m in the same frame; the camera is sampled SECOND every
+  // frame, so its burst closes and its window flushes after the unit's on
+  // the frame that closes them — and it must still read second.
+  for (let i = 20; i < 40; i++) { setWall(u[i].t); m.sample('unit', u[i].x + 1, u[i].y, u[i].z, u[i].t, { phase: 'play' }); m.sample('camera', c[i].x + 1, c[i].y, c[i].z, c[i].t, { phase: 'play' }); }
+  const recs = m.drainRecords({ final: true });
+  assert.deepEqual(recs.map((r) => r.track), ['unit', 'camera']);
+  assert.equal(recs[1].classification[0].guess, 'follows-track');
+});
+
+test('an open window rides an ordinary drain and a final drain closes it', () => {
+  const { m, feed } = monitor();
+  let pts = [], x = 0, t = 0;
+  const run = (frames) => { for (let i = 0; i < frames; i++) { pts.push({ x, y: 0, z: 0, t }); x += 5 * DT / 1000; t += DT; } };
+  run(30); x += 1; run(10);
+  feed('unit', pts);
+  assert.deepEqual(m.drainRecords(), []);              // 170 ms into the window: undecided
+  assert.equal(m.drainRecords({ final: true }).length, 1);
+  assert.deepEqual(m.drainRecords({ final: true }), []);
 });
 
 test('an unknown track or a non-positive floor is a configuration error, not silence', () => {
