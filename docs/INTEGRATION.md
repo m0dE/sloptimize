@@ -107,6 +107,16 @@ const panel = createPanel({
 panel.open();
 ```
 
+The ticker (SPEC §3.10) is the debugger's live edge: one line bottom-left
+per incident record as it is minted, gone a few seconds later. Push the
+same array you post:
+
+```js
+import { createTicker } from 'sloptimize';
+const ticker = createTicker({ offsetPx: 28 });   // above your own corner chip
+ticker.push(records);                            // beside post('records', records)
+```
+
 ## 2. The sink (files on disk)
 
 - **Vite host**: the plugin (planned surface) lands payloads in `.sloptimize/`.

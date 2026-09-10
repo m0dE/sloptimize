@@ -9,3 +9,4 @@ export { footprintOf, footprintKey, describeFootprint, canonicalContext, context
 export { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText, diffProfiles } from './history.js';
 export { pendingAsks, ASK_KINDS } from './ask.js';
 export { createPanel } from './panel.js';
+export { createTicker, describeRecord, lineOf } from './ticker.js';

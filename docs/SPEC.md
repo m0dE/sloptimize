@@ -456,6 +456,32 @@ channel at all, and the host must refuse the kind wherever the switch is
 off, not merely hide the CLI. Answers are truncated by the host to a sane
 size (64 KB) — a probe that wants more writes a record and reads it back.
 
+### 3.10 The incident ticker — seen when felt
+
+A hitch that reaches the ledger a poll later and the panel on a chord is
+still invisible at the moment it happened, which is the moment the person
+at the keyboard can say what they were doing. So every record the tab
+mints is also a line in a corner of the page as it is minted — the
+recorder's hitch with the classifier's guess and evidence, the motion
+monitor's jump with its track and distance, an error with its message, a
+GPU stall with its wait, a host record with its type — for a few seconds,
+newest last, a handful at a time.
+
+```js
+import { createTicker } from 'sloptimize';
+const ticker = createTicker({ corner: 'bottom-left', offsetPx: 28 });
+// wherever drained records are posted:
+ticker.push(records);
+```
+
+The ticker is a sink, not a detector: it holds no threshold of its own.
+Whether a frame is a hitch, a movement a jump or a wait a stall was decided
+by the recorder, the motion monitor or the host with the ring in front of
+them (§3.3, §3.6); the ticker would only be guessing the same thing with
+less. `describeRecord(rec)` / `lineOf(rec)` are the pure half — the same
+line for a console or a host overlay — and bookkeeping records (`profile`,
+`heartbeat`, `armed`, `warm`, `answer`) are never lines.
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)
