@@ -380,7 +380,8 @@ if (cmd === 'ask') {
   const mapPath = get('--map');
   if (kind === 'cpuprofile' && mapPath && r && typeof r === 'object') {
     const { loadSourceMap, symbolicate } = await import('../src/node/sourcemap.js');
-    try { r = symbolicate(r, loadSourceMap(mapPath)); } catch (e) { console.error(`sloptimize ask: --map ${mapPath}: ${e.message}`); }
+    const { basename } = await import('node:path');
+    try { r = symbolicate(r, loadSourceMap(mapPath), basename(mapPath).replace(/\.map$/, '')); } catch (e) { console.error(`sloptimize ask: --map ${mapPath}: ${e.message}`); }
   }
   console.log(typeof r === 'string' ? r : JSON.stringify(r, null, 2));
   process.exit(0);

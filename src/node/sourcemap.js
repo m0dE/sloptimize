@@ -54,13 +54,18 @@ export function loadSourceMap(path) {
 }
 
 /** Symbolicate the `where` of every frame in a cpuprofile answer in place:
- *  `game.min.js:82:22569` → `src/entity-manager.ts:2061 (update)`. Frames
- *  the map does not cover keep their generated position. */
-export function symbolicate(summary, sm) {
+ *  `game.min.js:82:22569` → `src/entity-manager.ts:2061 (update)`. Only
+ *  frames of `generatedFile` (the map's own script, basename, query string
+ *  ignored) are mapped; every other frame keeps its generated position. */
+export function symbolicate(summary, sm, generatedFile) {
   for (const f of summary.top ?? []) {
-    const m = /:(\d+):(\d+)$/.exec(f.where ?? '');
+    const m = /^(.*?)(?:\?[^:]*)?:(\d+):(\d+)$/.exec(f.where ?? '');
     if (!m) continue;
-    const o = sm.original(Number(m[1]), Number(m[2]));
+    // The map describes ONE generated file. A frame from another script
+    // (three's own bundle, a vendor file) keeps its position — mapping it
+    // through this map would name a random line of the wrong source.
+    if (generatedFile && m[1] !== generatedFile) continue;
+    const o = sm.original(Number(m[2]), Number(m[3]));
     if (!o) continue;
     f.where = `${o.file}:${o.line}`;
     if (o.name && (f.name === '(anonymous)' || f.name.length <= 2)) f.name = o.name;

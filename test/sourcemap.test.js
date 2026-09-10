@@ -16,7 +16,12 @@ test('a self-profiling frame is symbolicated through a v3 map', () => {
   assert.deepEqual(sm.original(1, 10), { file: 'src/b.ts', line: 5, name: null });
   assert.deepEqual(sm.original(2, 4), { file: 'src/a.ts', line: 3, name: 'beta' });
   assert.equal(sm.original(9, 0), null);
-  const s = symbolicate({ top: [{ name: 'o', where: 'game.min.js:2:4', self: 3, share: 1 }, { name: 'native', where: '(native)', self: 1, share: 0 }] }, sm);
+  const s = symbolicate({ top: [
+    { name: 'o', where: 'game.min.js?v=123:2:4', self: 3, share: 1 },
+    { name: 'native', where: '(native)', self: 1, share: 0 },
+    { name: 'build', where: 'three.webgpu.min.js:2:4', self: 1, share: 0 },   // another script: NOT this map's
+  ] }, sm, 'game.min.js');
   assert.deepEqual(s.top[0], { name: 'beta', where: 'src/a.ts:3', self: 3, share: 1 });
   assert.equal(s.top[1].where, '(native)');
+  assert.equal(s.top[2].where, 'three.webgpu.min.js:2:4');
 });
