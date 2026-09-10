@@ -106,3 +106,15 @@ test('a host that measured an idle GPU is believed', () => {
   assert.equal(r.gpuMs, 0, 'zero is a measurement when a host reports it');
   assert.equal(r.classification[0].confidence, 'high');
 });
+
+test('a host that profiles its own loop can hand the sections over', () => {
+  // Without this there was no seam: the record is minted inside frame(), and
+  // the site the catalogue folds on is read off the record.
+  const r = hitchWith({ hitch: { sections: [{ label: 'sim.hash', excessMs: 21.4, baselineMs: 0.3 }] } });
+  assert.deepEqual(r.sections, [{ label: 'sim.hash', excessMs: 21.4, baselineMs: 0.3 }]);
+});
+
+test('and a host that does not, does not grow a field', () => {
+  assert.ok(!('sections' in hitchWith({ hitch: {} })));
+  assert.ok(!('sections' in hitchWith({ hitch: { sections: [] } })), 'nor for an empty list');
+});

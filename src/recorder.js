@@ -167,6 +167,15 @@ export function createRecorder(opts = {}) {
       // Absent unless somebody counted, so a reader can tell "the GPU was
       // idle" from "nobody asked" - the whole point of the lane.
       if (Number.isFinite(gpuLane[idx])) rec.gpuMs = +gpuLane[idx].toFixed(2);
+      // A host that profiles its own loop says which SECTION overran, and
+      // that becomes the hitch's site (footprint.js `hitchSite`), so the
+      // catalogue shows one row per cause instead of one row per phase.
+      // INTEGRATION.md has described this since the site existed; there was
+      // no way to actually hand them over. `frame(sample)` is the way: the
+      // host already has the numbers at the moment the frame ends, and the
+      // record is minted inside this call, so no other seam exists that
+      // could match a section to the frame it came from.
+      if (Array.isArray(s.sections) && s.sections.length) rec.sections = s.sections;
       if (s.world) rec.world = s.world;
       // Phase is a string the HOST passes per frame (menu/boot/launch/match…)
       // — stamped at mint time so the record names the moment the hitch
