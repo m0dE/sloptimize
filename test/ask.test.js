@@ -43,3 +43,17 @@ test('awaitAnswer resolves the answer record by id, and null past the timeout', 
   assert.equal(ans.result, 2);
   assert.equal(await awaitAnswer(dir, 'never', 100, 20), null);
 });
+
+test('an answer written in two chunks, with multi-byte glyphs before it, is still found', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-ask-'));
+  const p = join(dir, 'perf.jsonl');
+  // A ledger with non-ASCII records already in it: byte offsets ≠ char offsets.
+  for (let i = 0; i < 50; i++) appendFileSync(p, JSON.stringify({ type: 'usermark', note: '★ ⚡ ↯ keyframe ' + i }) + '\n');
+  const ask = makeAsk('profile');
+  const line = JSON.stringify({ type: 'answer', id: ask.id, ok: true, result: { sections: { render: 4 } } }) + '\n';
+  const half = Math.floor(line.length / 2);
+  setTimeout(() => appendFileSync(p, line.slice(0, half)), 30);
+  setTimeout(() => appendFileSync(p, line.slice(half)), 90);
+  const ans = await awaitAnswer(dir, ask.id, 3000, 20);
+  assert.deepEqual(ans?.result, { sections: { render: 4 } });
+});
