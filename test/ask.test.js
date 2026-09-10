@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, appendFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeAsk, writeAsk, pendingAsks, awaitAnswer, ASK_KINDS } from '../src/ask.js';
+import { makeAsk, pendingAsks, ASK_KINDS } from '../src/ask.js';
+import { writeAsk, awaitAnswer } from '../src/ask-files.js';
 
 test('an ask is one of the closed kinds, with an id and a stamp; the arg rides only when given', () => {
   const a = makeAsk('capture', '10');

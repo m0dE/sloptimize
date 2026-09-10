@@ -8,24 +8,25 @@
 // work and posts an `answer` record into perf.jsonl; the CLI waits for the
 // answer by id. No new socket, no new endpoint on the tab, and a request
 // can be written by anything that can write a file.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+// PURE — this module rides the host's browser bundle (`pendingAsks` is what
+// the host's ingest calls); the file and clock halves live in ask-files.js.
 
 /** The closed set of things a tab can be asked (SPEC §3.9). `eval` is the
  *  code-delivery lane and exists only behind the host's dev switch. */
 export const ASK_KINDS = ['profile', 'capture', 'cpuprofile', 'eval'];
 
-export function makeAsk(kind, arg) {
+export function makeAsk(kind, arg, id = randomId()) {
   if (!ASK_KINDS.includes(kind)) throw new Error(`ask kind must be one of ${ASK_KINDS.join('|')}`);
-  const ask = { id: randomBytes(4).toString('hex'), kind, at: new Date().toISOString() };
+  const ask = { id, kind, at: new Date().toISOString() };
   if (arg !== undefined && arg !== '') ask.arg = arg;
   return ask;
 }
 
-export function writeAsk(dir, ask) {
-  mkdirSync(dir, { recursive: true });
-  appendFileSync(join(dir, 'ask.jsonl'), JSON.stringify(ask) + '\n');
+/** Eight hex digits, from whatever randomness the platform has. */
+export function randomId() {
+  const g = globalThis.crypto;
+  if (g?.getRandomValues) { const b = new Uint8Array(4); g.getRandomValues(b); return [...b].map((x) => x.toString(16).padStart(2, '0')).join(''); }
+  return Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0');
 }
 
 /** Requests in `ask.jsonl` not yet answered in `perf.jsonl` and younger than
@@ -48,28 +49,3 @@ export function pendingAsks(askText, ledgerTail, now = Date.now(), maxAgeMs = 12
   return out;
 }
 
-/** Wait for the answer to `id` to land in perf.jsonl. Resolves the record, or
- *  null after `timeoutMs`. Polls the file's growth — the ledger is append-only. */
-export async function awaitAnswer(dir, id, timeoutMs = 30_000, pollMs = 500) {
-  const p = join(dir, 'perf.jsonl');
-  const start = Date.now();
-  let offset = existsSync(p) ? statSync(p).size : 0;
-  // A tab may answer between the ask being written and the first poll: the
-  // scan starts a little behind the current end.
-  offset = Math.max(0, offset - 64 * 1024);
-  while (Date.now() - start < timeoutMs) {
-    if (existsSync(p)) {
-      const size = statSync(p).size;
-      if (size > offset) {
-        const text = readFileSync(p, 'utf8').slice(offset);
-        offset = size;
-        for (const line of text.split('\n')) {
-          if (!line.includes(id)) continue;
-          try { const r = JSON.parse(line); if (r.type === 'answer' && r.id === id) return r; } catch { /* partial */ }
-        }
-      }
-    }
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
-  return null;
-}

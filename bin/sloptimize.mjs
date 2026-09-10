@@ -362,7 +362,8 @@ if (cmd === 'ask') {
   // `ask capture 10`, `ask cpuprofile 5`, `ask eval "<js>"` — one line into
   // ask.jsonl, the host's dev ingest hands it to the tab, the answer lands in
   // perf.jsonl and is printed here. Nobody at the keyboard.
-  const { makeAsk, writeAsk, awaitAnswer } = await import('../src/ask.js');
+  const { makeAsk } = await import('../src/ask.js');
+  const { writeAsk, awaitAnswer } = await import('../src/ask-files.js');
   const kind = args[1];
   const arg = args.slice(2).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--'))).join(' ');
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
