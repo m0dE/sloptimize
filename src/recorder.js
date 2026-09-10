@@ -32,12 +32,19 @@ const MIN_RECORD_GAP_MS = 1000;   // at most 1 hitch record per second
 const FIELDS = ['frameMs', 'insideRenderMs', 'calls', 'triangles', 'programs',
   'textures', 'geometries', 'spawned'];
 
+// What the GPU took, which is optional and must stay distinguishable from
+// zero: a host with no timer query extension has NOT measured an idle GPU,
+// and storing its silence as 0 would tell the classifier the drawing was
+// ruled out. Its own lane, NaN for "nobody said", never percentiled.
+const GPU_FIELD = 'gpuMs';
+
 export function createRecorder(opts = {}) {
   const now = opts.now ?? (() => (typeof performance !== 'undefined' ? performance.now() : Date.now()));
   const budgetFrameMs = opts.budgetFrameMs ?? 16.7;
 
   // The ring: one Float64Array lane per field plus paused/timestamps lanes.
   const lanes = Object.fromEntries(FIELDS.map((f) => [f, new Float64Array(RING)]));
+  const gpuLane = new Float64Array(RING).fill(NaN);
   const pausedLane = new Uint8Array(RING);
   const atLane = new Float64Array(RING);
   let head = 0;       // next write index
@@ -114,6 +121,7 @@ export function createRecorder(opts = {}) {
       if (s.ctx) lastCtx = s.ctx;
       const idx = head;
       for (const f of FIELDS) lanes[f][idx] = s[f] ?? 0;
+      gpuLane[idx] = typeof s[GPU_FIELD] === 'number' && s[GPU_FIELD] >= 0 ? s[GPU_FIELD] : NaN;
       pausedLane[idx] = s.paused ? 1 : 0;
       const t = atLane[idx] = now();
       head = (head + 1) % RING;
@@ -153,8 +161,12 @@ export function createRecorder(opts = {}) {
         classification: classifyHitch({
           frameMs: s.frameMs, medianMs: median, insideRenderMs: s.insideRenderMs ?? 0,
           delta, spawned: s.spawned ?? 0, memorySampled: !!s.memorySampled,
+          gpuMs: gpuLane[idx],
         }),
       });
+      // Absent unless somebody counted, so a reader can tell "the GPU was
+      // idle" from "nobody asked" - the whole point of the lane.
+      if (Number.isFinite(gpuLane[idx])) rec.gpuMs = +gpuLane[idx].toFixed(2);
       if (s.world) rec.world = s.world;
       // Phase is a string the HOST passes per frame (menu/boot/launch/match…)
       // — stamped at mint time so the record names the moment the hitch
@@ -246,7 +258,7 @@ export function createRecorder(opts = {}) {
               : classifyHitch({
                 frameMs: lanes.frameMs[i], medianMs: median,
                 insideRenderMs: lanes.insideRenderMs[i], delta,
-                spawned: lanes.spawned[i],
+                spawned: lanes.spawned[i], gpuMs: gpuLane[i],
               }),
           };
         });

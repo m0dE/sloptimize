@@ -2,6 +2,7 @@
 export { createRecorder } from './recorder.js';
 export { buildCensus } from './census.js';
 export { classifyHitch } from './classify.js';
+export { createGpuClock } from './gpu.js';
 export { createMotionMonitor } from './motion.js';
 export { createErrorMonitor } from './errors.js';
 export { createCloudSink } from './cloud-sink.js';

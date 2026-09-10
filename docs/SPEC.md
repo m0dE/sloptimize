@@ -186,10 +186,25 @@ Classification vocabulary (closed set, extensible only by spec change):
 `shader-compile` (programs delta > 0), `texture-upload` (textures delta > 0,
 programs 0), `spawn-burst` (spawned length above threshold),
 `gc-or-upload-by-elimination` (no counter moved), `long-render`
-(insideRenderMs dominates), `long-script` (frame delta dominates,
-insideRenderMs small). Multiple guesses allowed, ranked. `confidence` is
-`low | medium | high` and the `evidence` string is mandatory — a guess
-without its reason is banned by principle 4.
+(insideRenderMs dominates), `gpu-bound` (`gpuMs` dominates), `long-script`
+(frame delta dominates, insideRenderMs small, and the GPU did not take it).
+Multiple guesses allowed, ranked. `confidence` is `low | medium | high` and
+the `evidence` string is mandatory — a guess without its reason is banned by
+principle 4.
+
+`gpuMs` is OPTIONAL and its absence is not zero. `insideRenderMs` is wall
+time the CPU spent inside the render call, and on a GPU-bound frame that is
+small — the CPU queues the commands and returns, and the cost lands
+afterwards in the driver. A frame waiting on the GPU and a frame running a
+long script are therefore the same shape from the CPU's side, and a host that
+cannot measure the GPU sees both as `long-script`; that is the honest verdict
+for it, and it keeps its old confidence. A host that CAN measure separates
+them, and the same number sharpens the other side: a long frame whose GPU was
+idle is `long-script` with confidence, not by elimination. `src/gpu.js`
+(`createGpuClock`) is the reference collector —
+`EXT_disjoint_timer_query_webgl2`, results a few frames late by design,
+discarded on `GPU_DISJOINT_EXT`, null where the extension is absent. A record
+carries `gpuMs` only when somebody counted.
 
 Rate limit: at most 1 record per second and 500 per session. The second is
 a WINDOW and its record is its WORST hitch: a hitch opens the window, a

@@ -231,6 +231,31 @@ whole day's — and each hitch is attributed by the frames of the seconds
 leading up to it, not by everything the process did since the last one.
 `profile: false` turns the sampler off altogether (attribution `off`).
 
+### What the GPU took (optional, one line)
+
+The commonest verdict in the field is `long-script`, and a large share of
+those are frames waiting on the GPU: `insideRenderMs` measures the CPU inside
+the render call, which is small when the GPU is the bottleneck. One WebGL2
+extension separates them.
+
+```js
+import { createGpuClock } from 'sloptimize';
+
+const gpu = createGpuClock(renderer.getContext());   // WebGL2; null-safe
+
+function onFrame() {
+  gpu.mark();                       // once per frame, next to frame()
+  rec.frame({ ...counters, gpuMs: gpu.read() });
+}
+```
+
+`mark()` closes the previous query and opens the next, so what is timed is
+every GPU command issued between two marks — the frame, however the host
+draws it. `read()` is a few frames old ON PURPOSE: asking the driver for a
+result it does not have yet blocks, which is the stall being measured. It is
+null where the extension is missing (browsers restrict it), and the recorder
+then records nothing rather than an idle GPU. `gpu.state()` says which.
+
 ### A host that profiles itself (optional)
 
 A `long-script` hitch is the one verdict sloptimize cannot take further in a
