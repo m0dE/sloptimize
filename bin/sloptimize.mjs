@@ -374,7 +374,14 @@ if (cmd === 'ask') {
   const ans = await awaitAnswer(DIR, ask.id, timeout);
   if (!ans) { console.error(`sloptimize ask: no answer from a tab in ${timeout / 1000}s — is a game running against a dev server with the ingest armed?`); process.exit(4); }
   if (json || ans.ok === false) { out(ans, JSON.stringify(ans, null, 2)); process.exit(ans.ok === false ? 1 : 0); }
-  const r = ans.result;
+  let r = ans.result;
+  // A cpuprofile names minified positions; a source map beside the build
+  // turns them into files and lines (`--map dist/game.min.js.map`).
+  const mapPath = get('--map');
+  if (kind === 'cpuprofile' && mapPath && r && typeof r === 'object') {
+    const { loadSourceMap, symbolicate } = await import('../src/node/sourcemap.js');
+    try { r = symbolicate(r, loadSourceMap(mapPath)); } catch (e) { console.error(`sloptimize ask: --map ${mapPath}: ${e.message}`); }
+  }
   console.log(typeof r === 'string' ? r : JSON.stringify(r, null, 2));
   process.exit(0);
 }
@@ -407,5 +414,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s>|eval <js>> [--timeout <s>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
