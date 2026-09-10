@@ -121,13 +121,20 @@ function stripsSvg(h) {
   let ticks = []; let prev;
   b.forEach((k, i) => { if (k.build && k.build !== prev) { if (prev !== undefined) ticks.push(i); prev = k.build; } });
   if (ticks.length > 12) ticks = [];
-  const svg = `<svg id="sl-strips" viewBox="0 0 ${W} ${STRIP_H * 3 + 14}" width="100%" style="display:block;font-family:${FONT}">
+  // Four strips, one series each. `frame body` is the HOST's own end-to-end
+  // loop time from its profile lines (SPEC §3.2b) — the number a fix moves —
+  // where p95 is what the display then showed (vsync rounds a 9 ms body to
+  // 16.7). Absent for a range recorded before the host posted profiles.
+  const hasBody = b.some((k) => typeof k.bodyMs === 'number');
+  const rows = hasBody ? 4 : 3;
+  const svg = `<svg id="sl-strips" viewBox="0 0 ${W} ${STRIP_H * rows + 14}" width="100%" style="display:block;font-family:${FONT}">
     ${strip('frame p95', 'ms', b.map((k) => k.p95Ms), 'line', ticks)}
-    <g transform="translate(0 ${STRIP_H})">${strip('draw calls', '', b.map((k) => k.calls), 'line', ticks)}</g>
-    <g transform="translate(0 ${STRIP_H * 2})">${strip('hitches', '', b.map((k) => k.hitches), 'bars', ticks)}</g>
-    <line id="sl-x" x1="0" x2="0" y1="4" y2="${STRIP_H * 3 - 6}" stroke="${C.ink}" stroke-opacity="0.5" visibility="hidden"/>
-    <text x="${PAD_L}" y="${STRIP_H * 3 + 10}" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.from))}</text>
-    <text x="${W - PAD_R}" y="${STRIP_H * 3 + 10}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.to))}</text>
+    ${hasBody ? `<g transform="translate(0 ${STRIP_H})">${strip('frame body (host loop)', 'ms', b.map((k) => k.bodyMs), 'line', ticks)}</g>` : ''}
+    <g transform="translate(0 ${STRIP_H * (rows - 2)})">${strip('draw calls', '', b.map((k) => k.calls), 'line', ticks)}</g>
+    <g transform="translate(0 ${STRIP_H * (rows - 1)})">${strip('hitches', '', b.map((k) => k.hitches), 'bars', ticks)}</g>
+    <line id="sl-x" x1="0" x2="0" y1="4" y2="${STRIP_H * rows - 6}" stroke="${C.ink}" stroke-opacity="0.5" visibility="hidden"/>
+    <text x="${PAD_L}" y="${STRIP_H * rows + 10}" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.from))}</text>
+    <text x="${W - PAD_R}" y="${STRIP_H * rows + 10}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.to))}</text>
   </svg>
   <div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>`;
   return { svg, ticks };
@@ -142,6 +149,7 @@ function improvementLine(h, fixCount) {
   return `<div style="display:flex;flex-wrap:wrap;gap:6px 18px;font-family:${MONO};font-size:11px;color:${C.dim};margin:4px 0 2px;align-items:baseline">
       <span style="color:${C.accent};letter-spacing:1px;text-transform:uppercase;font-size:10px">Improvement in range</span>
       <span>p95 ${one ? num(last.p95Ms, 'ms') : delta(first.p95Ms, last.p95Ms, 'ms')}</span>
+      ${typeof last.bodyMs === 'number' ? `<span>body ${one || typeof first.bodyMs !== 'number' ? num(last.bodyMs, 'ms') : delta(first.bodyMs, last.bodyMs, 'ms')}</span>` : ''}
       <span>draw calls ${one ? num(last.calls) : delta(first.calls, last.calls)}</span>
       <span>hitches/h ${one ? num(last.hitchesPerHour) : delta(first.hitchesPerHour, last.hitchesPerHour)}</span>
       <span>worst frame ${one ? num(last.worstMs, 'ms') : delta(first.worstMs, last.worstMs, 'ms')}</span>
@@ -156,6 +164,37 @@ function filterBar(range) {
     <label>from ${inp('sl-from', range.from)}</label><span style="color:${C.mute}">(empty = since the beginning)</span>
     <label>to ${inp('sl-to', range.to)}</label><span style="color:${C.mute}">(empty = now)</span>
     <button id="sl-range-clear" type="button" style="background:none;border:1px solid ${C.rule};color:${C.mute};border-radius:4px;padding:2px 8px;font:inherit;font-size:10px;cursor:pointer">clear</button></div>`;
+}
+
+/** What the fix MOVED in the host's own numbers (SPEC §3.2b `moved`): every
+ *  section before → after, and the counters that changed by a fifth or more.
+ *  Two columns, sections left, counters right; nothing when the windows
+ *  carried no profile lines (a fix recorded from heartbeats alone). */
+function movedTable(moved) {
+  if (!moved || (!moved.sections?.length && !moved.counts?.length)) return '';
+  const cell = (r, unit) => `<tr><td style="color:${C.mute};padding:1px 8px 1px 0;white-space:nowrap">${esc(r.name)}</td><td style="text-align:right;padding:1px 8px">${num(r.before, unit)}</td><td style="text-align:right">${delta(r.before, r.after, unit)}</td></tr>`;
+  const table = (title, rows, unit) => rows.length ? `<table style="font-family:${MONO};font-size:11px;color:${C.ink};border-collapse:collapse">
+      <tr style="color:${C.mute};font-size:10px"><td style="color:${C.accent};letter-spacing:1px;text-transform:uppercase">${title}</td><td style="text-align:right;padding:0 8px">before</td><td style="text-align:right">after</td></tr>
+      ${rows.map((r) => cell(r, unit)).join('')}</table>` : '';
+  return `<div style="display:flex;gap:28px;margin-top:8px;flex-wrap:wrap;align-items:flex-start">
+    ${table('sections (ms/frame)', (moved.sections ?? []).slice(0, 10), '')}
+    ${table('counters that moved ≥20%', (moved.counts ?? []).slice(0, 10), '')}
+  </div>`;
+}
+
+/** The frame NOW, from the host's newest profile line: the sections as bars
+ *  against the body, biggest first, and the counters. This is the panel the
+ *  human used to have to open and paste; here it is what the ledger has. */
+function frameNow(p) {
+  if (!p || !p.sections) return `<div style="color:${C.dim};padding:6px 0">no host profile yet — the runtime posts one every ~10 s in play</div>`;
+  const body = typeof p.frame?.bodyMs === 'number' && p.frame.bodyMs > 0 ? p.frame.bodyMs : Object.values(p.sections).reduce((a, v) => a + v, 0) || 1;
+  const rows = Object.entries(p.sections).slice(0, 12).map(([k, v]) => {
+    const w = Math.max(0, Math.min(100, v / body * 100));
+    return `<div style="display:flex;align-items:center;gap:8px;font-family:${MONO};font-size:11px;line-height:16px"><span style="width:150px;color:${C.dim};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k)}</span><span style="flex:1;height:8px;background:${C.rule};border-radius:2px;overflow:hidden"><span style="display:block;height:100%;width:${w.toFixed(1)}%;background:${C.accent}"></span></span><span style="width:52px;text-align:right;color:${C.ink}">${num(v, 'ms')}</span></div>`;
+  }).join('');
+  const counts = Object.entries(p.counts ?? {}).slice(0, 16).map(([k, v]) => `<span style="white-space:nowrap"><span style="color:${C.mute}">${esc(k)}</span> ${num(v)}</span>`).join('  ');
+  const head = `<div style="font-family:${MONO};font-size:10px;color:${C.mute};margin-bottom:4px">${esc(when(p.at))} · ${p.window?.frames ?? '?'} frames · body ${num(p.frame?.bodyMs, 'ms')} · median ${num(p.frame?.medianMs, 'ms')} · p95 ${num(p.frame?.p95Ms, 'ms')}${p.phase ? ` · ${esc(p.phase)}` : ''}</div>`;
+  return `${head}${rows}${counts ? `<div style="font-family:${MONO};font-size:10px;color:${C.dim};margin-top:6px;line-height:16px;word-break:break-word">${counts}</div>` : ''}`;
 }
 
 function renderFixRows(h, list) {
@@ -188,11 +227,13 @@ function renderFixRows(h, list) {
       <table style="font-family:${MONO};font-size:11px;color:${C.ink};border-collapse:collapse;margin-left:auto">
         <tr style="color:${C.mute};font-size:10px"><td></td><td style="text-align:right;padding:0 8px">before</td><td style="text-align:right">after</td></tr>
         ${row('frame p95', f.before?.p95Ms, f.after?.p95Ms, 'ms')}
+        ${typeof f.after?.bodyMs === 'number' || typeof f.before?.bodyMs === 'number' ? row('frame body', f.before?.bodyMs, f.after?.bodyMs, 'ms') : ''}
         ${row('draw calls', f.before?.calls, f.after?.calls)}
         ${row('hitches/h', f.before?.hitchesPerHour, f.after?.hitchesPerHour)}
         ${row('worst frame', f.before?.worstMs, f.after?.worstMs, 'ms')}
       </table>
     </div>
+    ${movedTable(f.moved)}
     ${f.status === 'proposed' ? `<div style="display:flex;gap:8px;margin-top:8px;align-items:center">
       ${f.upToDate === false ? `<span style="font-size:10px;color:${C.warn}">behind ${esc(list?.main ?? 'main')} — rebase before merging</span>` : btn(f.id, 'merge', 'Merge', C.good)}
       ${btn(f.id, 'reject', 'Reject', C.mute)}
@@ -294,7 +335,8 @@ function renderSession(host) {
   const feedLine = feed.state === 'ok'
     ? `<div style="font-size:10px;color:${C.good}">feed: live — incidents reach Claude Code as they happen</div>`
     : `<div style="font-size:10px;color:${C.warn}">feed: DARK ${feed.darkForS !== undefined ? `${feed.darkForS}s` : ''} — ${esc(feed.reason)}; recording continues, ${feed.buffered ?? 0} post(s) buffered for retry</div>`;
-  return `${feedLine}${H(`incidents this session (${inc.length} logged${feed.state === 'ok' ? ', all already sent to Claude Code' : ' — feed dark, buffered'})`)}
+  const prof = host.profile?.() ?? null;
+  return `${feedLine}${H('the frame now — what the host measured, by section')}${frameNow(prof)}${H(`incidents this session (${inc.length} logged${feed.state === 'ok' ? ', all already sent to Claude Code' : ' — feed dark, buffered'})`)}
     <div id="sl-list" style="font-size:11.5px;font-variant-numeric:tabular-nums">${rows || `<div style="color:${C.dim}">none yet — the recorder is watching</div>`}</div>`;
 }
 
@@ -302,6 +344,7 @@ function renderSession(host) {
  * @param host {{
  *   incidents?: () => Array<{at:number, frameMs:number, guess:string, evidence:string, manual:boolean, phase?:string, label?:string, glyph?:string}>,
  *   feed?: () => {state:'ok'|'dark', reason?:string, buffered?:number, darkForS?:number},
+ *   profile?: () => object | null,       // the host's newest profile record (SPEC §3.2b)
  *   history?: () => Promise<{records:object[], fixes?:object[]} | ReturnType<typeof buildHistory> | null>,
  *   onNote: (note: string|null) => void,   // called exactly once per open, on close
  *   now?: () => number,
@@ -480,7 +523,8 @@ export function createPanel(host) {
       if (i < 0 || i >= n) { x.setAttribute('visibility', 'hidden'); return; }
       const k = h.buckets[i], cx = (PAD_L + i * xw + xw / 2).toFixed(1);
       x.setAttribute('x1', cx); x.setAttribute('x2', cx); x.setAttribute('visibility', 'visible');
-      read.textContent = `${when(k.from)}  p95 ${num(k.p95Ms, 'ms')}  calls ${num(k.calls)}  hitches ${k.hitches}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${k.build ? `  build ${k.build}` : ''}`;
+      const secs = k.sections ? Object.entries(k.sections).slice(0, 4).map(([n, v]) => `${n} ${num(v)}`).join(' · ') : '';
+      read.textContent = `${when(k.from)}  p95 ${num(k.p95Ms, 'ms')}${typeof k.bodyMs === 'number' ? `  body ${num(k.bodyMs, 'ms')}` : ''}  calls ${num(k.calls)}  hitches ${k.hitches}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${k.build ? `  build ${k.build}` : ''}${secs ? `  │ ${secs}` : ''}`;
     });
     svg.addEventListener('mouseleave', () => { x.setAttribute('visibility', 'hidden'); read.textContent = 'hover the strips'; });
   }

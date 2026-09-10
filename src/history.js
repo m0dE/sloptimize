@@ -53,7 +53,7 @@ export function summarizeWindow(records, from, to) {
   // `profile` line in the window contributes its per-frame means; the window
   // reports the MEDIAN of those, per name, so one bad ten seconds does not
   // become the build's number and one quiet ten seconds does not hide it.
-  const sections = new Map(), counts = new Map();
+  const sections = new Map(), counts = new Map(), bodies = [];
   let profiles = 0;
   let hitches = 0, jitters = 0, worstMs, worstGuess, regime;
   for (const { t, r } of stamped(records)) {
@@ -68,6 +68,7 @@ export function summarizeWindow(records, from, to) {
       profiles++;
       if (typeof r.frame?.medianMs === 'number') meds.push(r.frame.medianMs);
       if (typeof r.frame?.p95Ms === 'number') p95s.push(r.frame.p95Ms);
+      if (typeof r.frame?.bodyMs === 'number') bodies.push(r.frame.bodyMs);
       if (r.regime && r.regime !== 'unknown') regime = r.regime;
       for (const [k, v] of Object.entries(r.sections ?? {})) if (typeof v === 'number') (sections.get(k) ?? sections.set(k, []).get(k)).push(v);
       for (const [k, v] of Object.entries(r.counts ?? {})) if (typeof v === 'number') (counts.get(k) ?? counts.set(k, []).get(k)).push(v);
@@ -94,6 +95,9 @@ export function summarizeWindow(records, from, to) {
   if (regime) s.regime = regime;
   if (profiles > 0) {
     s.profiles = profiles;
+    // The loop's own frame — what the host measured end to end, which is
+    // the number a fix moves; p95 is what the display then showed.
+    if (bodies.length) s.bodyMs = median(bodies);
     const fold = (m) => Object.fromEntries([...m].map(([k, v]) => [k, median(v)]).sort((a, b) => b[1] - a[1]));
     if (sections.size) s.sections = fold(sections);
     if (counts.size) s.counts = fold(counts);

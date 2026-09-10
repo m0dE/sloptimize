@@ -29,6 +29,7 @@ test('a window folds profile lines by median, per section and per counter', () =
   assert.deepEqual(s.sections, { render: 5.2, 'crowd.bodies': 3.3, vfx: 1.1 });
   assert.deepEqual(s.counts, { 'rig.posed': 158 });
   assert.equal(s.medianMs, 16.7);
+  assert.equal(s.bodyMs, 18.2);       // the host's loop, folded like the rest
   assert.equal(s.regime, 'hardware');
   // A window with no profile lines says nothing about sections — absent, not {}.
   const none = summarizeWindow([{ type: 'heartbeat', at: at(0), medianFrameMs: 8 }], T0, T0 + 60_000);
