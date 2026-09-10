@@ -127,6 +127,10 @@ export function diffProfiles(before, after, { minShare = 0.2, top = 24 } = {}) {
         row.delta = +(y - x).toFixed(3);
         row.share = x !== 0 ? +((y - x) / Math.abs(x)).toFixed(3) : (y === 0 ? 0 : Infinity);
         if (gate && Math.abs(row.share) < minShare) continue;
+      } else if (gate) {
+        // A counter on one side only is a counter the other build did not
+        // have — a change of instrument, not of the game.
+        continue;
       }
       out.push(row);
     }
@@ -247,7 +251,10 @@ export function buildFix(records, opts = {}) {
   fix.after = windowReport(records, resolveWindow(records, after, 'after'));
   // The host's own numbers, moved: present only when both windows carried
   // profile lines, so a fix recorded from heartbeats alone reads as before.
-  if (fix.before.sections || fix.after.sections || fix.before.counts || fix.after.counts) {
+  // Both windows must carry profile lines: a build recorded before the host
+  // posted them has no sections, and "— → 5 ms" for every section is not a
+  // finding, it is the instrument's birthday.
+  if ((fix.before.sections || fix.before.counts) && (fix.after.sections || fix.after.counts)) {
     fix.moved = diffProfiles(fix.before, fix.after);
   }
   return fix;

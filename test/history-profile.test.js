@@ -71,6 +71,15 @@ test('a section on one side only is reported with the other side absent', () => 
   assert.equal(added.after, 3); assert.equal(added.before, undefined);
 });
 
+test('a fix whose before build predates profile lines carries no `moved` — the instrument\'s birthday is not a finding', () => {
+  const beat = (s, build) => ({ type: 'heartbeat', at: at(s), build, medianFrameMs: 8, p95Ms: 12 });
+  const fix = buildFix([beat(0, 'b1'), prof(100, 'b2', { render: 4 }, { 'rig.posed': 1 })], { title: 't', now: at(200) });
+  assert.equal(fix.moved, undefined);
+  // …and a counter present on one side only never appears in `moved.counts`.
+  const d = diffProfiles({ sections: { a: 1 }, counts: { old: 5 } }, { sections: { a: 2 }, counts: { neu: 7 } });
+  assert.deepEqual(d.counts, []);
+});
+
 test('a fix recorded from heartbeats alone carries no `moved`', () => {
   const beat = (s, build) => ({ type: 'heartbeat', at: at(s), build, medianFrameMs: 8, p95Ms: 12 });
   const fix = buildFix([beat(0, 'b1'), beat(100, 'b2')], { title: 't', now: at(200) });

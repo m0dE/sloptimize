@@ -357,6 +357,17 @@ if (cmd === 'history' || cmd === 'fix') {
   process.exit(0);
 }
 
+if (cmd === 'serve') {
+  // The dev server for any app (SPEC §8.6): the ingest/ledger/ask routes on
+  // a bare http server, plus the app's static files with the js-profiling
+  // document policy. `--repo <dir>` enables the fix loop's git verbs.
+  const { serve } = await import('../src/node/serve.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const s = await serve({ dir: DIR, port: Number(get('--port') ?? 4390), host: get('--host'), static: get('--static'), repoDir: get('--repo') });
+  console.log(`sloptimize serve: http://${get('--host') ?? '127.0.0.1'}:${s.port}  ledger ${s.dir}${s.static ? `  static ${s.static}` : ''}\n  POST /api/sloptimize/ingest · GET /api/sloptimize/ledger · the runtime posts here; \`sloptimize ask …\` answers ride the profile post back`);
+  await new Promise(() => {});
+}
+
 if (cmd === 'ask') {
   // The agent asks the running tab (SPEC §3.9): `sloptimize ask profile`,
   // `ask capture 10`, `ask cpuprofile 5`, `ask eval "<js>"` — one line into
@@ -415,5 +426,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
