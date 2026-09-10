@@ -247,6 +247,29 @@ long-script|section:sim.world.greenery`), so the catalogue shows one row per
 cause instead of one row per phase; mints, when a hitch has them, still win.
 Extra fields (`sectionCoverage`, `offLoop`, …) ride along as evidence.
 
+### …and posts that profile to the ledger on a cadence
+
+Sections on a hitch say what one bad frame was made of. To say what the
+ORDINARY frame is made of — and whether a fix moved it — post the same
+instrument's means as a `profile` line every ~10 s in play (SPEC §3.2b):
+
+```js
+post('records', [{
+  type: 'profile', at: new Date().toISOString(), build, phase, ctx, regime,
+  window: { frames: p.frames, seconds },
+  frame: { medianMs, p95Ms, bodyMs: p.bodyMsPerFrame },
+  sections: p.sectionsMsPerFrame,      // mean ms per frame, biggest first
+  counts: p.countsPerFrame,            // mean per frame
+  gauges: Object.fromEntries(Object.entries(p.gauges).map(([k, g]) => [k, g.value])),
+}]);
+```
+
+Sample rather than accumulate if the instrument costs anything with nobody
+reading it: open the profiler for two seconds every ten, read it, close it
+(unless a panel holds it). After that, `sloptimize report` shows the frame
+by section without a keyboard, and `sloptimize fix` says which sections and
+counters a build moved — the before/after that used to need a paste.
+
 ### …and lets that profile decide the verdict
 
 Sections are a site; they do not change the guess. When the host has

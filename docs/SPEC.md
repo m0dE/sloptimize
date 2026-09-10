@@ -148,6 +148,40 @@ monkey-patch around the inspector.
 A field the runtime cannot measure is **absent**, never `0` (the inspector's
 em-dash rule, inherited as JSON absence).
 
+### 3.2b `profile` lines in the ledger — the host's own frame, unattended
+
+`profile.json` is overwritten every two seconds and carries what the
+recorder can measure from outside the loop. A host that profiles itself
+(§7 of INTEGRATION) knows far more — where its loop spent the frame, by
+named section, and what its counters read — and until 0.5 that knowledge
+lived only in the host's own panel, so every "did the fix move it?" needed a
+person to open the panel and paste. So the host may append a `profile`
+record to `perf.jsonl` on a slow cadence (every ~10 s in play; the runtime
+must never let this be the hitch it reports):
+
+```json
+{
+  "type": "profile", "at": "2026-09-10T09:19:46.100Z",
+  "build": "v1789060823926", "phase": "play", "ctx": "combat=yes,hull=elong-x,…",
+  "regime": "hardware",
+  "window": { "frames": 120, "seconds": 2.0 },
+  "frame": { "medianMs": 16.7, "p95Ms": 25.0, "bodyMs": 18.2 },
+  "sections": { "render": 4.47, "crowd.bodies": 3.38, "entitySync": 1.99, "…": 0 },
+  "counts":   { "rig.posed": 154.9, "rig.moved.posed": 73.9, "net.delta.rows": 8.7, "…": 0 },
+  "gauges":   { "rig.machines": 633, "corpses.live": 20 }
+}
+```
+
+`sections` are mean ms per frame over the window, biggest first;
+`counts` are mean per frame; `gauges` are the window's last value. Names
+are the host's vocabulary and sloptimize never interprets them beyond
+display and arithmetic. A window (`summarizeWindow`) folds every profile
+line inside it by MEDIAN per name — one firefight is one sample, not the
+build's number — and a fix (`buildFix`) carries `moved`: every section
+before → after, and the counters whose relative change is a fifth or more.
+`sloptimize report` prints the newest line; `sloptimize fix` prints
+`moved`. Profile lines are evidence for build windows, like beats.
+
 ### 3.3 Hitch detection and `perf.jsonl`
 
 A hitch is a non-paused frame whose delta exceeds

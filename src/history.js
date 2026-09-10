@@ -49,6 +49,12 @@ const BEAT_COUNTERS = ['calls', 'triangles', 'programs'];
 export function summarizeWindow(records, from, to) {
   const beats = [], counters = Object.fromEntries(BEAT_COUNTERS.map((k) => [k, []]));
   const p95s = [], meds = [], guesses = new Map();
+  // The host's own frame, by section and by counter (SPEC §3.2b): every
+  // `profile` line in the window contributes its per-frame means; the window
+  // reports the MEDIAN of those, per name, so one bad ten seconds does not
+  // become the build's number and one quiet ten seconds does not hide it.
+  const sections = new Map(), counts = new Map();
+  let profiles = 0;
   let hitches = 0, jitters = 0, worstMs, worstGuess, regime;
   for (const { t, r } of stamped(records)) {
     if (t < from || t > to) continue;
@@ -58,6 +64,13 @@ export function summarizeWindow(records, from, to) {
       if (typeof r.medianFrameMs === 'number') meds.push(r.medianFrameMs);
       for (const k of BEAT_COUNTERS) if (typeof r[k] === 'number') counters[k].push(r[k]);
       if (r.regime && r.regime !== 'unknown') regime = r.regime;
+    } else if (r.type === 'profile' && (r.sections || r.counts)) {
+      profiles++;
+      if (typeof r.frame?.medianMs === 'number') meds.push(r.frame.medianMs);
+      if (typeof r.frame?.p95Ms === 'number') p95s.push(r.frame.p95Ms);
+      if (r.regime && r.regime !== 'unknown') regime = r.regime;
+      for (const [k, v] of Object.entries(r.sections ?? {})) if (typeof v === 'number') (sections.get(k) ?? sections.set(k, []).get(k)).push(v);
+      for (const [k, v] of Object.entries(r.counts ?? {})) if (typeof v === 'number') (counts.get(k) ?? counts.set(k, []).get(k)).push(v);
     } else if (r.type === 'hitch' && typeof r.frameMs === 'number') {
       hitches++;
       const g = r.classification?.[0]?.guess;
@@ -79,12 +92,51 @@ export function summarizeWindow(records, from, to) {
   if (worstMs !== undefined) { s.worstMs = +worstMs.toFixed(1); s.worstGuess = worstGuess; }
   if (guesses.size) s.topGuess = [...guesses].sort((a, b) => b[1] - a[1])[0][0];
   if (regime) s.regime = regime;
+  if (profiles > 0) {
+    s.profiles = profiles;
+    const fold = (m) => Object.fromEntries([...m].map(([k, v]) => [k, median(v)]).sort((a, b) => b[1] - a[1]));
+    if (sections.size) s.sections = fold(sections);
+    if (counts.size) s.counts = fold(counts);
+  }
   return s;
+}
+
+/**
+ * What a fix moved, section by section and counter by counter — the two
+ * windows' host measurements side by side, largest section first. A name
+ * present on one side only is reported with the other side absent (a
+ * section the build added or removed is a finding, not a zero). `minShare`
+ * drops counters whose relative change is under it, so a fix report names
+ * the twenty numbers that moved rather than the hundred and fifty that
+ * exist; sections are always all listed, they are the frame.
+ */
+export function diffProfiles(before, after, { minShare = 0.2, top = 24 } = {}) {
+  const rows = (a = {}, b = {}, gate) => {
+    const names = new Set([...Object.keys(a), ...Object.keys(b)]);
+    const out = [];
+    for (const k of names) {
+      const x = a[k], y = b[k];
+      const row = { name: k };
+      if (x !== undefined) row.before = x;
+      if (y !== undefined) row.after = y;
+      if (x !== undefined && y !== undefined) {
+        row.delta = +(y - x).toFixed(3);
+        row.share = x !== 0 ? +((y - x) / Math.abs(x)).toFixed(3) : (y === 0 ? 0 : Infinity);
+        if (gate && Math.abs(row.share) < minShare) continue;
+      }
+      out.push(row);
+    }
+    return out.sort((p, q) => Math.max(q.before ?? 0, q.after ?? 0) - Math.max(p.before ?? 0, p.after ?? 0));
+  };
+  return {
+    sections: rows(before?.sections, after?.sections, false).slice(0, top),
+    counts: rows(before?.counts, after?.counts, true),
+  };
 }
 
 /** Evidence = a record that measured something: a beat, a hitch, a jitter.
  *  Arm probes and settles name a build without saying how it ran. */
-const EVIDENCE = new Set(['heartbeat', 'hitch', 'jitter']);
+const EVIDENCE = new Set(['heartbeat', 'hitch', 'jitter', 'profile']);
 
 /** Builds in order of first evidence, each with its measured window. */
 function buildWindows(records) {
@@ -189,6 +241,11 @@ export function buildFix(records, opts = {}) {
   for (const k of ['issue', 'solution', 'commit', 'files', 'footprints']) if (opts[k]) fix[k] = opts[k];
   fix.before = windowReport(records, resolveWindow(records, before, 'before'));
   fix.after = windowReport(records, resolveWindow(records, after, 'after'));
+  // The host's own numbers, moved: present only when both windows carried
+  // profile lines, so a fix recorded from heartbeats alone reads as before.
+  if (fix.before.sections || fix.after.sections || fix.before.counts || fix.after.counts) {
+    fix.moved = diffProfiles(fix.before, fix.after);
+  }
   return fix;
 }
 

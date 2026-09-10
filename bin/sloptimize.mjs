@@ -52,6 +52,19 @@ if (cmd === 'report') {
     console.log(`  frame median ${profile.frame.medianMs}ms  p95 ${profile.frame.p95Ms}ms  (~${profile.frame.fps}fps)  inside-render ${profile.frame.insideRenderMs}ms`);
   }
   if (profile.render) console.log(`  calls ${profile.render.calls}  triangles ${profile.render.triangles}  programs ${profile.memory?.programs}`);
+  // The host's own frame (SPEC §3.2b): the newest profile line with sections
+  // says where the loop's time goes and what its counters read, without
+  // anyone at the keyboard. Twelve sections and the counters that moved
+  // most; `--json` has all of them.
+  const lastProf = hitches.filter((h) => h.type === 'profile' && (h.sections || h.counts)).pop();
+  if (lastProf) {
+    const win = lastProf.window ? ` over ${lastProf.window.frames} frames` : '';
+    console.log(`  host profile @ ${lastProf.at}${win}  build=${lastProf.build ?? '?'}  phase=${lastProf.phase ?? '?'}${lastProf.frame?.bodyMs !== undefined ? `  body ${lastProf.frame.bodyMs}ms` : ''}`);
+    const secs = Object.entries(lastProf.sections ?? {}).slice(0, 12);
+    if (secs.length) console.log(`    sections: ${secs.map(([k, v]) => `${k} ${v}`).join('  ')}`);
+    const cnts = Object.entries(lastProf.counts ?? {});
+    if (cnts.length) console.log(`    counts (${cnts.length}): ${cnts.slice(0, 12).map(([k, v]) => `${k} ${v}`).join('  ')}`);
+  }
   console.log(`  hitches recorded: ${auto.length} (showing last ${Math.min(auto.length, 20)})  usermarks: ${marks.length}`);
   for (const h of auto.slice(-5)) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}`);
@@ -326,7 +339,11 @@ if (cmd === 'history' || cmd === 'fix') {
       if (!cfg) console.error('push skipped: set SLOPTIMIZE_KEY and SLOPTIMIZE_ENDPOINT');
       else { try { await pushFix(cfg, fix); console.log('pushed to cloud'); } catch (e) { console.error(`push failed: ${e.message}`); } }
     }
-    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}`);
+    const moved = fix.moved
+      ? [...fix.moved.sections.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before, 'ms')} → ${fmt(r.after, 'ms')}${r.share !== undefined && Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`),
+        ...fix.moved.counts.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before)} → ${fmt(r.after)}${Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`)]
+      : [];
+    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}${moved.length ? `\n  moved (host sections, then counters that changed ≥20%):\n${moved.join('\n')}` : ''}`);
     process.exit(0);
   }
   const h = buildHistory(records, { fixes, buckets: Number(get('--buckets')) || 24 });
