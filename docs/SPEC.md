@@ -424,6 +424,38 @@ fold is the same code. The service is specified in the sloptimize-cloud repo
 
 ---
 
+### 3.9 Asking the tab — the agent's channel to a running game
+
+Everything above flows one way: the tab writes, the agent reads. The day
+that was not enough: an agent working a hitch needed the frame's sections
+NOW, a ten-second capture, a CPU sample — and every one of them meant a
+person at the keyboard. So the agent may ask, files-first:
+
+```
+sloptimize ask profile              # the host's frame by section, now
+sloptimize ask capture 10           # the host's own ten-second capture
+sloptimize ask cpuprofile 5         # JS self-profiling sample (Chromium, js-profiling document policy)
+sloptimize ask eval "<js>"          # code delivery — dev switch only
+```
+
+`ask` appends `{id, kind, arg, at}` to `.sloptimize/ask.jsonl`. The host's
+dev ingest, on the tab's next rolling-state post, answers with the pending
+requests (`pendingAsks(askText, ledgerTail)`: written, not yet answered, not
+older than two minutes) instead of an empty 204; the tab does the work and
+posts one `answer` record — `{type:'answer', id, kind, ok, result | error,
+ms}` — into perf.jsonl through the same records post; the CLI waits for it
+by id. No new socket, no listener in the tab, and a request can be written
+by anything that can write a file.
+
+`eval` is the code-delivery lane: the agent puts a probe into the running
+client — a counter it did not have, a walk of the scene, a one-off timer —
+and reads the answer, so the shipped bundle need not carry every
+instrument an investigation might want. It exists ONLY behind the host's
+dev switch (the same one that arms the ingest); a production build has no
+channel at all, and the host must refuse the kind wherever the switch is
+off, not merely hide the CLI. Answers are truncated by the host to a sane
+size (64 KB) — a probe that wants more writes a record and reads it back.
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)

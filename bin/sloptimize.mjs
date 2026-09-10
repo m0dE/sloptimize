@@ -357,6 +357,27 @@ if (cmd === 'history' || cmd === 'fix') {
   process.exit(0);
 }
 
+if (cmd === 'ask') {
+  // The agent asks the running tab (SPEC §3.9): `sloptimize ask profile`,
+  // `ask capture 10`, `ask cpuprofile 5`, `ask eval "<js>"` — one line into
+  // ask.jsonl, the host's dev ingest hands it to the tab, the answer lands in
+  // perf.jsonl and is printed here. Nobody at the keyboard.
+  const { makeAsk, writeAsk, awaitAnswer } = await import('../src/ask.js');
+  const kind = args[1];
+  const arg = args.slice(2).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--'))).join(' ');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  let ask;
+  try { ask = makeAsk(kind, arg); } catch (e) { console.error(`sloptimize ask: ${e.message}`); process.exit(2); }
+  writeAsk(DIR, ask);
+  const timeout = Number(get('--timeout') ?? 30) * 1000;
+  const ans = await awaitAnswer(DIR, ask.id, timeout);
+  if (!ans) { console.error(`sloptimize ask: no answer from a tab in ${timeout / 1000}s — is a game running against a dev server with the ingest armed?`); process.exit(4); }
+  if (json || ans.ok === false) { out(ans, JSON.stringify(ans, null, 2)); process.exit(ans.ok === false ? 1 : 0); }
+  const r = ans.result;
+  console.log(typeof r === 'string' ? r : JSON.stringify(r, null, 2));
+  process.exit(0);
+}
+
 if (cmd === 'watch') {
   // The push channel (SPEC §8.1.1): tail every --dir's perf.jsonl and print
   // one line per record an agent should wake for. Never exits — arm it as a
@@ -385,5 +406,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s>|eval <js>> [--timeout <s>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

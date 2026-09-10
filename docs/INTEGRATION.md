@@ -301,6 +301,18 @@ hitch whose cost was entirely off-loop and unnamed by any counter reads
 `gc-or-upload-by-elimination` — which is what a game whose match server ran
 on the render thread saw 4,338 times before the step was tagged.
 
+### …and answers the agent's asks (dev only)
+
+The dev ingest, on a `profile` post, reads `.sloptimize/ask.jsonl`, keeps
+the requests `pendingAsks(askText, ledgerTail)` returns, and answers the post
+with `200 {"asks":[…]}` instead of `204`. The tab runs each one and posts
+`{type:'answer', id, kind, ok, result|error, ms}` through its records post.
+Kinds: `profile` (open the frame profiler for a window and answer with the
+SPEC §3.2b record), `capture <s>` (the host's own capture), `cpuprofile <s>`
+(`new Profiler()` where the document policy allows it; answer with the
+top self-time frames), `eval <js>` (`new Function` in the page, awaited,
+JSON result — refuse it wherever the dev switch is off). See SPEC §3.9.
+
 ## 3. The CLI (the agent's shell surface)
 
 `sloptimize report|check|census|doctor --dir <game>/.sloptimize` — no
