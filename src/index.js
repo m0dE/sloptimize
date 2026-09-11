@@ -6,5 +6,7 @@ export { createMotionMonitor } from './motion.js';
 export { createErrorMonitor } from './errors.js';
 export { createCloudSink } from './cloud-sink.js';
 export { footprintOf, footprintKey, describeFootprint, canonicalContext, contextOfKey, FOOTPRINT_VERSION } from './footprint.js';
-export { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText } from './history.js';
+export { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText, diffProfiles } from './history.js';
+export { pendingAsks, ASK_KINDS } from './ask.js';
 export { createPanel } from './panel.js';
+export { createTicker, describeRecord, lineOf } from './ticker.js';

@@ -107,6 +107,16 @@ const panel = createPanel({
 panel.open();
 ```
 
+The ticker (SPEC §3.10) is the debugger's live edge: one line bottom-left
+per incident record as it is minted, gone a few seconds later. Push the
+same array you post:
+
+```js
+import { createTicker } from 'sloptimize';
+const ticker = createTicker({ offsetPx: 28 });   // above your own corner chip
+ticker.push(records);                            // beside post('records', records)
+```
+
 ## 2. The sink (files on disk)
 
 - **Vite host**: the plugin (planned surface) lands payloads in `.sloptimize/`.
@@ -248,6 +258,29 @@ long-script|section:sim.world.greenery`), so the catalogue shows one row per
 cause instead of one row per phase; mints, when a hitch has them, still win.
 Extra fields (`sectionCoverage`, `offLoop`, …) ride along as evidence.
 
+### …and posts that profile to the ledger on a cadence
+
+Sections on a hitch say what one bad frame was made of. To say what the
+ORDINARY frame is made of — and whether a fix moved it — post the same
+instrument's means as a `profile` line every ~10 s in play (SPEC §3.2b):
+
+```js
+post('records', [{
+  type: 'profile', at: new Date().toISOString(), build, phase, ctx, regime,
+  window: { frames: p.frames, seconds },
+  frame: { medianMs, p95Ms, bodyMs: p.bodyMsPerFrame },
+  sections: p.sectionsMsPerFrame,      // mean ms per frame, biggest first
+  counts: p.countsPerFrame,            // mean per frame
+  gauges: Object.fromEntries(Object.entries(p.gauges).map(([k, g]) => [k, g.value])),
+}]);
+```
+
+Sample rather than accumulate if the instrument costs anything with nobody
+reading it: open the profiler for two seconds every ten, read it, close it
+(unless a panel holds it). After that, `sloptimize report` shows the frame
+by section without a keyboard, and `sloptimize fix` says which sections and
+counters a build moved — the before/after that used to need a paste.
+
 ### …and lets that profile decide the verdict
 
 Sections are a site; they do not change the guess. When the host has
@@ -278,6 +311,18 @@ a loop's section table closes at the end of the body. Without this step a
 hitch whose cost was entirely off-loop and unnamed by any counter reads
 `gc-or-upload-by-elimination` — which is what a game whose match server ran
 on the render thread saw 4,338 times before the step was tagged.
+
+### …and answers the agent's asks (dev only)
+
+The dev ingest, on a `profile` post, reads `.sloptimize/ask.jsonl`, keeps
+the requests `pendingAsks(askText, ledgerTail)` returns, and answers the post
+with `200 {"asks":[…]}` instead of `204`. The tab runs each one and posts
+`{type:'answer', id, kind, ok, result|error, ms}` through its records post.
+Kinds: `profile` (open the frame profiler for a window and answer with the
+SPEC §3.2b record), `capture <s>` (the host's own capture), `cpuprofile <s>`
+(`new Profiler()` where the document policy allows it; answer with the
+top self-time frames), `eval <js>` (`new Function` in the page, awaited,
+JSON result — refuse it wherever the dev switch is off). See SPEC §3.9.
 
 ## 3. The CLI (the agent's shell surface)
 

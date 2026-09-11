@@ -148,6 +148,40 @@ monkey-patch around the inspector.
 A field the runtime cannot measure is **absent**, never `0` (the inspector's
 em-dash rule, inherited as JSON absence).
 
+### 3.2b `profile` lines in the ledger — the host's own frame, unattended
+
+`profile.json` is overwritten every two seconds and carries what the
+recorder can measure from outside the loop. A host that profiles itself
+(§7 of INTEGRATION) knows far more — where its loop spent the frame, by
+named section, and what its counters read — and until 0.5 that knowledge
+lived only in the host's own panel, so every "did the fix move it?" needed a
+person to open the panel and paste. So the host may append a `profile`
+record to `perf.jsonl` on a slow cadence (every ~10 s in play; the runtime
+must never let this be the hitch it reports):
+
+```json
+{
+  "type": "profile", "at": "2026-09-10T09:19:46.100Z",
+  "build": "v1789060823926", "phase": "play", "ctx": "combat=yes,hull=elong-x,…",
+  "regime": "hardware",
+  "window": { "frames": 120, "seconds": 2.0 },
+  "frame": { "medianMs": 16.7, "p95Ms": 25.0, "bodyMs": 18.2 },
+  "sections": { "render": 4.47, "crowd.bodies": 3.38, "entitySync": 1.99, "…": 0 },
+  "counts":   { "rig.posed": 154.9, "rig.moved.posed": 73.9, "net.delta.rows": 8.7, "…": 0 },
+  "gauges":   { "rig.machines": 633, "corpses.live": 20 }
+}
+```
+
+`sections` are mean ms per frame over the window, biggest first;
+`counts` are mean per frame; `gauges` are the window's last value. Names
+are the host's vocabulary and sloptimize never interprets them beyond
+display and arithmetic. A window (`summarizeWindow`) folds every profile
+line inside it by MEDIAN per name — one firefight is one sample, not the
+build's number — and a fix (`buildFix`) carries `moved`: every section
+before → after, and the counters whose relative change is a fifth or more.
+`sloptimize report` prints the newest line; `sloptimize fix` prints
+`moved`. Profile lines are evidence for build windows, like beats.
+
 ### 3.3 Hitch detection and `perf.jsonl`
 
 A hitch is a non-paused frame whose delta exceeds
@@ -389,6 +423,64 @@ fold is the same code. The service is specified in the sloptimize-cloud repo
 (`docs/superpowers/specs/2026-09-02-sloptimize-cloud-design.md`).
 
 ---
+
+### 3.9 Asking the tab — the agent's channel to a running game
+
+Everything above flows one way: the tab writes, the agent reads. The day
+that was not enough: an agent working a hitch needed the frame's sections
+NOW, a ten-second capture, a CPU sample — and every one of them meant a
+person at the keyboard. So the agent may ask, files-first:
+
+```
+sloptimize ask profile              # the host's frame by section, now
+sloptimize ask capture 10           # the host's own ten-second capture
+sloptimize ask cpuprofile 5         # JS self-profiling sample (Chromium, js-profiling document policy)
+sloptimize ask eval "<js>"          # code delivery — dev switch only
+```
+
+`ask` appends `{id, kind, arg, at}` to `.sloptimize/ask.jsonl`. The host's
+dev ingest, on the tab's next rolling-state post, answers with the pending
+requests (`pendingAsks(askText, ledgerTail)`: written, not yet answered, not
+older than two minutes) instead of an empty 204; the tab does the work and
+posts one `answer` record — `{type:'answer', id, kind, ok, result | error,
+ms}` — into perf.jsonl through the same records post; the CLI waits for it
+by id. No new socket, no listener in the tab, and a request can be written
+by anything that can write a file.
+
+`eval` is the code-delivery lane: the agent puts a probe into the running
+client — a counter it did not have, a walk of the scene, a one-off timer —
+and reads the answer, so the shipped bundle need not carry every
+instrument an investigation might want. It exists ONLY behind the host's
+dev switch (the same one that arms the ingest); a production build has no
+channel at all, and the host must refuse the kind wherever the switch is
+off, not merely hide the CLI. Answers are truncated by the host to a sane
+size (64 KB) — a probe that wants more writes a record and reads it back.
+
+### 3.10 The incident ticker — seen when felt
+
+A hitch that reaches the ledger a poll later and the panel on a chord is
+still invisible at the moment it happened, which is the moment the person
+at the keyboard can say what they were doing. So every record the tab
+mints is also a line in a corner of the page as it is minted — the
+recorder's hitch with the classifier's guess and evidence, the motion
+monitor's jump with its track and distance, an error with its message, a
+GPU stall with its wait, a host record with its type — for a few seconds,
+newest last, a handful at a time.
+
+```js
+import { createTicker } from 'sloptimize';
+const ticker = createTicker({ corner: 'bottom-left', offsetPx: 28 });
+// wherever drained records are posted:
+ticker.push(records);
+```
+
+The ticker is a sink, not a detector: it holds no threshold of its own.
+Whether a frame is a hitch, a movement a jump or a wait a stall was decided
+by the recorder, the motion monitor or the host with the ring in front of
+them (§3.3, §3.6); the ticker would only be guessing the same thing with
+less. `describeRecord(rec)` / `lineOf(rec)` are the pure half — the same
+line for a console or a host overlay — and bookkeeping records (`profile`,
+`heartbeat`, `armed`, `warm`, `answer`) are never lines.
 
 ## 4. Census and attribution
 

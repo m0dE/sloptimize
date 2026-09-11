@@ -52,6 +52,19 @@ if (cmd === 'report') {
     console.log(`  frame median ${profile.frame.medianMs}ms  p95 ${profile.frame.p95Ms}ms  (~${profile.frame.fps}fps)  inside-render ${profile.frame.insideRenderMs}ms`);
   }
   if (profile.render) console.log(`  calls ${profile.render.calls}  triangles ${profile.render.triangles}  programs ${profile.memory?.programs}`);
+  // The host's own frame (SPEC §3.2b): the newest profile line with sections
+  // says where the loop's time goes and what its counters read, without
+  // anyone at the keyboard. Twelve sections and the counters that moved
+  // most; `--json` has all of them.
+  const lastProf = hitches.filter((h) => h.type === 'profile' && (h.sections || h.counts)).pop();
+  if (lastProf) {
+    const win = lastProf.window ? ` over ${lastProf.window.frames} frames` : '';
+    console.log(`  host profile @ ${lastProf.at}${win}  build=${lastProf.build ?? '?'}  phase=${lastProf.phase ?? '?'}${lastProf.frame?.bodyMs !== undefined ? `  body ${lastProf.frame.bodyMs}ms` : ''}`);
+    const secs = Object.entries(lastProf.sections ?? {}).slice(0, 12);
+    if (secs.length) console.log(`    sections: ${secs.map(([k, v]) => `${k} ${v}`).join('  ')}`);
+    const cnts = Object.entries(lastProf.counts ?? {});
+    if (cnts.length) console.log(`    counts (${cnts.length}): ${cnts.slice(0, 12).map(([k, v]) => `${k} ${v}`).join('  ')}`);
+  }
   console.log(`  hitches recorded: ${auto.length} (showing last ${Math.min(auto.length, 20)})  usermarks: ${marks.length}`);
   for (const h of auto.slice(-5)) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}`);
@@ -328,7 +341,11 @@ if (cmd === 'history' || cmd === 'fix') {
       if (!cfg) console.error('push skipped: set SLOPTIMIZE_KEY and SLOPTIMIZE_ENDPOINT');
       else { try { await pushFix(cfg, fix); console.log('pushed to cloud'); } catch (e) { console.error(`push failed: ${e.message}`); } }
     }
-    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}`);
+    const moved = fix.moved
+      ? [...fix.moved.sections.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before, 'ms')} → ${fmt(r.after, 'ms')}${r.share !== undefined && Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`),
+        ...fix.moved.counts.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before)} → ${fmt(r.after)}${Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`)]
+      : [];
+    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}${moved.length ? `\n  moved (host sections, then counters that changed ≥20%):\n${moved.join('\n')}` : ''}`);
     process.exit(0);
   }
   const h = buildHistory(records, { fixes, buckets: Number(get('--buckets')) || 24 });
@@ -339,6 +356,47 @@ if (cmd === 'history' || cmd === 'fix') {
   console.log('  buckets:');
   for (const b of h.buckets) console.log(`  ${b.from.slice(5, 16)}  p95 ${String(fmt(b.p95Ms)).padStart(7)}  calls ${String(fmt(b.calls)).padStart(5)}  hitches ${String(b.hitches).padStart(3)}  ${b.worstMs ? `worst ${b.worstMs}ms ${b.worstGuess ?? ''}` : ''}`);
   for (const f of h.fixes) console.log(`  ✔ ${f.at.slice(0, 10)} ${f.title}${f.commit ? ` (${f.commit})` : ''}: p95 ${fmt(f.before.p95Ms, 'ms')} → ${fmt(f.after.p95Ms, 'ms')}, hitches/h ${fmt(f.before.hitchesPerHour)} → ${fmt(f.after.hitchesPerHour)}`);
+  process.exit(0);
+}
+
+if (cmd === 'serve') {
+  // The dev server for any app (SPEC §8.6): the ingest/ledger/ask routes on
+  // a bare http server, plus the app's static files with the js-profiling
+  // document policy. `--repo <dir>` enables the fix loop's git verbs.
+  const { serve } = await import('../src/node/serve.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const s = await serve({ dir: DIR, port: Number(get('--port') ?? 4390), host: get('--host'), static: get('--static'), repoDir: get('--repo') });
+  console.log(`sloptimize serve: http://${get('--host') ?? '127.0.0.1'}:${s.port}  ledger ${s.dir}${s.static ? `  static ${s.static}` : ''}\n  POST /api/sloptimize/ingest · GET /api/sloptimize/ledger · the runtime posts here; \`sloptimize ask …\` answers ride the profile post back`);
+  await new Promise(() => {});
+}
+
+if (cmd === 'ask') {
+  // The agent asks the running tab (SPEC §3.9): `sloptimize ask profile`,
+  // `ask capture 10`, `ask cpuprofile 5`, `ask eval "<js>"` — one line into
+  // ask.jsonl, the host's dev ingest hands it to the tab, the answer lands in
+  // perf.jsonl and is printed here. Nobody at the keyboard.
+  const { makeAsk } = await import('../src/ask.js');
+  const { writeAsk, awaitAnswer } = await import('../src/ask-files.js');
+  const kind = args[1];
+  const arg = args.slice(2).filter((a, i, all) => !a.startsWith('--') && !(i > 0 && all[i - 1].startsWith('--'))).join(' ');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  let ask;
+  try { ask = makeAsk(kind, arg); } catch (e) { console.error(`sloptimize ask: ${e.message}`); process.exit(2); }
+  writeAsk(DIR, ask);
+  const timeout = Number(get('--timeout') ?? 30) * 1000;
+  const ans = await awaitAnswer(DIR, ask.id, timeout);
+  if (!ans) { console.error(`sloptimize ask: no answer from a tab in ${timeout / 1000}s — is a game running against a dev server with the ingest armed?`); process.exit(4); }
+  if (json || ans.ok === false) { out(ans, JSON.stringify(ans, null, 2)); process.exit(ans.ok === false ? 1 : 0); }
+  let r = ans.result;
+  // A cpuprofile names minified positions; a source map beside the build
+  // turns them into files and lines (`--map dist/game.min.js.map`).
+  const mapPath = get('--map');
+  if (kind === 'cpuprofile' && mapPath && r && typeof r === 'object') {
+    const { loadSourceMap, symbolicate } = await import('../src/node/sourcemap.js');
+    const { basename } = await import('node:path');
+    try { r = symbolicate(r, loadSourceMap(mapPath), basename(mapPath).replace(/\.map$/, '')); } catch (e) { console.error(`sloptimize ask: --map ${mapPath}: ${e.message}`); }
+  }
+  console.log(typeof r === 'string' ? r : JSON.stringify(r, null, 2));
   process.exit(0);
 }
 
@@ -370,5 +428,5 @@ if (cmd === 'attach') {
   await new Promise(() => {});
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
