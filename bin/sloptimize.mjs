@@ -141,18 +141,34 @@ if (cmd === 'check') {
     'perf.budget.frame_ms_p95': countersOnly ? undefined : profile.frame?.p95Ms,
     'perf.budget.programs': profile.memory?.programs,
   };
-  let breached = 0;
+  let breached = 0, measured = 0, skipped = 0;
   for (const [k, budget] of Object.entries(budgets)) {
     const v = read[k];
-    if (v === undefined) { results.push({ budget: k, value: null, limit: budget, verdict: countersOnly && k.includes('ms') ? 'skipped (counters-only)' : 'unmeasured' }); continue; }
+    if (v === undefined) {
+      const isSkip = countersOnly && k.includes('ms');
+      if (isSkip) skipped++;
+      results.push({ budget: k, value: null, limit: budget, verdict: isSkip ? 'skipped (counters-only)' : 'unmeasured' });
+      continue;
+    }
+    measured++;
     const over = v > budget;
     if (over) breached++;
     results.push({ budget: k, value: v, limit: budget, verdict: over ? `over by ${(v / budget).toFixed(1)}x` : 'inside' });
   }
-  out({ checked: results.length, breached, results },
+  // Nothing measured is NOT "inside". A profile written at the gate, or
+  // before a frame was drawn, has empty `frame`/`render` objects, and every
+  // budget then reads `unmeasured` - which used to exit 0 and say "0
+  // breached", the same answer as a game comfortably inside its limits. An
+  // agent loop or a CI gate takes that exit code as its termination
+  // condition, so the one state that means "I do not know" was reporting as
+  // the one that means "we are done". Exit 4, which is what §3 reserves for
+  // unmeasured, and say so in the line rather than only in the rows.
+  const nothing = measured === 0 && skipped === 0;
+  out({ checked: results.length, breached, measured, results },
     results.map((r) => `  ${r.budget.padEnd(28)} ${String(r.value).padStart(10)} / ${r.limit}   ${r.verdict}`).join('\n')
-    + `\nbudgets: ${results.length} checked, ${breached} breached`);
-  process.exit(breached > 0 ? 1 : 0);
+    + `\nbudgets: ${results.length} checked, ${breached} breached`
+    + (nothing ? ' — nothing measured: the profile has no frames in it (was it written at the gate?)' : ''));
+  process.exit(nothing ? 4 : (breached > 0 ? 1 : 0));
 }
 
 if (cmd === 'census') {
