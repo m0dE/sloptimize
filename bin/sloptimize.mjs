@@ -427,7 +427,10 @@ if (cmd === 'attach') {
   console.log('[attach] recording — Ctrl+C to stop');
   // Any signal a wrapper sends stops the sampler in the page before we go;
   // and the target going away ends the session — an attach without a target
-  // has nothing to record and must not linger with a CDP session open.
+  // has nothing to record and must not linger with a CDP session open. Both
+  // leave through close(): it is the only place a --launch'd browser is
+  // killed, so a page that vanished under a still-running browser must not
+  // orphan that browser.
   let closing = false;
   const bye = async (why) => {
     if (closing) return; closing = true;
@@ -438,7 +441,7 @@ if (cmd === 'attach') {
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => bye(sig));
   const why = await session.closed;
-  if (!closing) { console.log(`[attach] target gone (${why.code ?? 'socket closed'}) — exiting`); process.exit(0); }
+  await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
 console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
