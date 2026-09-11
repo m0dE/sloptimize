@@ -14,10 +14,12 @@ import { spawn } from 'node:child_process';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 
-export function buildInjectScript() {
+/** @param {{minHitchMs?: number}} [opts]  page-side knobs, inlined as `__sloptimizeOpts` */
+export function buildInjectScript(opts = {}) {
   const classify = readFileSync(join(SRC, 'classify.js'), 'utf8').replace(/^export /gm, '');
   const body = readFileSync(join(SRC, 'inject-body.js'), 'utf8');
-  return `(() => {\n${classify}\n${body}\n})();`;
+  const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined };
+  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${body}\n})();`;
 }
 
 export { clusterKey, topFramesFromProfile } from './incident-pipeline.mjs';
@@ -30,10 +32,26 @@ async function discoverTarget(port) {
   return page.webSocketDebuggerUrl;
 }
 
+/**
+ * @param {object} [opts]
+ * @param {string} [opts.launch]     URL to open in a spawned browser
+ * @param {number} [opts.port]       remote-debugging port (default 9222)
+ * @param {string} [opts.wsUrl]      an explicit target socket; skips discovery
+ * @param {string} [opts.dir]        .sloptimize/ directory
+ * @param {boolean} [opts.headless]
+ * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
+ * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
+ * @returns {Promise<{close:()=>Promise<void>, closed:Promise<{code?:number, reason?:string}>, clusters:Map}>}
+ *   `closed` settles when the socket does — the target went away, or close()
+ *   ran. The CLI awaits it and exits: an attach that outlives its target has
+ *   nothing to record and (ticket 2c11481d) once sat for 25 minutes on a
+ *   never-settling await with the sampler still running in the page.
+ */
 export async function attach(opts = {}) {
   const port = opts.port ?? 9222;
   const dir = opts.dir ?? '.sloptimize';
   const log = opts.log ?? ((...a) => console.log('[attach]', ...a));
+  const WS = opts.WebSocket ?? globalThis.WebSocket;
   let child = null;
   if (opts.launch) {
     const bin = process.env.SLOPTIMIZE_BROWSER
@@ -48,16 +66,29 @@ export async function attach(opts = {}) {
     }
   }
 
-  const wsUrl = await discoverTarget(port);
-  const ws = new WebSocket(wsUrl);
+  const wsUrl = opts.wsUrl ?? await discoverTarget(port);
+  const ws = new WS(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
   const pending = new Map();
+  let open = true;
   const send = (method, params = {}) => new Promise((res, rej) => {
+    if (!open) { rej(new Error('target gone')); return; }
     const id = ++seq;
     pending.set(id, { res, rej });
     ws.send(JSON.stringify({ id, method, params }));
   });
+  // The socket closing settles every in-flight call: a rotation the target
+  // never answers must fail its record, not hang the chain behind it.
+  let settleClosed;
+  const closed = new Promise((r) => { settleClosed = r; });
+  ws.onclose = (ev) => {
+    open = false;
+    for (const { rej } of pending.values()) rej(new Error('target gone'));
+    pending.clear();
+    settleClosed({ code: ev?.code, reason: ev?.reason });
+  };
+  ws.onerror = () => { /* onclose follows */ };
 
   const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown' });
   const onRecord = pipeline.onRecord;
@@ -78,7 +109,7 @@ export async function attach(opts = {}) {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Runtime.addBinding', { name: '__sloptimizeEmit' });
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript() });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ minHitchMs: opts.minHitchMs }) });
   await pipeline.start();
   // The injection applies to NAVIGATIONS — a page that was already loading
   // when we attached (the --launch race) never runs it. One reload closes
@@ -88,7 +119,14 @@ export async function attach(opts = {}) {
   log(`attached on :${port} — recorder injected; profiler rolling`);
 
   return {
-    close: async () => { try { ws.close(); } catch { /* done */ } if (child) child.kill(); },
+    // The sampler stops BEFORE the socket: a page left with the profiler
+    // running pays for it until the session is torn down.
+    close: async () => {
+      if (open) await pipeline.stop();
+      try { ws.close(); } catch { /* done */ }
+      if (child) child.kill();
+    },
+    closed,
     clusters: pipeline.clusters,
   };
 }

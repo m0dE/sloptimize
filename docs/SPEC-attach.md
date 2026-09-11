@@ -112,7 +112,22 @@ poses as a tier-1 measurement.
   once, not per occurrence. New in this draft; unimplemented.
 - **Profiler observer effect**: 1–3% steady overhead plus GC from stack
   sampling. Bounded and labeled (`profiled: true` on the window) so a
-  profiled p95 is never compared against an unprofiled one.
+  profiled p95 is never compared against an unprofiled one. The bound is
+  mechanical, learned in the field (a mid-size three.js game, ~350 draws
+  and ~450 simulated cars, ran at 12 fps under attach with its own loop
+  still at 6–9 ms): the sampler runs at 10 ms, a hitch rotates it only
+  when the stall is ≥80 ms and no rotation ran in the last second of page
+  time, and an unread window rolls itself over every 10 s. A hitch the
+  gate skips is still recorded, marked `unattributed: below-floor |
+  cooldown`, and counted onto the next attributed record as
+  `skippedSinceLast` — the §2 "rate-limited with loud drop counts",
+  applied to attribution. Without the gate the rotation's own cost made
+  the next frame a hitch, which rotated again, and the records minted in
+  that state named whatever the sampler had stalled.
+- **A second CDP client**: DevTools open on the same target is another
+  session on the same main thread; measured at ~25 ms per frame on the
+  game above. Close it while attach records, or read its numbers as
+  "with DevTools".
 - **Attribution ceiling at tier 0**: draw calls cannot be attributed to
   entities from the API (in three, every draw shares one internal call
   site). Entity work items require tier ≥1. The table in §1 is honest
