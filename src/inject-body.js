@@ -13,9 +13,13 @@
 // process registered. One JSON record per call; the node side owns files,
 // clustering, and the profiler.
 
-/* global classifyHitch, __sloptimizeEmit */
+/* global classifyHitch, __sloptimizeEmit, __sloptimizeOpts */
 
 const RING = 600;
+// The absolute floor for detection: a frame is a hitch above 2× the rolling
+// median AND above this. 25 ms by default; `attach --min-hitch-ms N` raises
+// it in the page, so sub-floor frames never cross the binding at all.
+const MIN_HITCH_MS = Math.max(25, (typeof __sloptimizeOpts !== 'undefined' && +__sloptimizeOpts.minHitchMs) || 0);
 const frameMsRing = new Float64Array(RING);
 let head = 0, count = 0, frameNo = 0;
 let lastRaf = -1;
@@ -128,7 +132,7 @@ function tick(ts) {
   gpu.draws = 0; gpu.triangles = 0; gpu.creates = 0; gpu.uploadKB = 0; longTaskMs = 0;
 
   const median = rollingMedian();
-  if (count > 60 && frameMs > Math.max(2 * median, 25)) {
+  if (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS)) {
     emit({
       type: 'hitch', at: new Date().toISOString(), frame: frameNo,
       frameMs: +frameMs.toFixed(1), medianMs: +median.toFixed(2),
