@@ -843,10 +843,14 @@ node and the page):
   with its footprint id, + the note box), **Issues** (§3.7: every incident
   type grouped by footprint, `×N`, last seen, the situation as chips; a row
   opens its history and the fixes applied), **Optimizations** (the strips
-  above on one time axis, build boundaries marked, a shared crosshair, and
-  one card per fix: date, commit, was → now, before/after sparklines and
-  deltas, merge/reject for proposals), **Settings** (the fix loop's
-  automation level). The host serves the ledger back over a dev-gated GET
+  above side by side on one row, ONE X PER BUILD with evidence — the
+  sequence of optimizations, not the calendar: a session is minutes inside
+  days, and a time axis was mostly gap — the builds that shipped a fix
+  hairlined, a shared crosshair; the range is "the last N builds" (default
+  20, a cut the ledger picks) inside an optional date range; and one card
+  per fix: date, commit, was → now, before/after sparklines and deltas,
+  merge/reject for proposals), **Settings** (the fix loop's automation
+  level). The host serves the ledger back over a dev-gated GET
   (the reference: `/api/sloptimize/ledger`, the 2MB tail of `perf.jsonl` +
   `fixes.jsonl`); the page folds it, so the Issues tab covers that tail and
   the CLI covers the whole file.

@@ -169,6 +169,8 @@ export function latestBuilds(records) {
  * first to the last measured record; each carries the window summary's
  * fields (see summarizeWindow) plus the build that ran in it, so a graph
  * can draw p95 / draw calls / hitch spikes and mark build boundaries.
+ * `builds`: one measured window per build with evidence, oldest first —
+ * the panel's x axis. `from`/`to` scope by date; `last: N` by build count.
  */
 export function buildHistory(records, opts = {}) {
   const n = opts.buckets ?? 48;
@@ -179,6 +181,19 @@ export function buildHistory(records, opts = {}) {
   const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
   if (lo !== -Infinity || hi !== Infinity) {
     records = records.filter((r) => { const t = Date.parse(r.at); return !Number.isFinite(t) || (t >= lo && t <= hi); });
+  }
+  // `last: N` keeps the newest N builds with evidence (inside the date range,
+  // if one) — "the last twenty optimizations", a cut the ledger picks, not a
+  // date anyone types. The cut is the first evidence of the oldest kept
+  // build; records of an older build that ran on past it are dropped too, so
+  // the fold holds exactly N builds.
+  const last = Number(opts.last);
+  if (Number.isFinite(last) && last > 0) {
+    const kept = buildWindows(records).slice(-last);
+    if (kept.length) {
+      const cut = kept[0].fromMs, names = new Set(kept.map((w) => w.build));
+      records = records.filter((r) => { const t = Date.parse(r.at); return (!Number.isFinite(t) || t >= cut) && (!r.build || names.has(r.build)); });
+    }
   }
   // Sorted: the sink appends per post, and a post can carry a settle that
   // was measured before the beat ahead of it in the file.

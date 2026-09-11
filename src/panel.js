@@ -12,14 +12,17 @@
 //             situation, and which fixes were applied to it. Pick a row for
 //             its history.
 //   TIMELINE  the deployment's history folded from perf.jsonl — frame p95,
-//             draw calls and hitch spikes on ONE time axis, build boundaries
-//             marked — so "is it better than yesterday" is a glance.
+//             frame body, draw calls and hitches/h, ONE X PER BUILD with
+//             evidence (not per hour: a session is minutes inside days, and
+//             a time axis was mostly gap), the builds that shipped a fix
+//             marked — so "is it better than last build" is a glance.
 //   FIXES     the fix ledger: issue → solution, commit, date, and the MEASURED
 //             before/after window of each, sparklined.
 //
 // No dependencies, no framework, no stylesheet: one root element with inline
 // styles (the host page's CSS must not leak in, and ours must not leak out).
-// Charts are inline SVG, one series per strip (never a dual axis), a shared
+// Charts are inline SVG, one series per strip (never a dual axis), the four
+// strips side by side on one row over the same build index, a shared
 // crosshair, and the honest ceiling: a spike past the strip's ceiling is
 // drawn AT the ceiling with a caret, and the readout says the real number.
 import { buildHistory, buildIssues, agoText } from './history.js';
@@ -36,9 +39,10 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 // time the content did — the timeline readout wrapping to a second line
 // under the cursor shifted the strips the cursor was over (field, 2026-08-28).
 // The strips' viewBox is drawn wide so the SVG fills the window at the same
-// font proportions rather than scaling a small drawing up.
+// font proportions rather than scaling a small drawing up. Each strip is a
+// COLUMN of the row (STRIP_W wide, STRIP_H tall); PAD_L/PAD_R pad a column.
 const PANEL_W = 1100, PANEL_H = 720;
-const W = 1000, STRIP_H = 96, PAD_L = 52, PAD_R = 10;
+const W = 1000, STRIP_H = 72, PAD_L = 40, PAD_R = 8;
 const TABS = [['session', 'Current Session'], ['issues', 'Issues'], ['optimizations', 'Optimizations'], ['settings', 'Settings']];
 /** The Fixes badge remembers what you have seen per browser. */
 const SEEN_KEY = 'sloptimize.fixes.seen';
@@ -49,44 +53,46 @@ const when = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()
 const el = (tag, style, html) => { const e = document.createElement(tag); if (style) e.style.cssText = style; if (html !== undefined) e.innerHTML = html; return e; };
 const H = (s) => `<div style="letter-spacing:1px;color:${C.accent};font-size:11px;margin:10px 0 6px;text-transform:uppercase">${s}</div>`;
 
-/** A strip: one series over the shared x axis. `kind` line|bars. Values may be
- *  undefined (unmeasured → a gap, never a zero). Ceiling = 1.5 × the 90th
- *  percentile, so one 500s freeze cannot flatten a week of 17ms. */
-function strip(label, unit, values, kind, ticks) {
-  const n = values.length, xw = (W - PAD_L - PAD_R) / Math.max(n, 1);
+/** A strip: one series over the shared x axis (one x per build), drawn in
+ *  a column `cw` wide. `kind` line|bars. Values may be undefined (unmeasured
+ *  → a gap, never a zero). Ceiling = 1.5 × the 90th percentile, so one 500s
+ *  freeze cannot flatten a week of 17ms. `marks` are the indices to hairline
+ *  (the builds that shipped a fix). */
+function strip(label, unit, values, kind, marks, cw = W) {
+  const n = values.length, xw = (cw - PAD_L - PAD_R) / Math.max(n, 1);
   const known = values.filter((v) => typeof v === 'number').sort((a, b) => a - b);
-  if (known.length === 0) return `<g><text x="${PAD_L}" y="${STRIP_H / 2}" fill="${C.mute}" font-size="10">${label}: unmeasured in this window</text></g>`;
+  if (known.length === 0) return `<g><text x="${PAD_L}" y="${STRIP_H / 2}" fill="${C.mute}" font-size="10">${label}: unmeasured</text></g>`;
   const p90 = known[Math.min(known.length - 1, Math.floor(known.length * 0.9))];
   const ceil = Math.max(p90 * 1.5, known[known.length - 1] * 0.0001, 1);
   const top = 8, bottom = STRIP_H - 6;
   const y = (v) => bottom - Math.min(v, ceil) / ceil * (bottom - top);
   const x = (i) => PAD_L + i * xw;
-  let marks = '';
+  let drawn = '';
   if (kind === 'line') {
     let d = '', pen = false;
     values.forEach((v, i) => {
       if (typeof v !== 'number') { pen = false; return; }
       d += `${pen ? 'L' : 'M'}${(x(i) + xw / 2).toFixed(1)} ${y(v).toFixed(1)} `; pen = true;
     });
-    // Dots as well as the stroke: a session is minutes inside a window of
-    // days, so many buckets are lone measurements a stroke cannot show.
-    const dots = values.map((v, i) => (typeof v === 'number' ? `<circle cx="${(x(i) + xw / 2).toFixed(1)}" cy="${y(v).toFixed(1)}" r="1.6" fill="${C.accent}"/>` : '')).join('');
-    marks = `<path d="${d}" fill="none" stroke="${C.accent}" stroke-width="1.5" stroke-linejoin="round"/>${dots}`;
+    // Dots as well as the stroke: a lone measured build between two
+    // unmeasured ones is a point a stroke cannot show.
+    const dots = values.map((v, i) => (typeof v === 'number' ? `<circle cx="${(x(i) + xw / 2).toFixed(1)}" cy="${y(v).toFixed(1)}" r="1.4" fill="${C.accent}"/>` : '')).join('');
+    drawn = `<path d="${d}" fill="none" stroke="${C.accent}" stroke-width="1.5" stroke-linejoin="round"/>${dots}`;
   } else {
     values.forEach((v, i) => {
       if (typeof v !== 'number' || v <= 0) return;
-      marks += `<rect x="${(x(i) + 1).toFixed(1)}" y="${y(v).toFixed(1)}" width="${Math.max(xw - 2, 1).toFixed(1)}" height="${(bottom - y(v)).toFixed(1)}" fill="${C.warn}" rx="1"/>`;
+      drawn += `<rect x="${(x(i) + 1).toFixed(1)}" y="${y(v).toFixed(1)}" width="${Math.max(xw - 2, 1).toFixed(1)}" height="${(bottom - y(v)).toFixed(1)}" fill="${C.warn}" rx="1"/>`;
     });
   }
   // Past the ceiling: drawn at the ceiling, flagged with a caret.
   const carets = values.map((v, i) => (typeof v === 'number' && v > ceil
     ? `<path d="M${(x(i) + xw / 2 - 3).toFixed(1)} ${top + 4} l3 -4 l3 4z" fill="${kind === 'line' ? C.accent : C.warn}"/>` : '')).join('');
-  const tickLines = ticks.map((i) => `<line x1="${x(i).toFixed(1)}" x2="${x(i).toFixed(1)}" y1="${top - 4}" y2="${bottom}" stroke="${C.rule}" stroke-dasharray="2 3"/>`).join('');
+  const markLines = marks.map((i) => `<line x1="${(x(i) + xw / 2).toFixed(1)}" x2="${(x(i) + xw / 2).toFixed(1)}" y1="${top - 4}" y2="${bottom}" stroke="${C.mark}" stroke-opacity="0.45" stroke-dasharray="2 3"/>`).join('');
   return `<g>
-    <line x1="${PAD_L}" x2="${W - PAD_R}" y1="${bottom}" y2="${bottom}" stroke="${C.rule}"/>
-    ${tickLines}${marks}${carets}
-    <text x="${PAD_L - 6}" y="${top + 4}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${num(ceil, unit)}</text>
-    <text x="${PAD_L - 6}" y="${bottom}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">0</text>
+    <line x1="${PAD_L}" x2="${cw - PAD_R}" y1="${bottom}" y2="${bottom}" stroke="${C.rule}"/>
+    ${markLines}${drawn}${carets}
+    <text x="${PAD_L - 5}" y="${top + 4}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${num(ceil, unit)}</text>
+    <text x="${PAD_L - 5}" y="${bottom}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">0</text>
     <text x="${PAD_L + 4}" y="${top + 3}" fill="${C.dim}" font-size="10">${label}</text>
   </g>`;
 }
@@ -111,33 +117,47 @@ function delta(b, a, unit) {
   return `${num(a, unit)} <span style="color:${col};font-size:10px">${arrow}${pct === null ? '' : `${Math.abs(pct)}%`}</span>`;
 }
 
-/** The three strips over `h` (a folded history), or a one-line reason. */
-function stripsSvg(h) {
-  if (!h || !h.span) return { svg: `<div style="color:${C.dim};padding:12px 0">No measured records in this range — the timeline fills as the recorder posts heartbeats and hitches.</div>`, ticks: [] };
-  const b = h.buckets;
-  // Build boundaries as dashed hairlines — but a dev day ships thirty
-  // bundles, and thirty hairlines is texture, not information: past 12 the
-  // count is said in words instead.
-  let ticks = []; let prev;
-  b.forEach((k, i) => { if (k.build && k.build !== prev) { if (prev !== undefined) ticks.push(i); prev = k.build; } });
-  if (ticks.length > 12) ticks = [];
-  // Four strips, one series each. `frame body` is the HOST's own end-to-end
-  // loop time from its profile lines (SPEC §3.2b) — the number a fix moves —
-  // where p95 is what the display then showed (vsync rounds a 9 ms body to
-  // 16.7). Absent for a range recorded before the host posted profiles.
+/** The strips' points: one per build with evidence, oldest first — the
+ *  x axis is the sequence of builds, each an incident of optimization (or
+ *  not), so the graph is continuous where a time axis was mostly gap.
+ *  `marks` are the indices of builds a fix in range shipped as. */
+export function stripPoints(h) {
+  const builds = h?.builds ?? [];
+  const at = new Map(builds.map((b, i) => [b.build, i]));
+  const marks = [...new Set((h?.fixes ?? []).map((f) => at.get(f.after?.build)).filter((i) => i !== undefined))].sort((a, b) => a - b);
+  return { builds, marks };
+}
+
+/** The strips over `h` (a folded history) on ONE row, or a one-line reason. */
+export function stripsSvg(h) {
+  if (!h || !h.span) return { svg: `<div style="color:${C.dim};padding:12px 0">No measured records in this range — the timeline fills as the recorder posts heartbeats and hitches.</div>`, cols: 0 };
+  const { builds: b, marks } = stripPoints(h);
+  if (b.length === 0) return { svg: `<div style="color:${C.dim};padding:12px 0">No build named in this range — records carry a build id once the host posts one.</div>`, cols: 0 };
+  // Four strips side by side, one series each, the same build under the
+  // same x in all four. `frame body` is the HOST's own end-to-end loop time
+  // from its profile lines (SPEC §3.2b) — the number a fix moves — where p95
+  // is what the display then showed (vsync rounds a 9 ms body to 16.7).
+  // Absent for a range recorded before the host posted profiles. Hitches
+  // are a RATE here: build windows differ in length, a count would not.
   const hasBody = b.some((k) => typeof k.bodyMs === 'number');
-  const rows = hasBody ? 4 : 3;
-  const svg = `<svg id="sl-strips" viewBox="0 0 ${W} ${STRIP_H * rows + 14}" width="100%" style="display:block;font-family:${FONT}">
-    ${strip('frame p95', 'ms', b.map((k) => k.p95Ms), 'line', ticks)}
-    ${hasBody ? `<g transform="translate(0 ${STRIP_H})">${strip('frame body (host loop)', 'ms', b.map((k) => k.bodyMs), 'line', ticks)}</g>` : ''}
-    <g transform="translate(0 ${STRIP_H * (rows - 2)})">${strip('draw calls', '', b.map((k) => k.calls), 'line', ticks)}</g>
-    <g transform="translate(0 ${STRIP_H * (rows - 1)})">${strip('hitches', '', b.map((k) => k.hitches), 'bars', ticks)}</g>
-    <line id="sl-x" x1="0" x2="0" y1="4" y2="${STRIP_H * rows - 6}" stroke="${C.ink}" stroke-opacity="0.5" visibility="hidden"/>
-    <text x="${PAD_L}" y="${STRIP_H * rows + 10}" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.from))}</text>
-    <text x="${W - PAD_R}" y="${STRIP_H * rows + 10}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(when(h.span.to))}</text>
+  const cols = hasBody ? 4 : 3, cw = W / cols;
+  const columns = [
+    ['frame p95', 'ms', b.map((k) => k.p95Ms), 'line'],
+    ...(hasBody ? [['frame body (host loop)', 'ms', b.map((k) => k.bodyMs), 'line']] : []),
+    ['draw calls', '', b.map((k) => k.calls), 'line'],
+    ['hitches/h', '', b.map((k) => k.hitchesPerHour), 'bars'],
+  ].map(([label, unit, values, kind], c) => `<g transform="translate(${(c * cw).toFixed(1)} 0)">${strip(label, unit, values, kind, marks, cw)}</g>`).join('');
+  const xs = Array.from({ length: cols }, (_, c) => `<line x1="0" x2="0" y1="4" y2="${STRIP_H - 6}" transform="translate(${(c * cw).toFixed(1)} 0)"/>`).join('');
+  const first = b[0].build, last = b[b.length - 1].build;
+  const svg = `<svg id="sl-strips" viewBox="0 0 ${W} ${STRIP_H + 12}" width="100%" style="display:block;font-family:${FONT}">
+    ${columns}
+    <g id="sl-x" stroke="${C.ink}" stroke-opacity="0.5" visibility="hidden">${xs}</g>
+    <text x="${PAD_L}" y="${STRIP_H + 9}" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(first)}</text>
+    <text x="${W / 2}" y="${STRIP_H + 9}" text-anchor="middle" fill="${C.mute}" font-size="9" font-family="${MONO}">${b.length} build${b.length === 1 ? '' : 's'} · one x per build${marks.length ? ` · ${marks.length} shipped a fix` : ''}</text>
+    <text x="${W - PAD_R}" y="${STRIP_H + 9}" text-anchor="end" fill="${C.mute}" font-size="9" font-family="${MONO}">${esc(last)}</text>
   </svg>
   <div id="sl-read" style="height:18px;line-height:18px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:${MONO};font-size:11px;color:${C.dim};padding:0 0 0 ${PAD_L * 100 / W}%">hover the strips</div>`;
-  return { svg, ticks };
+  return { svg, cols };
 }
 
 /** "How much did we gain between these dates": the first build in range
@@ -156,11 +176,21 @@ function improvementLine(h, fixCount) {
       <span style="color:${C.mute}">${one ? `one build (${esc(first.build)})` : `${esc(first.build)} → ${esc(last.build)} · ${h.builds.length} builds`} · ${fixCount} fix${fixCount === 1 ? '' : 'es'}</span></div>`;
 }
 
-/** The date filter bar. `range` = {from, to} as datetime-local strings ('' = open). */
+/** The presets of "the last N builds": how many x the strips show. */
+export const LAST_PRESETS = [10, 20, 50, 0];
+export const DEFAULT_LAST = 20;
+
+/** The range bar. `range` = {last, from, to}: `last` = the newest N builds
+ *  (0 = all), a count of optimizations rather than a date; `from`/`to` as
+ *  datetime-local strings ('' = open) — both apply, the count inside the
+ *  dates, so "the last ten builds of August" is one bar. */
 function filterBar(range) {
   const inp = (id, v) => `<input id="${id}" type="datetime-local" value="${esc(v ?? '')}" style="background:${C.field};border:1px solid rgba(120,150,190,0.4);border-radius:4px;color:#e8f0ff;padding:3px 6px;font:11px ${MONO};outline:none">`;
-  return `<div style="display:flex;gap:10px;align-items:center;font-size:11px;color:${C.dim};margin:2px 0 8px">
+  const opts = LAST_PRESETS.map((n) => `<option value="${n}"${Number(range.last ?? DEFAULT_LAST) === n ? ' selected' : ''}>${n === 0 ? 'all' : n}</option>`).join('');
+  const sel = `<select id="sl-last" style="background:${C.field};border:1px solid rgba(120,150,190,0.4);border-radius:4px;color:#e8f0ff;padding:3px 6px;font:11px ${MONO};outline:none">${opts}</select>`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;font-size:11px;color:${C.dim};margin:2px 0 8px">
     <span style="color:${C.accent};letter-spacing:1px;text-transform:uppercase;font-size:10px">Range</span>
+    <label>last ${sel} builds</label><span style="color:${C.mute}">·</span>
     <label>from ${inp('sl-from', range.from)}</label><span style="color:${C.mute}">(empty = since the beginning)</span>
     <label>to ${inp('sl-to', range.to)}</label><span style="color:${C.mute}">(empty = now)</span>
     <button id="sl-range-clear" type="button" style="background:none;border:1px solid ${C.rule};color:${C.mute};border-radius:4px;padding:2px 8px;font:inherit;font-size:10px;cursor:pointer">clear</button></div>`;
@@ -416,14 +446,16 @@ export function createPanel(host) {
   }
 
   // ── the date range: re-fold the same bytes over fewer records ──
-  let range = { from: '', to: '' };
+  let range = { last: DEFAULT_LAST, from: '', to: '' };
   function wireRange() {
-    const from = body.querySelector('#sl-from'), to = body.querySelector('#sl-to'), clear = body.querySelector('#sl-range-clear');
+    const last = body.querySelector('#sl-last'), from = body.querySelector('#sl-from'), to = body.querySelector('#sl-to'), clear = body.querySelector('#sl-range-clear');
     // The range is shared by every ledger view; re-fold the tab that has it.
-    const apply = () => { range = { from: from?.value ?? '', to: to?.value ?? '' }; histCache = null; show(tab); };
+    const apply = () => { range = { last: Number(last?.value ?? range.last) || 0, from: from?.value ?? '', to: to?.value ?? '' }; histCache = null; show(tab); };
+    if (last) last.onchange = apply;
     if (from) from.onchange = apply;
     if (to) to.onchange = apply;
-    if (clear) clear.onclick = () => { range = { from: '', to: '' }; histCache = null; show(tab); };
+    // Clear = the default view (the last twenty builds), not "everything".
+    if (clear) clear.onclick = () => { range = { last: DEFAULT_LAST, from: '', to: '' }; histCache = null; show(tab); };
   }
   function wireIssueRows() {
     for (const r of body.querySelectorAll('[data-issue]')) {
@@ -503,8 +535,12 @@ export function createPanel(host) {
     const fold = (raw) => {
       if (!raw) return null;
       const lo = range.from ? Date.parse(range.from) : -Infinity, hi = range.to ? Date.parse(range.to) : Infinity;
-      const h = raw.buckets ? raw : buildHistory(raw.records ?? [], { fixes: raw.fixes ?? [], buckets: 72, from: range.from || undefined, to: range.to || undefined });
-      h.rangeLo = lo === -Infinity ? undefined : lo; h.rangeHi = hi;
+      const h = raw.buckets ? raw : buildHistory(raw.records ?? [], { fixes: raw.fixes ?? [], buckets: 72, from: range.from || undefined, to: range.to || undefined, last: range.last || undefined });
+      // The Issues tab scopes by the same cut: a "last N builds" range starts
+      // where the oldest kept build's evidence does.
+      const cut = range.last && h?.span ? Date.parse(h.span.from) : -Infinity;
+      const from = Math.max(lo, cut);
+      h.rangeLo = from === -Infinity ? undefined : from; h.rangeHi = hi;
       histCache = h;
       return h;
     };
@@ -514,17 +550,22 @@ export function createPanel(host) {
 
   function wireCrosshair(h) {
     const svg = body.querySelector('#sl-strips'), x = body.querySelector('#sl-x'), read = body.querySelector('#sl-read');
-    if (!svg || !h?.buckets?.length) return;
-    const n = h.buckets.length, xw = (W - PAD_L - PAD_R) / n;
+    const b = stripPoints(h).builds;
+    if (!svg || !x || b.length === 0) return;
+    const cols = x.children.length, cw = W / cols, n = b.length, xw = (cw - PAD_L - PAD_R) / n;
     svg.addEventListener('mousemove', (e) => {
       const r = svg.getBoundingClientRect();
       const vx = (e.clientX - r.left) / r.width * W;
-      const i = Math.floor((vx - PAD_L) / xw);
+      // The build under the cursor in whichever column it is over — and the
+      // same build lit in every column, it is one x axis drawn four times.
+      const i = Math.floor((vx - Math.floor(vx / cw) * cw - PAD_L) / xw);
       if (i < 0 || i >= n) { x.setAttribute('visibility', 'hidden'); return; }
-      const k = h.buckets[i], cx = (PAD_L + i * xw + xw / 2).toFixed(1);
-      x.setAttribute('x1', cx); x.setAttribute('x2', cx); x.setAttribute('visibility', 'visible');
+      const cx = (PAD_L + i * xw + xw / 2).toFixed(1);
+      for (const line of x.children) { line.setAttribute('x1', cx); line.setAttribute('x2', cx); }
+      x.setAttribute('visibility', 'visible');
+      const k = b[i];
       const secs = k.sections ? Object.entries(k.sections).slice(0, 4).map(([n, v]) => `${n} ${num(v)}`).join(' · ') : '';
-      read.textContent = `${when(k.from)}  p95 ${num(k.p95Ms, 'ms')}${typeof k.bodyMs === 'number' ? `  body ${num(k.bodyMs, 'ms')}` : ''}  calls ${num(k.calls)}  hitches ${k.hitches}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${k.build ? `  build ${k.build}` : ''}${secs ? `  │ ${secs}` : ''}`;
+      read.textContent = `build ${k.build}  ${when(k.from)} → ${when(k.to)}  p95 ${num(k.p95Ms, 'ms')}${typeof k.bodyMs === 'number' ? `  body ${num(k.bodyMs, 'ms')}` : ''}  calls ${num(k.calls)}  hitches/h ${num(k.hitchesPerHour)}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${secs ? `  │ ${secs}` : ''}`;
     });
     svg.addEventListener('mouseleave', () => { x.setAttribute('visibility', 'hidden'); read.textContent = 'hover the strips'; });
   }
