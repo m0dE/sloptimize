@@ -15,15 +15,17 @@ const profileWith = (fn) => ({
 function harness(opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'slop-pipe-'));
   const calls = [];
+  const sent = [];
   let nextProfile = profileWith('buildWorld');
   const send = async (method, params) => {
-    calls.push(method);
+    calls.push(method); sent.push([method, params]);
     if (method === 'Profiler.stop') return { profile: nextProfile };
     return {};
   };
   const logs = [];
   const p = createIncidentPipeline({ dir, send, log: (l) => logs.push(l), ...opts });
-  return { dir, calls, logs, p, setProfile: (fn) => { nextProfile = profileWith(fn); } };
+  const lines = () => readFileSync(join(dir, 'perf.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  return { dir, calls, sent, logs, p, lines, setProfile: (fn) => { nextProfile = profileWith(fn); } };
 }
 const hitch = (at = '2026-09-09T00:00:00Z') => ({ type: 'hitch', at, frameMs: 120, classification: [{ guess: 'long-script' }] });
 
@@ -87,4 +89,77 @@ test('without a profiler running, a hitch still lands, unattributed', async () =
   assert.deepEqual(first.topFrames, []);
   assert.equal(first.cluster.key, 'long-script|');
   assert.ok(existsSync(join(h.dir, 'clusters.json')));
+});
+
+// ── The observer effect (ticket 2c11481d): a mid-size three.js game went from
+// 60 fps to 12 under attach. 2000 samples/s plus a Profiler.stop/start on
+// EVERY hitch fed back on itself: the rotation cost made the next frame a
+// hitch, which rotated again. Sampling is coarser and rotation is gated.
+const T0 = Date.parse('2026-09-09T00:00:00Z');
+const atMs = (ms) => new Date(T0 + ms).toISOString();
+
+test('the sampler runs at 10 ms, not 0.5 ms', async () => {
+  const h = harness();
+  await h.p.start();
+  assert.equal(h.sent.find(([m]) => m === 'Profiler.setSamplingInterval')[1].interval, 10000);
+});
+
+test('rotation is gated: below the floor or inside the cooldown a hitch is recorded, not minted; the skips ride the next minted record', async () => {
+  const h = harness();
+  await h.p.start();
+  await h.p.onRecord({ ...hitch(atMs(0)), frameMs: 40 });      // below the 80 ms floor
+  await h.p.onRecord(hitch(atMs(1000)));                        // 120 ms → rotates, mints
+  await h.p.onRecord(hitch(atMs(1500)));                        // 500 ms later → cooldown
+  await h.p.onRecord(hitch(atMs(3000)));                        // past the cooldown → rotates
+  assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 2);
+  const l = h.lines();
+  assert.equal(l.length, 4, 'detection is untouched: every hitch lands in perf.jsonl');
+  assert.equal(l[0].unattributed, 'below-floor');
+  assert.equal(l[0].cluster, undefined);
+  assert.deepEqual(l[0].topFrames, []);
+  assert.deepEqual(l[1].cluster, { key: 'long-script|buildWorld@game.js:10', count: 1, new: true });
+  assert.equal(l[1].skippedSinceLast, 1);
+  assert.equal(l[2].unattributed, 'cooldown');
+  assert.equal(l[2].cluster, undefined);
+  assert.equal(l[3].cluster.count, 2);
+  assert.equal(l[3].skippedSinceLast, 1);
+  assert.equal(l[1].profileWindow, 'rolling-chunk');
+  assert.equal(l[2].profileWindow, 'none');
+  assert.equal(h.logs.filter((x) => x.startsWith('INCIDENT')).length, 1);
+  assert.equal(JSON.parse(readFileSync(join(h.dir, 'clusters.json'), 'utf8'))[0].count, 2);
+});
+
+test('the gate is configurable, and a record without a parseable `at` gates on the wall clock', async () => {
+  let now = 0;
+  const h = harness({ attributeFloorMs: 30, attributeCooldownMs: 5000, now: () => now });
+  await h.p.start();
+  await h.p.onRecord({ type: 'hitch', frameMs: 40, classification: [{ guess: 'long-script' }] });
+  now = 4000;
+  await h.p.onRecord({ type: 'hitch', frameMs: 400, classification: [{ guess: 'long-script' }] });
+  now = 5000;
+  await h.p.onRecord({ type: 'hitch', frameMs: 400, classification: [{ guess: 'long-script' }] });
+  assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 2);
+  assert.equal(h.lines()[1].unattributed, 'cooldown');
+});
+
+test('an unread window rolls itself over so Profiler.stop never serializes a session of samples; stop() disarms it', async () => {
+  const timers = []; const cleared = [];
+  const h = harness({
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimeout: (id) => cleared.push(id),
+  });
+  await h.p.start();
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].ms, 10000);
+  await timers[0].fn();
+  assert.deepEqual(h.calls.slice(3), ['Profiler.stop', 'Profiler.start']);
+  assert.ok(!existsSync(join(h.dir, 'perf.jsonl')), 'a roll writes nothing');
+  assert.equal(timers.length, 2, 're-armed');
+  // A hitch's rotation re-arms the window too: the window measures unread time.
+  await h.p.onRecord(hitch(atMs(0)));
+  assert.equal(timers.length, 3);
+  await h.p.stop();
+  assert.ok(cleared.includes(3));
+  await timers[2].fn();
+  assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 3, 'a roll after stop is a no-op');
 });

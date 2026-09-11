@@ -99,6 +99,14 @@ runs a rolling sampling profiler so a freeze is attributed like:
 INCIDENT long-script|seededFreezeWork@game.js:512 — 900ms
 ```
 
+The sampler's cost is bounded so it can never be the hitch it reports:
+10 ms sampling, one profile rotation per second at most, and only for
+stalls of 80 ms or more (shorter hitches are still recorded, marked
+`unattributed`). `--min-hitch-ms N` raises the detection floor itself.
+Keep DevTools closed on the target while attach records — a second CDP
+client costs the page ~25 ms per frame. Attach exits on its own when the
+target goes away.
+
 Limits, stated: Chromium-only; minified bundles attribute to minified names
 unless you serve sourcemaps; entity-level attribution needs tier 1+.
 
@@ -324,7 +332,7 @@ sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
-sloptimize attach        tier-0: --launch <url> [--headless] [--port N]
+sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how

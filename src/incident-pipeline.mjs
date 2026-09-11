@@ -46,6 +46,41 @@ export function topFramesFromProfile(profile, limit = 5) {
   return rows.slice(0, limit);
 }
 
+// ── The observer effect, bounded ─────────────────────────────────────────────
+// The sampler runs INSIDE the game's renderer, and a Profiler.stop serializes
+// every sample it holds on that same main thread. The first field build
+// (ticket 2c11481d: ~350 draws, ~450 simulated cars, a healthy 6–9 ms frame
+// body) sampled at 0.5 ms and rotated on every hitch, with nothing between
+// one rotation and the next. That fed back on itself: a rotation cost the
+// frame after it, that frame was a hitch against a median the page refreshes
+// only every 60 frames, so it rotated again — 60 fps became 12, with the
+// game's own loop still reporting 6–9 ms. And the attributions minted in
+// that state named whatever was on the stack while the sampler stalled the
+// thread (a 270 ms "waitingCrowdAxes" that takes nothing like 270 ms).
+// So, three bounds, each with a name:
+//   interval   10 ms — 100 samples/s; a ≥80 ms stall still gets ≥8 samples,
+//              enough to name its dominant frame. The 0.5 ms build was
+//              2000/s, continuously.
+//   floor      a rotation is only worth its cost when the stall is long
+//              enough for the sampler to have seen it; below the floor the
+//              hitch is recorded, not attributed.
+//   cooldown   at most one rotation per second of PAGE time (the same 1/s
+//              the tier-1 recorder applies to hitch records, SPEC §3.3) —
+//              the loop cannot close because a rotation can never be the
+//              cause of the next rotation.
+//   window     an unread profile rolls itself over (the same bound
+//              node/profiler.js carries, and for the same reason: a quiet
+//              hour's samples are of no use to anyone and cost the game
+//              exactly when it finally hitches).
+// What the gate drops is COUNTED, never silent: a skipped hitch carries
+// `unattributed: 'below-floor' | 'cooldown'` and the next minted record
+// carries `skippedSinceLast`. Detection itself is untouched — every hitch
+// the page emits lands in perf.jsonl.
+export const SAMPLING_INTERVAL_US = 10_000;
+export const ATTRIBUTE_FLOOR_MS = 80;
+export const ATTRIBUTE_COOLDOWN_MS = 1000;
+export const PROFILE_WINDOW_MS = 10_000;
+
 /**
  * @param {object} opts
  * @param {string} opts.dir            .sloptimize/ directory (created)
@@ -55,6 +90,12 @@ export function topFramesFromProfile(profile, limit = 5) {
  * @param {(rec:object, key:string)=>void|Promise<void>} [opts.onNewCluster]
  *   Called once per NEW cause, before the record is written — a hook may
  *   stamp fields on `rec` (the Electron trace path does).
+ * @param {number} [opts.samplingIntervalUs]  see the header; default 10 000
+ * @param {number} [opts.attributeFloorMs]    default 80
+ * @param {number} [opts.attributeCooldownMs] default 1000, in page time (`rec.at`)
+ * @param {number} [opts.windowMs]            default 10 000; 0 disables the roll
+ * @param {()=>number} [opts.now]             wall clock, for records without an `at`
+ * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
 export function createIncidentPipeline(opts) {
   const dir = opts.dir ?? '.sloptimize';
@@ -62,30 +103,62 @@ export function createIncidentPipeline(opts) {
   const send = opts.send;
   const regime = opts.regime ?? 'unknown';
   if (typeof send !== 'function') throw new Error('createIncidentPipeline: send is required');
+  const samplingIntervalUs = opts.samplingIntervalUs ?? SAMPLING_INTERVAL_US;
+  const floorMs = opts.attributeFloorMs ?? ATTRIBUTE_FLOOR_MS;
+  const cooldownMs = opts.attributeCooldownMs ?? ATTRIBUTE_COOLDOWN_MS;
+  const windowMs = opts.windowMs ?? PROFILE_WINDOW_MS;
+  const now = opts.now ?? Date.now;
+  const setT = opts.setTimeout ?? setTimeout, clearT = opts.clearTimeout ?? clearTimeout;
   mkdirSync(dir, { recursive: true });
 
   const clusters = new Map();   // key → {count, firstAt, lastAt, sample}
   let lastCreateStackHead = null;
   let profiling = false;
+  let lastRotateAt = -Infinity;  // page time of the last attributing rotation
+  let skippedSinceLast = 0;      // hitches the gate left unattributed since then
+  let windowTimer = null;
+
+  function arm() {
+    disarm();
+    if (!(windowMs > 0)) return;
+    windowTimer = setT(() => { windowTimer = null; return onRoll(); }, windowMs);
+    windowTimer?.unref?.();
+  }
+  function disarm() {
+    if (windowTimer !== null) clearT(windowTimer);
+    windowTimer = null;
+  }
 
   async function start() {
     await send('Profiler.enable');
-    await send('Profiler.setSamplingInterval', { interval: 500 });
+    await send('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
     await send('Profiler.start');
     profiling = true;
+    arm();
   }
   async function stop() {
+    disarm();
     if (!profiling) return;
     profiling = false;
     try { await send('Profiler.stop'); } catch { /* target gone */ }
   }
+  /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
+   *  measures UNREAD time. */
   async function rotateProfile() {
     if (!profiling) return null;
     try {
       const { profile } = await send('Profiler.stop');
       await send('Profiler.start');
+      arm();
       return profile;
     } catch { return null; }
+  }
+  /** The window expired unread: its samples serve no hitch — drop them. Runs
+   *  on the record chain so it never interleaves with a hitch's rotation. */
+  function onRoll() {
+    const run = async () => { if (profiling) await rotateProfile(); };
+    chain = chain.then(run, run).catch(() => {});
+    return chain;
   }
 
   function writeClusters() {
@@ -115,12 +188,31 @@ export function createIncidentPipeline(opts) {
       return;
     }
     if (rec.type === 'hitch') {
+      // The gate (header): a rotation only for a stall the sampler can name,
+      // and at most one per second of page time. A gated hitch is recorded
+      // and counted, not minted — it has no identity to cluster by, and a
+      // "cause" named from no samples is the very artifact the gate exists
+      // to end. (A page whose sampler is not running at all still mints an
+      // unattributed cluster below: that is a mode, not a rate.)
+      const t = Number.isFinite(Date.parse(rec.at)) ? Date.parse(rec.at) : now();
+      const gated = !(rec.frameMs >= floorMs) ? 'below-floor'
+        : t - lastRotateAt < cooldownMs ? 'cooldown' : null;
+      if (gated && profiling) {
+        skippedSinceLast++;
+        rec.topFrames = [];
+        rec.profileWindow = 'none';
+        rec.unattributed = gated;
+        appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
+        return;
+      }
       // Attribute: grab the current profiler chunk and take the heaviest
       // frames. The chunk spans up to the rotation window, so a freeze that
       // dominated its window names itself; the caveat rides the record.
+      lastRotateAt = t;
       const profile = await rotateProfile();
       rec.topFrames = topFramesFromProfile(profile);
       rec.profileWindow = 'rolling-chunk';
+      if (skippedSinceLast > 0) { rec.skippedSinceLast = skippedSinceLast; skippedSinceLast = 0; }
       const guess = rec.classification?.[0]?.guess;
       const top = guess === 'shader-compile' ? lastCreateStackHead
         : rec.topFrames[0] ? `${rec.topFrames[0].fn}@${rec.topFrames[0].url}` : null;
