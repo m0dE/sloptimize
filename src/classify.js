@@ -87,7 +87,16 @@ export function classifyHitch(h) {
       guess: 'gc-or-upload-by-elimination',
       confidence: h.memorySampled ? 'medium' : 'low',
       evidence: 'no counter moved and the render share is inconclusive'
-        + (gpu !== null ? `; the GPU took ${gpu.toFixed(1)}ms, so the drawing was not it` : '')
+        // Only RULE THE DRAWING OUT when the GPU was genuinely small. A
+        // frame of 125 ms with 56 ms on the GPU is not gpu-bound by the
+        // threshold above and is certainly not evidence that drawing was
+        // innocent - saying so was a confident sentence pointing the reader
+        // away from nearly half the frame. Above that, report the number and
+        // draw no conclusion from it, which is what the honest version of
+        // "inconclusive" looks like.
+        + (gpu === null ? ''
+          : gpu < h.frameMs * 0.25 ? `; the GPU took ${gpu.toFixed(1)}ms, so the drawing was not it`
+            : `; the GPU took ${gpu.toFixed(1)}ms of it, which is neither small nor most of the frame`)
         + (h.memorySampled ? '' : ' (performance.memory unavailable, downgrading)'),
     });
   }

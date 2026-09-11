@@ -118,3 +118,12 @@ test('and a host that does not, does not grow a field', () => {
   assert.ok(!('sections' in hitchWith({ hitch: {} })));
   assert.ok(!('sections' in hitchWith({ hitch: { sections: [] } })), 'nor for an empty list');
 });
+
+test('elimination does not clear the drawing when the GPU took half the frame', () => {
+  // 56ms of a 125ms frame is not gpu-bound by the 60% line, and is very far
+  // from evidence that drawing was innocent.
+  const [top] = classifyHitch({ frameMs: 125, medianMs: 8, insideRenderMs: 46, delta: {}, gpuMs: 56 });
+  assert.equal(top.guess, 'gc-or-upload-by-elimination');
+  assert.doesNotMatch(top.evidence, /the drawing was not it/);
+  assert.match(top.evidence, /neither small nor most of the frame/);
+});
