@@ -31,8 +31,12 @@
 // (`at`, and the catalogue's first/last); the footprint is what was going on.
 // The key is kept readable beside the id so a human — or a service re-deriving
 // ids after a vocabulary change — can see what was hashed. `v` versions the
-// derivation: a change to what goes into a key is a new version, never a
-// silent re-shuffle of old ids.
+// derivation: a change to how an existing key is SPELLED or hashed is a new
+// version, never a silent re-shuffle of old ids. A new SITE for records
+// whose key had none (`section:` in 0.4.5, `span:` in 0.4.9, tier 0's
+// `frame:`) is not: every key string keeps its id and its meaning, and an
+// unstamped record simply re-derives to the more specific key on read. A
+// bump re-hashes every id of every type and orphans every fix linked to one.
 //
 // Pure, dependency-free, browser and node: the same bytes hash to the same id
 // wherever the record is read.

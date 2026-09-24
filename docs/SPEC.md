@@ -383,10 +383,18 @@ a log that cannot say so cannot answer "how often does this happen" or
   number, the exact milliseconds or metres, the build, the machine.
 - `id` is FNV-1a 32 of `v<version>:<key>`, 8 hex characters — a dedupe key
   over thousands of causes, stable across runtimes, no dependency.
-- `v` versions the derivation. A change to what enters a key is a new
-  version, never a silent reshuffle of old ids; a reader re-derives a
-  record stamped with an older version and keeps one stamped with the
-  current one (the writer's word stands).
+- `v` versions the derivation. A change to how an existing key is spelled
+  or hashed is a new version, never a silent reshuffle of old ids; a
+  reader re-derives a record stamped with an older version and keeps one
+  stamped with the current one (the writer's word stands). A new SITE for
+  records whose key had none — `section:` (0.4.5), `span:` (0.4.9), tier
+  0's `frame:`/`unattributed` (ticket 20cd5dc2) — is not a new version: no key string
+  changes id or meaning, unstamped records re-derive to the more specific
+  key on read, and a bump would re-hash every id of every type and orphan
+  every fix linked by footprint. (Tier 0 stamps no footprint, so an old
+  attach ledger re-derives whole: its `hitch|?|long-script` rows become
+  per-cause rows, and a fix linked to that id keeps its fixes.jsonl line
+  but joins no catalogue row.)
 
 **Situation.** Time is not a facet of the cause; the game's STATE is. A
 hitch at the helm of a heavy machine with a copilot aboard in a firefight

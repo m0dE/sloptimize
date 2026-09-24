@@ -96,6 +96,26 @@ test('a tier-0 hitch keys on its top profiler frame: one row per cause, not one 
   assert.equal(footprintKey(hitch()), 'hitch|boot:shaders|long-script');
 });
 
+test('no version bump for the tier-0 site: every other id is unchanged, and an old attach ledger re-derives whole', () => {
+  assert.equal(FOOTPRINT_VERSION, 1);
+  // The id of a key string is what it was: tier-1 keys, and even the
+  // degenerate tier-0 key itself, hash as before.
+  assert.equal(footprintOf({ type: 'hitch', classification: [{ guess: 'long-script' }] }).id, '2e566fc3');
+  // But no tier-0 record derives to it any more: attach stamps no footprint,
+  // so a line 0.5.2 wrote — attributed, gated, or with no sampler — re-derives
+  // on read to a per-cause (or honestly unattributed) row.
+  const written052 = [
+    t0([{ fn: 'isTurnBanned', url: 'index-CNbvoNb_.js:1', selfMs: 2022 }]),
+    t0([], { unattributed: 'below-floor', profileWindow: 'none' }),
+    t0([], { unattributed: 'cooldown', profileWindow: 'none' }),
+    t0([]),
+  ];
+  for (const rec of written052) {
+    assert.equal(rec.footprint, undefined);
+    assert.notEqual(footprintOf(rec).id, '2e566fc3');
+  }
+});
+
 test('build hashes come off bundle names; ordinary names are kept', () => {
   const file = (url) => footprintKey(t0([{ fn: 'f', url }])).split('@')[1];
   assert.equal(file('index-CNbvoNb_.js:1'), 'index.js');           // vite/rollup
