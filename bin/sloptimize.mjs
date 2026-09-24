@@ -32,26 +32,44 @@ function readJsonl(name, limit = 50) {
   return lines.slice(-limit).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 }
 function out(obj, human) { console.log(json ? JSON.stringify(obj, null, 2) : human); }
+/** A value with its unit, or '—' when unmeasured — never "undefined". */
+const fmt = (v, unit = '') => (v === undefined || v === null ? '—' : `${v}${unit}`);
+/** `label value` pairs joined for one report line, the unmeasured ones left
+ *  out: a tier-0 profile carries only what attach can measure, and a field
+ *  it cannot is absent, not a dash in every run. */
+const fields = (pairs) => pairs.filter(([, v]) => v !== undefined && v !== null).map(([k, v, unit = '']) => `${k}${v}${unit}`).join('  ');
 
 if (cmd === 'report') {
   const profile = readJson('profile.json');
-  // 80 lines, not 20: heartbeats (1/min while a session is armed) share the
-  // ledger and must not crowd the actual incidents out of the report window.
-  const hitches = readJsonl('perf.jsonl', 80);
+  // The whole ledger once: the counts below are the LEDGER's (the catalogue
+  // at the bottom reads all of it anyway). The --json arrays stay the last
+  // 80 lines — heartbeats (1/min while a session is armed) share the ledger
+  // and must not crowd the incidents out — with the ledger's totals beside.
+  const ledger = readJsonl('perf.jsonl', Infinity);
+  const hitches = ledger.slice(-80);
   const marks = hitches.filter((h) => h.type === 'usermark');
   const auto = hitches.filter((h) => h.type === 'hitch');
   const jitters = hitches.filter((h) => h.type === 'jitter');
+  const totals = { hitches: 0, usermarks: 0, jitters: 0 };
+  for (const r of ledger) {
+    if (r.type === 'hitch') totals.hitches++;
+    else if (r.type === 'usermark') totals.usermarks++;
+    else if (r.type === 'jitter') totals.jitters++;
+  }
   const census = readJson('census.json');
-  if (json) { out({ profile, hitches: auto, usermarks: marks, jitters, census }); process.exit(0); }
+  if (json) { out({ profile, hitches: auto, usermarks: marks, jitters, totals, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
-  console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}`);
+  console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}${profile.tier !== undefined ? `  tier ${profile.tier}` : ''}`);
   const beats = hitches.filter((h) => h.type === 'heartbeat');
   const lastBeat = beats[beats.length - 1];
-  if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${lastBeat.medianFrameMs}ms p95 ${lastBeat.p95Ms}ms`);
-  if (profile.frame?.medianMs !== undefined) {
-    console.log(`  frame median ${profile.frame.medianMs}ms  p95 ${profile.frame.p95Ms}ms  (~${profile.frame.fps}fps)  inside-render ${profile.frame.insideRenderMs}ms`);
-  }
-  if (profile.render) console.log(`  calls ${profile.render.calls}  triangles ${profile.render.triangles}  programs ${profile.memory?.programs}`);
+  if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${fmt(lastBeat.medianFrameMs, 'ms')} p95 ${fmt(lastBeat.p95Ms, 'ms')}`);
+  const fr = profile.frame ?? {};
+  const frameLine = fields([['frame median ', fr.medianMs, 'ms'], ['p95 ', fr.p95Ms, 'ms'], ['(~', fr.fps, 'fps)'], ['inside-render ', fr.insideRenderMs, 'ms']]);
+  if (frameLine) console.log(`  ${frameLine}`);
+  // Tier 0 counts at the graphics API (every draw the page issued, shadow
+  // and post passes included); tier 1 reads the engine's own counters.
+  const renderLine = fields([['calls ', profile.render?.calls], ['triangles ', profile.render?.triangles], ['programs ', profile.memory?.programs]]);
+  if (renderLine) console.log(`  ${renderLine}${profile.tier === 0 ? '  (tier 0: counted at the graphics API, median frame)' : ''}`);
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
   // anyone at the keyboard. Twelve sections and the counters that moved
@@ -65,8 +83,9 @@ if (cmd === 'report') {
     const cnts = Object.entries(lastProf.counts ?? {});
     if (cnts.length) console.log(`    counts (${cnts.length}): ${cnts.slice(0, 12).map(([k, v]) => `${k} ${v}`).join('  ')}`);
   }
-  console.log(`  hitches recorded: ${auto.length} (showing last ${Math.min(auto.length, 20)})  usermarks: ${marks.length}`);
-  for (const h of auto.slice(-5)) {
+  const shown = auto.slice(-5);
+  console.log(`  hitches recorded: ${totals.hitches} (showing last ${shown.length})  usermarks: ${totals.usermarks}`);
+  for (const h of shown) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}`);
   }
   for (const m of marks.slice(-3)) {
@@ -76,7 +95,7 @@ if (cmd === 'report') {
   if (jitters.length) {
     // Coordinate jumps (SPEC §3.6): the unit or the camera landed off its own
     // trajectory. Listed apart from hitches — a snap at 60fps is not a slow frame.
-    console.log(`  jitters recorded: ${jitters.length} (showing last ${Math.min(jitters.length, 5)})`);
+    console.log(`  jitters recorded: ${totals.jitters} (showing last ${Math.min(jitters.length, 5)})`);
     for (const j of jitters.slice(-5)) {
       const shape = j.kind === 'oscillation' ? `oscillation ×${j.frames} amp ${j.amplitude}` : `snap ${j.units} [${(j.jump ?? []).join(', ')}]`;
       console.log(`  ↯ ${j.at} ${j.track} ${shape} in a ${j.dtMs}ms frame → ${j.classification?.[0]?.guess}: ${j.classification?.[0]?.evidence}`);
@@ -85,7 +104,7 @@ if (cmd === 'report') {
   // The catalogue's head: which causes recur most (SPEC §3.7). The whole
   // ledger, not the 80-line window — recurrence is the point.
   const { buildIssues, agoText } = await import('../src/history.js');
-  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity) });
+  const issues = buildIssues(ledger, { fixes: readJsonl('fixes.jsonl', Infinity) });
   if (issues.length) {
     console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
     for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
@@ -316,7 +335,6 @@ if (cmd === 'history' || cmd === 'fix') {
   const records = readJsonl('perf.jsonl', Infinity);
   const fixes = readJsonl('fixes.jsonl', Infinity);
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
-  const fmt = (v, unit = '') => (v === undefined ? '—' : `${v}${unit}`);
   const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${fmt(s.hitchesPerHour)}/h, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
   if (cmd === 'fix') {
     let commit = get('--commit');
