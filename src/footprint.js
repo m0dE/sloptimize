@@ -140,12 +140,41 @@ function mintSite(rec) {
   return ids.join(',');
 }
 
+/** A bundle's file name without its build hash — `index-CNbvoNb_.js` (vite,
+ *  rollup), `chunk-ABCD1234.js` (esbuild), `app.3f2a9b1c….js` (webpack) — so
+ *  a rebuild is not a new site. An 8-character token of lowercase letters
+ *  only is a word (`game-renderer.js`), not a hash, and stays. */
+export function stripBuildHash(file) {
+  return String(file ?? '').replace(/[-.]([A-Za-z0-9_-]{8}|[0-9a-f]{16,32})(?=(?:\.chunk)?\.m?js$)/,
+    (m, token) => (/^[a-z]+$/.test(token) ? m : ''));
+}
+
+/** The site tier 0's sampling profiler names (`rec.topFrames`, heaviest self
+ *  time first): `frame:<fn>@<file>`, the file without its line (a minified
+ *  bundle is all line 1, and any edit moves the rest) or its build hash —
+ *  the same apart-from-the-build rule `topFrameSite` applies to errors.
+ *  `unattributed` when the record carries the field but no frame: the gate
+ *  skipped the rotation (`rec.unattributed`) or the profiler returned
+ *  nothing. Its own row, never folded into a named cause. '' for a record
+ *  without the field (every tier-1 record). */
+function profilerSite(rec) {
+  if (!Array.isArray(rec.topFrames)) return '';
+  const f = rec.topFrames[0];
+  const fn = f && typeof f.fn === 'string' ? f.fn.trim() : '';
+  if (!fn) return 'unattributed';
+  const file = stripBuildHash(String(f.url ?? '').replace(/:\d+(:\d+)?$/, ''));
+  const scrub = (v) => v.replace(/[|,@]/g, '_').slice(0, 60);
+  return `frame:${scrub(fn)}${file ? `@${scrub(file)}` : ''}`;
+}
+
 /** The site of a browser hitch: the materials it minted when it minted any
  *  (a compile has a material), else the host's own attribution — the loop
  *  SECTION whose time was most above its baseline (`rec.sections`, written by
- *  a host that runs a per-frame profiler of its own). A long-script hitch
- *  with neither is one row per phase; with a section it is one row per cause,
- *  which is what makes a hundred players' "long-script in play" workable. */
+ *  a host that runs a per-frame profiler of its own) — else, on tier 0 where
+ *  the host says nothing, the profiler's top frame. A long-script hitch
+ *  with none of these is one row per phase; with a site it is one row per
+ *  cause, which is what makes a hundred players' "long-script in play"
+ *  workable. */
 function hitchSite(rec) {
   // A verdict the host's own measurement carried (classify.js `reclassify`)
   // names its site by that measurement: the cause IS the span. Ahead of the
@@ -161,7 +190,8 @@ function hitchSite(rec) {
   if (mints) return mints;
   const top = Array.isArray(rec.sections) ? rec.sections[0] : undefined;
   const label = top && typeof top.label === 'string' ? top.label.trim() : '';
-  return label ? `section:${label.replace(/[|,]/g, '_').slice(0, 60)}` : '';
+  if (label) return `section:${label.replace(/[|,]/g, '_').slice(0, 60)}`;
+  return profilerSite(rec);
 }
 
 /** Which way a jitter moved: vertical (a step, a ground clamp, a fall) or
@@ -247,6 +277,11 @@ function hitchSiteLabel(site) {
   if (!site) return '';
   if (site.startsWith('span:')) return ` · ${site.slice('span:'.length)}`;
   if (site.startsWith('section:')) return ` · ${site.slice('section:'.length)}`;
+  if (site.startsWith('frame:')) {
+    const [fn, file] = site.slice('frame:'.length).split('@');
+    return ` · ${fn}${file ? ` (${file})` : ''}`;
+  }
+  if (site === 'unattributed') return ' · unattributed';
   return ` · ${site.split(',').length} mint site(s)`;
 }
 

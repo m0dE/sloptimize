@@ -63,6 +63,51 @@ test('a long-script hitch keys on the host\'s own SECTION when it carries one, a
   assert.equal(odd.key.split('|').length, 4);
 });
 
+// Ticket 20cd5dc2: tier 0 (attach) carries its attribution as profiler
+// `topFrames`, none of the host's sources — and every tier-0 hitch in every
+// project keyed `hitch|?|long-script` (id 2e566fc3), one row for all causes.
+const t0 = (topFrames, extra = {}) => ({
+  type: 'hitch', at: '2026-09-20T10:00:00.000Z', frame: 900, frameMs: 180, medianMs: 48.5, longTaskMs: 150, tier: 0,
+  classification: [{ guess: 'long-script', confidence: 'low', evidence: 'e' }], topFrames, profileWindow: 'rolling-chunk', ...extra,
+});
+
+test('a tier-0 hitch keys on its top profiler frame: one row per cause, not one row per project', () => {
+  const banned = footprintOf(t0([{ fn: 'isTurnBanned', url: 'index-CNbvoNb_.js:1', selfMs: 2022 }, { fn: 'step', url: 'index-CNbvoNb_.js:1', selfMs: 40 }]));
+  const crowd = footprintOf(t0([{ fn: 'updateCrowd', url: 'index-CNbvoNb_.js:1', selfMs: 300 }]));
+  assert.notEqual(banned.id, crowd.id);
+  assert.notEqual(banned.id, '2e566fc3');
+  assert.equal(banned.key, 'hitch|?|long-script|frame:isTurnBanned@index.js');
+  // The occurrence stays out: another build's hash, another line, another
+  // self time, another runner-up — the same cause.
+  const rebuilt = footprintOf(t0([{ fn: 'isTurnBanned', url: 'index-Dq3xZ9_a.js:4812', selfMs: 90 }], { frameMs: 97 }));
+  assert.equal(rebuilt.id, banned.id);
+  // Same function name in another file is another site (three's `update` is not the game's).
+  assert.notEqual(footprintOf(t0([{ fn: 'update', url: 'three.module.js:3' }])).id, footprintOf(t0([{ fn: 'update', url: 'game.js:3' }])).id);
+  // A native frame has no url; separators in a name cannot break the key.
+  assert.equal(footprintKey(t0([{ fn: 'bufferSubData', url: '', selfMs: 8 }])), 'hitch|?|long-script|frame:bufferSubData');
+  assert.equal(footprintKey(t0([{ fn: 'a|b,c', url: 'x.js:1' }])).split('|').length, 4);
+  // A gated hitch (below the floor, in the cooldown) or a failed rotation has
+  // no frames: its own honest row, apart from every attributed cause.
+  assert.equal(footprintKey(t0([], { unattributed: 'cooldown' })), 'hitch|?|long-script|unattributed');
+  assert.equal(footprintKey(t0([])), 'hitch|?|long-script|unattributed');
+  // A host's own sources still win over the profiler's guess.
+  assert.equal(footprintKey(t0([{ fn: 'x', url: 'y.js:1' }], { sections: [{ label: 'sim', excessMs: 9, baselineMs: 1 }] })), 'hitch|?|long-script|section:sim');
+  // Tier-1 records (no topFrames at all) are unchanged.
+  assert.equal(footprintKey(hitch()), 'hitch|boot:shaders|long-script');
+});
+
+test('build hashes come off bundle names; ordinary names are kept', () => {
+  const file = (url) => footprintKey(t0([{ fn: 'f', url }])).split('@')[1];
+  assert.equal(file('index-CNbvoNb_.js:1'), 'index.js');           // vite/rollup
+  assert.equal(file('vendor-DX8k-2Lq.mjs:1'), 'vendor.mjs');
+  assert.equal(file('app.3f2a9b1c4d5e6f708192.js:9'), 'app.js');     // webpack contenthash
+  assert.equal(file('main.3f2a9b1c.chunk.js:9'), 'main.chunk.js');
+  assert.equal(file('chunk-ABCD1234.js:1'), 'chunk.js');             // esbuild
+  assert.equal(file('game.min.js:1'), 'game.min.js');
+  assert.equal(file('three.module.js:1'), 'three.module.js');
+  assert.equal(file('game-renderer.js:1'), 'game-renderer.js');
+});
+
 test('every incident type has a footprint; heartbeats, arm-probes and settled waits have none', () => {
   assert.equal(footprintKey({ type: 'warm', tag: 'post', kind: 'batched', phase: 'boot:shaders', worstBatchMs: 2350 }), 'warm|post|batched|boot:shaders');
   assert.equal(footprintKey({ type: 'gpu-stall', phase: 'page-load', queueDoneMs: 878 }), 'gpu-stall|page-load');
@@ -109,6 +154,9 @@ test('describeFootprint gives each type its glyph and a short label', () => {
   assert.deepEqual(describeFootprint('jitter|unit|snap|play|snap|horizontal'), { glyph: '↯', label: 'jitter · unit snap · snap · horizontal', phase: 'play', ctx: {} });
   assert.deepEqual(describeFootprint('hitch|boot:shaders|long-script|a@b,c@d'), { glyph: '⚡', label: 'hitch · long-script · 2 mint site(s)', phase: 'boot:shaders', ctx: {} });
   assert.deepEqual(describeFootprint('hitch|play|long-script|section:sim.world.greenery'), { glyph: '⚡', label: 'hitch · long-script · sim.world.greenery', phase: 'play', ctx: {} });
+  assert.deepEqual(describeFootprint('hitch|?|long-script|frame:isTurnBanned@index.js'), { glyph: '⚡', label: 'hitch · long-script · isTurnBanned (index.js)', phase: '?', ctx: {} });
+  assert.equal(describeFootprint('hitch|?|long-script|frame:bufferSubData').label, 'hitch · long-script · bufferSubData');
+  assert.equal(describeFootprint('hitch|?|long-script|unattributed').label, 'hitch · long-script · unattributed');
   assert.equal(describeFootprint('warm|post|batched|boot:shaders').glyph, '🔥');
   assert.equal(describeFootprint('gpu-stall|page-load').label, 'gpu-process stall');
 });
