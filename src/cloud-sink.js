@@ -175,7 +175,9 @@ export function createCloudSink(opts = {}) {
 }
 
 const SESSION_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-function mintSession() {
+/** A session id: 12 base-62 characters. Shared with tier 0's attach
+ *  pipeline, whose session is one attach. */
+export function mintSession() {
   const bytes = new Uint8Array(12);
   const c = globalThis.crypto;
   if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);

@@ -84,7 +84,12 @@ if (cmd === 'report') {
     if (cnts.length) console.log(`    counts (${cnts.length}): ${cnts.slice(0, 12).map(([k, v]) => `${k} ${v}`).join('  ')}`);
   }
   const shown = auto.slice(-5);
-  console.log(`  hitches recorded: ${totals.hitches} (showing last ${shown.length})  usermarks: ${totals.usermarks}`);
+  // A count is a sample of one run of one length: the rate over the time
+  // the recorder actually ran is what two runs can be compared on.
+  const { recordedMs, buildIssues, agoText } = await import('../src/history.js');
+  const recMin = recordedMs(ledger) / 60_000;
+  const rate = totals.hitches && recMin > 0 ? `  over ${+recMin.toFixed(1)} min recorded (${+(totals.hitches / Math.max(recMin, 1)).toFixed(1)}/min)` : '';
+  console.log(`  hitches recorded: ${totals.hitches} (showing last ${shown.length})  usermarks: ${totals.usermarks}${rate}`);
   for (const h of shown) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}`);
   }
@@ -103,7 +108,6 @@ if (cmd === 'report') {
   }
   // The catalogue's head: which causes recur most (SPEC §3.7). The whole
   // ledger, not the 80-line window — recurrence is the point.
-  const { buildIssues, agoText } = await import('../src/history.js');
   const issues = buildIssues(ledger, { fixes: readJsonl('fixes.jsonl', Infinity) });
   if (issues.length) {
     console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
@@ -138,15 +142,21 @@ if (cmd === 'issues') {
     for (const i of rows) console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}] ${i.source}  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.fixCount ? `  fixes ${i.fixCount}` : ''}`);
     process.exit(0);
   }
-  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), {
-    fixes: readJsonl('fixes.jsonl', Infinity), from: get('--from'), to: get('--to'), includeAutomated: args.includes('--all'),
-  });
+  // `--phase` / `--build` read one phase or one build — a spawn flood and a
+  // steady-state sample in one ledger are two catalogues — and every row's
+  // rate is over the recorded minutes of that same scope.
+  const { issueScopeMinutes } = await import('../src/history.js');
+  const records = readJsonl('perf.jsonl', Infinity);
+  const scope = { from: get('--from'), to: get('--to'), phase: get('--phase'), build: get('--build'), includeAutomated: args.includes('--all') };
+  const issues = buildIssues(records, { fixes: readJsonl('fixes.jsonl', Infinity), ...scope });
   if (json) { out(issues); process.exit(0); }
-  if (issues.length === 0) { console.log('no incidents on the ledger yet'); process.exit(4); }
+  const scoped = `${scope.phase ? ` · phase ${scope.phase}` : ''}${scope.build ? ` · build ${scope.build}` : ''}`;
+  if (issues.length === 0) { console.log(scoped ? `no incidents in this scope${scoped}` : 'no incidents on the ledger yet'); process.exit(4); }
+  console.log(`${issues.length} footprint${issues.length === 1 ? '' : 's'} · ${issueScopeMinutes(records, scope)} min recorded${scoped}`);
   const only = get('--fp');
   for (const i of issues) {
     if (only && i.id !== only) continue;
-    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}`);
+    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)}(${i.perMin}/min) ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}`);
     if (only || issues.length <= 8) {
       console.log(`      key ${i.key}`);
       if (i.sample) console.log(`      last verdict: ${i.sample.guess} — ${i.sample.evidence}`);
@@ -335,7 +345,11 @@ if (cmd === 'history' || cmd === 'fix') {
   const records = readJsonl('perf.jsonl', Infinity);
   const fixes = readJsonl('fixes.jsonl', Infinity);
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
-  const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${fmt(s.hitchesPerHour)}/h, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
+  // The rate, the recorded time it is over, and — when the window holds
+  // more than one run — how many and their spread: two runs of the same
+  // bytes differ by a quarter, and one number hides that.
+  const spread = (s) => `${s.recordedMin !== undefined ? ` over ${s.recordedMin} min` : ''}${s.runs >= 2 && s.hitchesPerHourRange ? ` · ${s.runs} runs ${s.hitchesPerHourRange[0]}–${s.hitchesPerHourRange[1]}/h` : ''}`;
+  const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${fmt(s.hitchesPerHour)}/h${spread(s)}, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
   if (cmd === 'fix') {
     let commit = get('--commit');
     if (!commit) {
@@ -441,6 +455,9 @@ if (cmd === 'attach') {
     dir: get('--dir') ?? '.sloptimize',
     headless: args.includes('--headless'),
     minHitchMs: get('--min-hitch-ms') ? Number(get('--min-hitch-ms')) : undefined,
+    // The bundle this run measured — tier-0 lines carry it, so `history`
+    // and the Optimizations strips have builds (the page may also name one).
+    build: get('--build'),
   });
   console.log('[attach] recording — Ctrl+C to stop');
   // Any signal a wrapper sends stops the sampler in the page before we go;
@@ -462,5 +479,5 @@ if (cmd === 'attach') {
   await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless] [--build <id>]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase <p>] [--build <id>] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

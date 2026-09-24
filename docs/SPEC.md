@@ -373,7 +373,11 @@ a log that cannot say so cannot answer "how often does this happen" or
 
 - `key` is readable and is exactly what was hashed: the record type, the
   phase, the closed-vocabulary verdict, whatever identifies the SITE (a
-  hitch's minted `material@object` pairs, sorted and deduped; a jitter's
+  hitch's minted `material@object` pairs, sorted and deduped; else the
+  host's attributed span or loop section; else — tier 0, where the host
+  says nothing — the sampling profiler's top self-time frame as
+  `frame:<fn>@<file>`, the file without its line or build hash, and
+  `unattributed` for a tier-0 hitch the sampler did not name; a jitter's
   track, kind and dominant axis — vertical vs horizontal; a warm's tag and
   kind), and the host's situation (below). Never the timestamp, the frame
   number, the exact milliseconds or metres, the build, the machine.
@@ -409,8 +413,15 @@ unless asked for. A fix names what it addresses:
 issue" by that join, and the before/after windows of each say whether it
 landed.
 
+Every row also carries `perMin`: its count over the RECORDED minutes of
+the same scope (the time the recorder ran — spaces between ledger lines,
+none counted past five minutes — never the calendar), so runs of different
+lengths compare. `phase` and `build` narrow the scope, the recorded time
+included: a spawn flood and a steady-state sample in one ledger are read
+one at a time (`sloptimize issues --phase steady`).
+
 Surfaces: `sloptimize issues` (the catalogue; `--fp <id>` for one issue's
-history), `sloptimize report` (the top five), every `watch` wake line
+history; `--phase`/`--build` for one scope), `sloptimize report` (the top five), every `watch` wake line
 (`fp=a3f92c1d ×7` — the count is the ledger's, seeded at arm), and the
 debugger's **Issues** tab: every incident type grouped by footprint, most
 frequent first, with `×N` and `last 3h ago`; picking a row opens its
@@ -829,7 +840,14 @@ node and the page):
 - **Timeline** — `perf.jsonl` in equal time buckets: frame p95 and median,
   draw calls / triangles / programs (medians of the heartbeats, which carry
   the counters for this reason), hitch count and worst frame per bucket,
-  and the build that ran. Plus one measured window per build. CLI:
+  and the build that ran. Plus one measured window per build, whose
+  hitch rate is over the time the recorder RAN in it (two ten-minute
+  sessions a day apart are twenty minutes, not a day) and which says how
+  many RUNS it stands on (a session id each, else each stretch without a
+  five-minute silence) and, from two runs up, the spread of their rates —
+  byte-identical bundles measured 82 and 104 hitches in two runs, so one
+  build's number is a sample, and the strips draw the spread as a whisker.
+  CLI:
   `sloptimize history [--json] [--buckets N]`; MCP: `get_history`.
 - **Fix ledger** — `.sloptimize/fixes.jsonl`, append-only, one record per
   verified fix: `title`, `issue`, `solution`, `commit`, `files`, `at`, and

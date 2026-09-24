@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createIncidentPipeline } from '../src/incident-pipeline.mjs';
+import { createIncidentPipeline, HEARTBEAT_MS } from '../src/incident-pipeline.mjs';
 
 const profileWith = (fn) => ({
   nodes: [{ id: 1, callFrame: { functionName: fn, url: 'https://x/game.js', lineNumber: 9 } }],
@@ -162,4 +162,61 @@ test('an unread window rolls itself over so Profiler.stop never serializes a ses
   assert.ok(cleared.includes(3));
   await timers[2].fn();
   assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 3, 'a roll after stop is a no-op');
+});
+
+// ── Runs, builds and phases (ticket 20cd5dc2, issue 5): a tier-0 ledger had
+// no build, no session and no heartbeat, so `history` saw no builds, a rate
+// had no recorded time to be over, and a spawn flood and a steady sample
+// shared one bucket.
+test('every line carries the attach session; --build stamps lines that name none; a page-named build stands', async () => {
+  const h = harness({ build: 'index-CNbvoNb_' });
+  await h.p.start();
+  await h.p.onRecord({ type: 'armed', at: atMs(0), url: 'x' });
+  await h.p.onRecord(hitch(atMs(1000)));
+  await h.p.onRecord({ ...hitch(atMs(3000)), build: 'from-page' });
+  await h.p.onRecord({ type: 'gpu-create', at: atMs(3500), fn: 'linkProgram', stack: '' });
+  const l = h.lines();
+  assert.equal(new Set(l.map((r) => r.session)).size, 1);
+  assert.match(l[0].session, /^[A-Za-z0-9]{12}$/);
+  assert.deepEqual(l.map((r) => r.build), ['index-CNbvoNb_', 'index-CNbvoNb_', 'from-page', 'index-CNbvoNb_']);
+  const other = harness();
+  await other.p.onRecord(hitch());
+  assert.notEqual(other.lines()[0].session, l[0].session);
+  assert.equal(other.lines()[0].build, undefined);     // no --build: none invented
+});
+
+test('a page-declared situation is canonicalised onto the record, the way tier 1 stamps ctx', async () => {
+  const h = harness();
+  await h.p.onRecord({ ...hitch(), ctx: { stance: 'helm', crew: 'copilot', empty: '' } });
+  assert.equal(h.lines()[0].ctx, 'crew=copilot,stance=helm');
+});
+
+const prof = (ms, extra = {}) => ({ type: 'profile', at: atMs(ms), frame: { medianMs: 16, p95Ms: 30, fps: 63 }, render: { calls: 300, triangles: 4e6 }, tier: 0, ...extra });
+
+test('heartbeats: one on the first profile line, then one a minute — recording time the ledger can measure', async () => {
+  assert.equal(HEARTBEAT_MS, 60_000);
+  const h = harness({ regime: 'hardware', build: 'b1' });
+  for (let s = 0; s <= 130; s += 2) await h.p.onRecord(prof(s * 1000));
+  const beats = h.lines().filter((r) => r.type === 'heartbeat');
+  assert.deepEqual(beats.map((b) => b.at), [atMs(0), atMs(60_000), atMs(120_000)]);
+  assert.deepEqual({ ...beats[0], session: undefined }, { type: 'heartbeat', at: atMs(0), medianFrameMs: 16, p95Ms: 30, calls: 300, triangles: 4e6,
+    tier: 0, regime: 'hardware', build: 'b1', session: undefined });
+  assert.equal(typeof beats[0].session, 'string');
+  // profile.json is still written from every line.
+  assert.equal(JSON.parse(readFileSync(join(h.dir, 'profile.json'), 'utf8')).render.calls, 300);
+});
+
+test('a phase change closes the old phase and opens the new one; stop closes the last', async () => {
+  const h = harness();
+  await h.p.start();
+  await h.p.onRecord(prof(0, { phase: 'spawn' }));
+  await h.p.onRecord(prof(30_000, { phase: 'spawn' }));
+  await h.p.onRecord(prof(32_000, { phase: 'steady' }));
+  await h.p.onRecord(prof(40_000, { phase: 'steady' }));
+  await h.p.stop();
+  const beats = h.lines().filter((r) => r.type === 'heartbeat').map((b) => [b.at, b.phase]);
+  assert.deepEqual(beats, [[atMs(0), 'spawn'], [atMs(30_000), 'spawn'], [atMs(32_000), 'steady'], [atMs(40_000), 'steady']]);
+  // Nothing to close twice.
+  await h.p.stop();
+  assert.equal(h.lines().filter((r) => r.type === 'heartbeat').length, 4);
 });

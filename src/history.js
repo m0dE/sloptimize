@@ -35,6 +35,71 @@ function stamped(records) {
   return out;
 }
 
+/** A silence longer than this between two ledger lines is not recording
+ *  time. An armed recorder writes a heartbeat a minute (tier 1 posts them,
+ *  tier 0's attach writes them), so five minutes of nothing is a closed
+ *  tab, a stopped attach, a night — never a quiet game. */
+export const RECORDING_GAP_MS = 5 * 60_000;
+
+/**
+ * The wall time the recorder was RUNNING inside [from, to]: the sum of the
+ * spaces between consecutive ledger lines (any type — every line proves the
+ * recorder was live), each counted only up to RECORDING_GAP_MS; a finite
+ * window's edges count by the same rule. A rate is over this, never over
+ * the calendar: a build recorded in two ten-minute sessions a day apart
+ * was measured for twenty minutes, not a day.
+ */
+export function recordedMs(records, from = -Infinity, to = Infinity) {
+  const ts = [];
+  for (const { t } of stamped(records)) if (t >= from && t <= to) ts.push(t);
+  if (ts.length === 0) return 0;
+  ts.sort((a, b) => a - b);
+  let ms = 0;
+  const add = (gap) => { if (gap > 0 && gap <= RECORDING_GAP_MS) ms += gap; };
+  if (Number.isFinite(from)) add(ts[0] - from);
+  for (let i = 1; i < ts.length; i++) add(ts[i] - ts[i - 1]);
+  if (Number.isFinite(to)) add(to - ts[ts.length - 1]);
+  return ms;
+}
+
+/**
+ * The RUNS inside [from, to], oldest first: one per `session` id where the
+ * lines carry one (a tab's lifetime, one attach), else each stretch of
+ * lines without a RECORDING_GAP_MS silence. A run with no evidence (an
+ * armed line and nothing after it) is not a run. Each: `{ fromMs, toMs,
+ * recordedMs, hitches }` — what a build's spread is made of.
+ */
+export function runsOf(records, from = -Infinity, to = Infinity) {
+  const bySession = new Map(), loose = [];
+  for (const x of stamped(records)) {
+    if (x.t < from || x.t > to) continue;
+    const id = x.r.session;
+    if (typeof id === 'string' && id) (bySession.get(id) ?? bySession.set(id, []).get(id)).push(x);
+    else loose.push(x);
+  }
+  const groups = [...bySession.values()];
+  loose.sort((a, b) => a.t - b.t);
+  let cur = [];
+  for (const x of loose) {
+    if (cur.length && x.t - cur[cur.length - 1].t > RECORDING_GAP_MS) { groups.push(cur); cur = []; }
+    cur.push(x);
+  }
+  if (cur.length) groups.push(cur);
+  const runs = [];
+  for (const g of groups) {
+    if (!g.some(({ r }) => EVIDENCE.has(r.type))) continue;
+    const recs = g.map(({ r }) => r);
+    let lo = Infinity, hi = -Infinity;
+    for (const { t } of g) { if (t < lo) lo = t; if (t > hi) hi = t; }
+    runs.push({ fromMs: lo, toMs: hi, recordedMs: recordedMs(recs),
+      hitches: recs.filter((r) => r.type === 'hitch' && typeof r.frameMs === 'number').length });
+  }
+  return runs.sort((a, b) => a.fromMs - b.fromMs);
+}
+
+/** Hours for a rate: never under a minute, so one line is not ∞/h. */
+const rateHours = (ms) => Math.max(ms / 3_600_000, 1 / 60);
+
 /** The counters a heartbeat may carry (INTEGRATION.md §2: calls/triangles/
  *  programs ride the beat since 0.3 — older beats simply have none). Absent
  *  means unmeasured, never zero. */
@@ -83,9 +148,20 @@ export function summarizeWindow(records, from, to) {
       jitters++;
     }
   }
-  const hours = Math.max((to - from) / 3_600_000, 1 / 60);
+  // Rates are over the time the recorder RAN in the window, not its length
+  // (see recordedMs); `runs` and the spread of the per-run rates say how
+  // many samples the one number stands on — two runs of the same bytes
+  // differ by a quarter (ticket 20cd5dc2), and a single rate hides that.
+  const recMs = recordedMs(records, from, to);
+  const hours = rateHours(recMs);
   const s = { from: new Date(from).toISOString(), to: new Date(to).toISOString(), beats: beats.length, hitches,
-    hitchesPerHour: +(hitches / hours).toFixed(1) };
+    hitchesPerHour: +(hitches / hours).toFixed(1), recordedMin: +(recMs / 60_000).toFixed(1) };
+  const runs = runsOf(records, from, to);
+  if (runs.length) s.runs = runs.length;
+  if (runs.length >= 2) {
+    const rates = runs.map((r) => r.hitches / rateHours(r.recordedMs));
+    s.hitchesPerHourRange = [+Math.min(...rates).toFixed(1), +Math.max(...rates).toFixed(1)];
+  }
   if (p95s.length) s.p95Ms = median(p95s);
   if (meds.length) s.medianMs = median(meds);
   for (const k of BEAT_COUNTERS) if (counters[k].length) s[k] = median(counters[k]);
@@ -210,6 +286,7 @@ export function buildHistory(records, opts = {}) {
     const s = summarizeWindow(records, b0, b1);
     delete s.hitchesPerHour;                       // a bucket is a slice, not a rate
     delete s.jittersPerHour;
+    delete s.runs; delete s.hitchesPerHourRange;
     const inBucket = measured.filter(({ t }) => t >= b0 && t <= b1);
     const build = inBucket.map(({ r }) => r.build).filter(Boolean).pop();
     if (build) s.build = build;
@@ -284,17 +361,19 @@ export function buildFix(records, opts = {}) {
  * their footprint; older lines are derived here, so the catalogue reaches back
  * to before footprints existed.
  *
- * `from`/`to` scope the occurrences counted (ms or ISO; either end open);
- * `now` is for `lastAgoMs`. Sorted most-frequent first; ties by most recent.
+ * `from`/`to` scope the occurrences counted (ms or ISO; either end open),
+ * `phase` and `build` narrow them to one of each (see issueScope); `perMin`
+ * is the row's count over the scope's recorded minutes. `now` is for
+ * `lastAgoMs`. Sorted most-frequent first; ties by most recent.
  */
 export function buildIssues(records, opts = {}) {
-  const lo = opts.from !== undefined && opts.from !== null && opts.from !== '' ? asMs(opts.from) : -Infinity;
-  const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
   const now = opts.now ?? Date.now();
+  const inScope = issueScope(opts);
   const groups = new Map();
+  const scoped = [];
   for (const { t, r } of stamped(records)) {
-    if (t < lo || t > hi) continue;
-    if (r.automated === true && opts.includeAutomated !== true) continue;   // a robot's session is not a player's issue
+    if (!inScope(t, r)) continue;
+    scoped.push(r);
     const fp = footprintOf(r);
     if (!fp) continue;
     let g = groups.get(fp.id);
@@ -312,12 +391,15 @@ export function buildIssues(records, opts = {}) {
     if (w !== undefined && (g.worst === undefined || w.value > g.worst.value)) g.worst = w;
   }
   const fixes = (opts.fixes ?? []).filter((f) => Array.isArray(f.footprints) && f.footprints.length);
+  // Occurrences per RECORDED minute of the same scope — a phase's rate is
+  // over the phase's own time — so runs of different lengths compare.
+  const minutes = rateHours(recordedMs(scoped)) * 60;
   const out = [];
   for (const g of groups.values()) {
     const linked = fixes.filter((f) => f.footprints.includes(g.id)).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
     out.push({
       id: g.id, key: g.key, type: g.type, glyph: g.glyph, label: g.label, phase: g.phase, ctx: g.ctx,
-      count: g.count,
+      count: g.count, perMin: +(g.count / minutes).toFixed(2),
       first: new Date(g.firstMs).toISOString(), last: new Date(g.lastMs).toISOString(),
       lastAgoMs: Math.max(0, now - g.lastMs),
       builds: [...g.builds],
@@ -328,6 +410,33 @@ export function buildIssues(records, opts = {}) {
     });
   }
   return out.sort((a, b) => b.count - a.count || Date.parse(b.last) - Date.parse(a.last));
+}
+
+/** The catalogue's scope as a predicate over (ms, record): the date range
+ *  (`from`/`to`, ms or ISO, either end open), robots left out unless
+ *  `includeAutomated`, and — when given — one `phase` (a record with none is
+ *  in '?', the phase its key names) and one `build`. Every line is scoped,
+ *  not only incidents: heartbeats carry phase and build, so a scoped rate
+ *  is over the scope's own recorded time. */
+function issueScope(opts) {
+  const lo = opts.from !== undefined && opts.from !== null && opts.from !== '' ? asMs(opts.from) : -Infinity;
+  const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
+  const phase = opts.phase !== undefined && opts.phase !== null && opts.phase !== '' ? String(opts.phase) : undefined;
+  const build = opts.build !== undefined && opts.build !== null && opts.build !== '' ? String(opts.build) : undefined;
+  return (t, r) => {
+    if (t < lo || t > hi) return false;
+    if (r.automated === true && opts.includeAutomated !== true) return false;   // a robot's session is not a player's issue
+    if (phase !== undefined && (r.phase ?? '?') !== phase) return false;
+    if (build !== undefined && r.build !== build) return false;
+    return true;
+  };
+}
+
+/** Recorded minutes in the catalogue's scope (see issueScope) — the
+ *  denominator of every row's `perMin`. */
+export function issueScopeMinutes(records, opts = {}) {
+  const inScope = issueScope(opts);
+  return +(recordedMs(stamped(records).filter(({ t, r }) => inScope(t, r)).map(({ r }) => r)) / 60_000).toFixed(1);
 }
 
 /** The one number that says how bad an occurrence was, with its unit. */

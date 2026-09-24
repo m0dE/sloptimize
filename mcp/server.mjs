@@ -30,7 +30,7 @@ const TOOLS = [
   { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
     inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
   { name: 'get_issues', description: 'The issue catalogue (SPEC §3.7): every incident type on the ledger grouped by FOOTPRINT — the identity of a cause (type, phase, verdict, site, the game’s situation), never its time — with occurrences, first/last seen, builds, worst, the last verdict, and the fixes applied to it. Read this before proposing a fix: an issue with a fix already recorded is not new.',
-    inputSchema: { type: 'object', properties: { fp: { type: 'string', description: 'one footprint id' }, from: { type: 'string', description: 'ISO lower bound' }, to: { type: 'string', description: 'ISO upper bound' }, includeAutomated: { type: 'boolean', description: 'count robots’ sessions too (default false)' }, limit: { type: 'number', description: 'max rows (default 50)' },
+    inputSchema: { type: 'object', properties: { fp: { type: 'string', description: 'one footprint id' }, from: { type: 'string', description: 'ISO lower bound' }, to: { type: 'string', description: 'ISO upper bound' }, phase: { type: 'string', description: 'one phase only (\'?\' = records with none); the rate is over that phase\'s recorded time' }, build: { type: 'string', description: 'one build only' }, includeAutomated: { type: 'boolean', description: 'count robots’ sessions too (default false)' }, limit: { type: 'number', description: 'max rows (default 50)' },
       cloud: { type: 'boolean', description: 'read the cloud catalogue (every player, every build) instead of this machine\'s ledger — requires SLOPTIMIZE_KEY/SLOPTIMIZE_ENDPOINT' },
       preset: { type: 'string', description: 'cloud only: 24h | 7d | 30d' }, source: { type: 'string', description: 'cloud only: filter by source (client|server)' }, kind: { type: 'string', description: 'cloud only: filter by incident kind' } } } },
   { name: 'record_fix', description: 'Append a fix report to .sloptimize/fixes.jsonl: title, issue, solution, commit, the FOOTPRINTS it addresses (from get_issues — this is how the Issues tab shows which fixes were applied to an issue), and MEASURED before/after windows of the ledger (default: the previous build vs the latest build with evidence; or name a build / an <ISO>..<ISO> range). Call this after verifying a perf fix — never with numbers of your own.',
@@ -38,7 +38,7 @@ const TOOLS = [
       files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
       before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
-    inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' } }, required: ['url'] } },
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' }, build: { type: 'string', description: 'the bundle this run measures — stamped on every line so get_history can compare builds' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
     inputSchema: { type: 'object', properties: {} } },
 ];
@@ -84,9 +84,14 @@ async function callTool(name, args = {}) {
       } catch (e) { return { error: e.message }; }
     }
     const { buildIssues } = await import('../src/history.js');
-    const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity), from: args.from, to: args.to, includeAutomated: args.includeAutomated === true });
+    const { issueScopeMinutes } = await import('../src/history.js');
+    const records = readJsonl('perf.jsonl', Infinity);
+    const scope = { from: args.from, to: args.to, phase: args.phase, build: args.build, includeAutomated: args.includeAutomated === true };
+    const issues = buildIssues(records, { fixes: readJsonl('fixes.jsonl', Infinity), ...scope });
     const rows = args.fp ? issues.filter((i) => i.id === args.fp) : issues.slice(0, args.limit ?? 50);
-    return { footprints: issues.length, occurrences: issues.reduce((n, i) => n + i.count, 0), issues: rows };
+    // Counts are one run's sample; `perMin` on each row (over recordedMin)
+    // is what two runs of different lengths compare on.
+    return { footprints: issues.length, occurrences: issues.reduce((n, i) => n + i.count, 0), recordedMin: issueScopeMinutes(records, scope), issues: rows };
   }
   if (name === 'record_fix') {
     const { buildFix } = await import('../src/history.js');
@@ -100,7 +105,7 @@ async function callTool(name, args = {}) {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {} });
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build });
     return { ok: true, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {

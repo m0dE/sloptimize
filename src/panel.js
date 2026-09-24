@@ -57,8 +57,10 @@ const H = (s) => `<div style="letter-spacing:1px;color:${C.accent};font-size:11p
  *  a column `cw` wide. `kind` line|bars. Values may be undefined (unmeasured
  *  → a gap, never a zero). Ceiling = 1.5 × the 90th percentile, so one 500s
  *  freeze cannot flatten a week of 17ms. `marks` are the indices to hairline
- *  (the builds that shipped a fix). */
-function strip(label, unit, values, kind, marks, cw = W) {
+ *  (the builds that shipped a fix). `ranges` (bars only), per build, the
+ *  [min, max] of its per-run values when it was recorded in more than one
+ *  run — drawn as a whisker, so one noisy sample never reads as the build. */
+function strip(label, unit, values, kind, marks, cw = W, ranges = []) {
   const n = values.length, xw = (cw - PAD_L - PAD_R) / Math.max(n, 1);
   const known = values.filter((v) => typeof v === 'number').sort((a, b) => a - b);
   if (known.length === 0) return `<g><text x="${PAD_L}" y="${STRIP_H / 2}" fill="${C.mute}" font-size="10">${label}: unmeasured</text></g>`;
@@ -82,6 +84,11 @@ function strip(label, unit, values, kind, marks, cw = W) {
     values.forEach((v, i) => {
       if (typeof v !== 'number' || v <= 0) return;
       drawn += `<rect x="${(x(i) + 1).toFixed(1)}" y="${y(v).toFixed(1)}" width="${Math.max(xw - 2, 1).toFixed(1)}" height="${(bottom - y(v)).toFixed(1)}" fill="${C.warn}" rx="1"/>`;
+    });
+    ranges.forEach((r, i) => {
+      if (!Array.isArray(r) || typeof r[0] !== 'number' || typeof r[1] !== 'number') return;
+      const cx = (x(i) + xw / 2).toFixed(1), cap = Math.min(xw / 4, 4);
+      drawn += `<path class="sl-range" d="M${cx} ${y(r[0]).toFixed(1)} V${y(r[1]).toFixed(1)} M${(x(i) + xw / 2 - cap).toFixed(1)} ${y(r[1]).toFixed(1)} h${(2 * cap).toFixed(1)} M${(x(i) + xw / 2 - cap).toFixed(1)} ${y(r[0]).toFixed(1)} h${(2 * cap).toFixed(1)}" stroke="${C.ink}" stroke-opacity="0.7" stroke-width="1" fill="none"/>`;
     });
   }
   // Past the ceiling: drawn at the ceiling, flagged with a caret.
@@ -145,8 +152,8 @@ export function stripsSvg(h) {
     ['frame p95', 'ms', b.map((k) => k.p95Ms), 'line'],
     ...(hasBody ? [['frame body (host loop)', 'ms', b.map((k) => k.bodyMs), 'line']] : []),
     ['draw calls', '', b.map((k) => k.calls), 'line'],
-    ['hitches/h', '', b.map((k) => k.hitchesPerHour), 'bars'],
-  ].map(([label, unit, values, kind], c) => `<g transform="translate(${(c * cw).toFixed(1)} 0)">${strip(label, unit, values, kind, marks, cw)}</g>`).join('');
+    ['hitches/h', '', b.map((k) => k.hitchesPerHour), 'bars', b.map((k) => (k.runs >= 2 ? k.hitchesPerHourRange : undefined))],
+  ].map(([label, unit, values, kind, ranges], c) => `<g transform="translate(${(c * cw).toFixed(1)} 0)">${strip(label, unit, values, kind, marks, cw, ranges)}</g>`).join('');
   const xs = Array.from({ length: cols }, (_, c) => `<line x1="0" x2="0" y1="4" y2="${STRIP_H - 6}" transform="translate(${(c * cw).toFixed(1)} 0)"/>`).join('');
   const first = b[0].build, last = b[b.length - 1].build;
   const svg = `<svg id="sl-strips" viewBox="0 0 ${W} ${STRIP_H + 12}" width="100%" style="display:block;font-family:${FONT}">
@@ -565,7 +572,7 @@ export function createPanel(host) {
       x.setAttribute('visibility', 'visible');
       const k = b[i];
       const secs = k.sections ? Object.entries(k.sections).slice(0, 4).map(([n, v]) => `${n} ${num(v)}`).join(' · ') : '';
-      read.textContent = `build ${k.build}  ${when(k.from)} → ${when(k.to)}  p95 ${num(k.p95Ms, 'ms')}${typeof k.bodyMs === 'number' ? `  body ${num(k.bodyMs, 'ms')}` : ''}  calls ${num(k.calls)}  hitches/h ${num(k.hitchesPerHour)}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${secs ? `  │ ${secs}` : ''}`;
+      read.textContent = `build ${k.build}  ${when(k.from)} → ${when(k.to)}  p95 ${num(k.p95Ms, 'ms')}${typeof k.bodyMs === 'number' ? `  body ${num(k.bodyMs, 'ms')}` : ''}  calls ${num(k.calls)}  hitches/h ${num(k.hitchesPerHour)}${k.runs >= 2 && k.hitchesPerHourRange ? ` (${k.runs} runs ${num(k.hitchesPerHourRange[0])}–${num(k.hitchesPerHourRange[1])})` : ''}${k.worstMs ? ` (worst ${num(k.worstMs, 'ms')} ${k.worstGuess ?? ''})` : ''}${secs ? `  │ ${secs}` : ''}`;
     });
     svg.addEventListener('mouseleave', () => { x.setAttribute('visibility', 'hidden'); read.textContent = 'hover the strips'; });
   }

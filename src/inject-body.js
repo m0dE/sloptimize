@@ -39,6 +39,36 @@ function emit(obj) {
   try { __sloptimizeEmit(JSON.stringify(obj)); } catch { /* binding gone */ }
 }
 
+// ── The page's own marks (optional): phase, situation, build ────────────────
+// Zero integration stays the default. A page that wants its spawn flood read
+// apart from its steady state says which is which — stamped on every hitch
+// and profile line from the call on, as tier 1 stamps `phase` per frame:
+//   __sloptimizeAttach.phase('steady')        ('' or null clears)
+//   __sloptimizeAttach.context({ map: 'harbor', units: 'many' })   low-cardinality facets
+//   __sloptimizeAttach.build('index-CNbvoNb_')   overrides `attach --build`
+// Installed before any page script runs; the node side canonicalises the
+// facets and heartbeats each phase change.
+const marks = { phase: undefined, ctx: undefined, build: undefined };
+const markText = (v) => (v === undefined || v === null || v === '' ? undefined : String(v).replace(/[|,\s]+/g, '_').slice(0, 40));
+function stampMarks(rec) {
+  if (marks.phase !== undefined) rec.phase = marks.phase;
+  if (marks.ctx !== undefined) rec.ctx = marks.ctx;
+  if (marks.build !== undefined) rec.build = marks.build;
+  return rec;
+}
+try {
+  globalThis.__sloptimizeAttach = {
+    phase(name) { marks.phase = markText(name); },
+    context(facets) {
+      if (!facets || typeof facets !== 'object') { marks.ctx = undefined; return; }
+      const c = {};
+      for (const k of Object.keys(facets)) { const v = markText(facets[k]); if (v !== undefined) c[k] = v; }
+      marks.ctx = Object.keys(c).length ? c : undefined;
+    },
+    build(id) { marks.build = id === undefined || id === null || id === '' ? undefined : String(id).slice(0, 80); },
+  };
+} catch { /* a frozen global: the marks are optional */ }
+
 /** The value at quantile `q` of the first `n` slots of a ring. */
 function quantile(ring, n, q) {
   const vals = [];
@@ -228,7 +258,7 @@ function tick(ts) {
 
   const median = rollingMedian();
   if (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS)) {
-    emit({
+    emit(stampMarks({
       type: 'hitch', at: new Date().toISOString(), frame: frameNo,
       frameMs: +frameMs.toFixed(1), medianMs: +median.toFixed(2),
       // insideRenderMs is unknowable at this tier without the engine; the
@@ -245,7 +275,7 @@ function tick(ts) {
       gpu: { uploadKB: +upKB.toFixed(1) },
       classification: classifyHitch({ frameMs, medianMs: median, insideRenderMs: 0, delta: { programs: creates }, spawned: 0 }),
       tier: 0,
-    });
+    }));
   }
   prevDraws = draws; prevTris = tris;
   if (frameNo % PROFILE_EVERY === 0) {
@@ -253,10 +283,10 @@ function tick(ts) {
     // taken over); insideRenderMs and programs stay absent — tier 0 does
     // not know them, and the report says what it has.
     const med = quantile(frameMsRing, count, 0.5);
-    emit({ type: 'profile', at: new Date().toISOString(),
+    emit(stampMarks({ type: 'profile', at: new Date().toISOString(),
       frame: { medianMs: +med.toFixed(2), p95Ms: +quantile(frameMsRing, count, 0.95).toFixed(2), fps: med > 0 ? Math.round(1000 / med) : 0 },
       render: { calls: quantile(drawsRing, count, 0.5), triangles: quantile(trisRing, count, 0.5) },
-      window: { frames: count }, tier: 0 });
+      window: { frames: count }, tier: 0 }));
   }
 }
 requestAnimationFrame(tick);

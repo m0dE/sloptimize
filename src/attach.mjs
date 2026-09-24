@@ -40,6 +40,7 @@ async function discoverTarget(port) {
  * @param {string} [opts.dir]        .sloptimize/ directory
  * @param {boolean} [opts.headless]
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
+ * @param {string} [opts.build]      the bundle this run measured, stamped on every line
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
  * @returns {Promise<{close:()=>Promise<void>, closed:Promise<{code?:number, reason?:string}>, clusters:Map}>}
  *   `closed` settles when the socket does — the target went away, or close()
@@ -90,7 +91,7 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown' });
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build });
   const onRecord = pipeline.onRecord;
 
   ws.onmessage = (ev) => {

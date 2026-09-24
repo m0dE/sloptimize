@@ -76,3 +76,57 @@ test('issues on a tier-0 ledger: one row per cause, each with its function', asy
   assert.deepEqual(rows.map((r) => r.count).sort(), [47, 47, 48]);
   assert.deepEqual(rows.map((r) => r.label).sort(), FNS.map((f) => `hitch · long-script · ${f} (index.js)`).sort());
 });
+
+// Issue 5: counts per run are noisy samples of different lengths. The
+// surfaces rate over RECORDED time and say how many runs a build stands on.
+function write(lines) {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-cli-runs-'));
+  writeFileSync(join(dir, 'perf.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  return dir;
+}
+const beat = (s, extra) => ({ type: 'heartbeat', at: iso(s), medianFrameMs: 16, p95Ms: 30, tier: 0, ...extra });
+const hit = (s, fn, extra) => ({ type: 'hitch', at: iso(s), frameMs: 150, medianMs: 16, tier: 0,
+  classification: [{ guess: 'long-script', confidence: 'low', evidence: 'e' }], topFrames: [{ fn, url: 'index-CNbvoNb_.js:1', selfMs: 90 }], ...extra });
+/** A run of `min` minutes: a beat a minute, `n` hitches of `fn` spread inside. */
+function runOf(startS, min, n, fn, extra) {
+  const out = [];
+  for (let m = 0; m <= min; m++) out.push(beat(startS + m * 60, extra));
+  for (let i = 0; i < n; i++) out.push(hit(startS + Math.floor((i + 0.5) * min * 60 / n), fn, extra));
+  return out;
+}
+
+test('report and issues rate over recorded minutes', async () => {
+  const dir = tier0Dir(142);                        // a hitch every 2 s: 283 s recorded
+  const r = await run(['report', '--dir', dir]);
+  assert.match(r.stdout, /hitches recorded: 142 \(showing last 5\) .*over 4\.7 min recorded \(30\.1\/min\)/);
+  const i = await run(['issues', '--dir', dir]);
+  assert.match(i.stdout, /^3 footprints · 4\.7 min recorded$/m);
+  assert.match(i.stdout, /×48 {3}\(10\.18\/min\) hitch · long-script · isTurnBanned \(index\.js\)/);
+});
+
+test('issues --phase reads one phase at its own rate; --build one build', async () => {
+  const dir = write([
+    ...runOf(0, 5, 50, 'spawnUnits', { phase: 'spawn', build: 'b1', session: 's1' }),
+    ...runOf(5 * 60 + 2, 1, 3, 'isTurnBanned', { phase: 'steady', build: 'b1', session: 's1' }),
+  ]);
+  const all = JSON.parse((await run(['issues', '--json', '--dir', dir])).stdout);
+  assert.equal(all.length, 2);
+  const steady = await run(['issues', '--phase', 'steady', '--dir', dir]);
+  assert.match(steady.stdout, /^1 footprint · 1 min recorded · phase steady$/m);
+  assert.match(steady.stdout, /×3 {4}\(3\/min\) hitch · long-script · isTurnBanned \(index\.js\)/);
+  assert.doesNotMatch(steady.stdout, /spawnUnits/);
+  const none = await run(['issues', '--build', 'b2', '--dir', dir]);
+  assert.equal(none.code, 4);
+});
+
+test('history: a build recorded in several runs says n and the spread, and its rate is over recorded time', async () => {
+  const day = 24 * 3600;
+  const dir = write([
+    ...runOf(0, 10, 20, 'f', { build: 'fixed', session: 's1' }),
+    ...runOf(day, 10, 30, 'f', { build: 'fixed', session: 's2' }),
+    ...runOf(2 * day, 10, 10, 'f', { build: 'next', session: 's3' }),
+  ]);
+  const { stdout } = await run(['history', '--dir', dir]);
+  assert.match(stdout, /build fixed .*hitches 50 \(150\/h over 20 min · 2 runs 120–180\/h, worst 150ms/);
+  assert.match(stdout, /build next .*hitches 10 \(60\/h over 10 min, worst 150ms/);
+});

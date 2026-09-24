@@ -75,6 +75,18 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   pipeline creations WITH `Error().stack`, uploads, queue latency);
   rolling sampling profiler (~1–3% dev overhead) so every `long-script`
   incident carries `topFrames`. Zero game code. Chromium-only, dev-only.
+  The draw wraps cover every entry point three reaches — plain, instanced,
+  range, `ANGLE_instanced_arrays`, `WEBGL_multi_draw` — counted as
+  renderer.info counts them (one call per API call, triangles by primitive
+  mode × instances), and a WebGL `linkProgram` is a creation like a WebGPU
+  pipeline. A hitch carries `render` (this frame's counts) and `delta`
+  (this frame minus the last, as at tier 1). The catalogue keys a tier-0
+  hitch on its top frame (SPEC §3.7). Every line carries the attach's
+  `session` and, with `--build <id>`, the build; the pipeline writes a
+  heartbeat a minute and at each phase change, so tier-0 ledgers have
+  builds, runs and recorded time. Optional page marks, installed before
+  any page script: `__sloptimizeAttach.phase(name)`, `.context(facets)`,
+  `.build(id)` — stamped on every hitch and profile line from the call on.
 - **Tier 1 — in-page feed**: the game hands engine-true numbers
   (`rec.frame(...)` at its stats site — one line) and ships the recorder
   ambient with every dev session, no attach needed. Exact

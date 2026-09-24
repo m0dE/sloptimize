@@ -9,6 +9,8 @@
 // same files, same cluster identity either way.
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalContext } from './footprint.js';
+import { mintSession } from './cloud-sink.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -81,6 +83,18 @@ export const ATTRIBUTE_FLOOR_MS = 80;
 export const ATTRIBUTE_COOLDOWN_MS = 1000;
 export const PROFILE_WINDOW_MS = 10_000;
 
+// ── Runs, builds and phases (ticket 20cd5dc2) ────────────────────────────────
+// A tier-0 ledger must be as self-sufficient as a tier-1 one (INTEGRATION
+// §2): every line carries the attach's `session` (one attach = one run) and
+// the `build` it measured (`attach --build`, or whatever the page declared
+// through `__sloptimizeAttach.build()`), and while frames flow the pipeline
+// writes a `heartbeat` a minute from the page's profile lines — so `history`
+// has builds, a rate has recorded time to be over, and a run has an extent.
+// A PHASE change (`__sloptimizeAttach.phase()`) closes the old phase with a
+// beat from its last profile line and opens the new one, and stop() closes
+// the last: a phase's recorded time is its own, to within a profile line.
+export const HEARTBEAT_MS = 60_000;
+
 /**
  * @param {object} opts
  * @param {string} opts.dir            .sloptimize/ directory (created)
@@ -111,6 +125,11 @@ export function createIncidentPipeline(opts) {
   const setT = opts.setTimeout ?? setTimeout, clearT = opts.clearTimeout ?? clearTimeout;
   mkdirSync(dir, { recursive: true });
 
+  const session = mintSession();
+  const build = typeof opts.build === 'string' && opts.build ? opts.build : undefined;
+  let lastProfile = null;        // the newest page profile line
+  let lastBeat = null;           // the profile line the newest beat was cut from
+  let lastBeatMs = -Infinity;
   const clusters = new Map();   // key → {count, firstAt, lastAt, sample}
   let lastCreateStackHead = null;
   let profiling = false;
@@ -136,7 +155,51 @@ export function createIncidentPipeline(opts) {
     profiling = true;
     arm();
   }
+  /** Self-sufficient lines: the session, the build, the situation as the
+   *  canonical string tier 1 stamps (a page hands facets as an object). */
+  function stamp(rec) {
+    if (rec.session === undefined) rec.session = session;
+    if (build !== undefined && rec.build === undefined) rec.build = build;
+    if (rec.ctx && typeof rec.ctx === 'object') {
+      const c = canonicalContext(rec.ctx);
+      if (c) rec.ctx = c; else delete rec.ctx;
+    }
+    return rec;
+  }
+  function writeBeat(p) {
+    const t = Date.parse(p.at);
+    const beat = { type: 'heartbeat', at: Number.isFinite(t) ? p.at : new Date(now()).toISOString() };
+    if (p.frame?.medianMs !== undefined) beat.medianFrameMs = p.frame.medianMs;
+    if (p.frame?.p95Ms !== undefined) beat.p95Ms = p.frame.p95Ms;
+    if (p.render?.calls !== undefined) beat.calls = p.render.calls;
+    if (p.render?.triangles !== undefined) beat.triangles = p.render.triangles;
+    beat.tier = 0;
+    beat.regime = regime;
+    for (const k of ['phase', 'ctx', 'build', 'session']) if (p[k] !== undefined) beat[k] = p[k];
+    appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(beat) + '\n');
+    lastBeat = p;
+    lastBeatMs = Number.isFinite(t) ? t : now();
+  }
+  function onProfile(p) {
+    const t = Number.isFinite(Date.parse(p.at)) ? Date.parse(p.at) : now();
+    if (lastBeat !== null && p.phase !== lastBeat.phase) {
+      if (lastProfile !== lastBeat) writeBeat(lastProfile);   // close the old phase
+      writeBeat(p);                                            // open the new one
+    } else if (lastBeat === null || t - lastBeatMs >= HEARTBEAT_MS) {
+      writeBeat(p);
+    }
+    lastProfile = p;
+  }
+  /** The run's last profile line as its closing beat, once. */
+  function closeRun() {
+    if (lastProfile !== null && lastProfile !== lastBeat) writeBeat(lastProfile);
+  }
+
   async function stop() {
+    // Not behind the record chain: a rotation the target never answers must
+    // not hold the stop. A hitch still in flight may land after the closing
+    // beat — the ledger's readers sort by time.
+    try { closeRun(); } catch (e) { log(`closing beat dropped: ${e?.message ?? e}`); }
     disarm();
     if (!profiling) return;
     profiling = false;
@@ -178,6 +241,7 @@ export function createIncidentPipeline(opts) {
   }
 
   async function handle(rec) {
+    stamp(rec);
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
       appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
@@ -185,6 +249,7 @@ export function createIncidentPipeline(opts) {
     }
     if (rec.type === 'profile') {
       writeFileSync(join(dir, 'profile.json'), JSON.stringify({ ...rec, regime, at: new Date().toISOString() }, null, 2));
+      onProfile(rec);
       return;
     }
     if (rec.type === 'hitch') {
@@ -251,5 +316,5 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }
 
-  return { onRecord, clusters, start, stop, regime };
+  return { onRecord, clusters, start, stop, regime, session };
 }

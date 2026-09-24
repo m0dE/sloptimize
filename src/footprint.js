@@ -7,7 +7,9 @@
 // catalogue. The footprint is the part of a record that names the CAUSE:
 // the kind of incident, the phase it lives in, the closed-vocabulary verdict,
 // and whatever the record carries that identifies the site (the materials a
-// hitch minted, the track and axis a jitter moved on, the tag a warm ran).
+// hitch minted, the span or section the host attributed it to, the frame
+// tier 0's sampler named, the track and axis a jitter moved on, the tag a
+// warm ran).
 // Never the parts that name the OCCURRENCE: the timestamp, the frame number,
 // the exact milliseconds or metres, the build, the machine.
 //

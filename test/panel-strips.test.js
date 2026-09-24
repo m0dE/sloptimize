@@ -77,3 +77,19 @@ test('buildHistory last: the newest N builds, a cut the ledger picks — and the
   recs.push(beat(3 * 1440 + 5, 'b0', 99));
   assert.deepEqual(buildHistory(recs, { last: 2 }).builds.map((b) => b.build), ['b2', 'b3']);
 });
+
+// Ticket 20cd5dc2, issue 5: a build line that is one noisy sample invites the
+// wrong conclusion. A build recorded in several runs draws its spread.
+test('stripsSvg: a build with several runs draws the spread of its per-run rates as a whisker; one run draws none', () => {
+  const recs = ledger(3).map((r) => ({ ...r, session: `s-${r.build}` }));
+  // b1 again, a second run the next hour (another session), four hitches.
+  for (let m = 0; m < 10; m++) recs.push(beat(1440 + 60 + m, 'b1', 98, { session: 's-b1-again' }));
+  for (let k = 0; k < 4; k++) recs.push({ type: 'hitch', at: iso(1440 + 61 + k), frameMs: 300, medianMs: 8, classification: [{ guess: 'long-script', confidence: 'low', evidence: 'e' }], build: 'b1', session: 's-b1-again' });
+  const h = buildHistory(recs);
+  const b1 = h.builds.find((b) => b.build === 'b1');
+  assert.equal(b1.runs, 2);
+  assert.deepEqual(b1.hitchesPerHourRange, [0, 26.7]);
+  const { svg } = stripsSvg(h);
+  assert.equal((svg.match(/class="sl-range"/g) || []).length, 1);
+  assert.equal(stripsSvg(buildHistory(ledger(3))).svg.includes('sl-range'), false);
+});

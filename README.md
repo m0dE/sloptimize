@@ -103,6 +103,11 @@ The sampler's cost is bounded so it can never be the hitch it reports:
 10 ms sampling, one profile rotation per second at most, and only for
 stalls of 80 ms or more (shorter hitches are still recorded, marked
 `unattributed`). `--min-hitch-ms N` raises the detection floor itself.
+`--build <id>` names the bundle the run measured, so `history` and the
+Optimizations strips can compare builds; a page that has phases can say
+so without any other integration — `__sloptimizeAttach.phase('steady')` —
+and `sloptimize issues --phase steady` reads that phase alone, at its own
+rate per recorded minute.
 Keep DevTools closed on the target while attach records — a second CDP
 client costs the page ~25 ms per frame. Attach exits on its own when the
 target goes away.
@@ -332,11 +337,12 @@ sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
-sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N]
+sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N] [--build <id>]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how
-                         recently, which fixes were applied; --fp <id> for one
+                         recently, which fixes were applied; --fp <id> for one;
+                         --phase/--build for one scope, each row per recorded minute
 sloptimize watch         the push channel: one stdout line per usermark /
                          ≥100ms hitch / gpu cap-hit / coordinate jitter /
                          feed dark, each with fp=<id> ×N; never exits
