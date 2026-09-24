@@ -271,6 +271,11 @@ post('records', batch);   // unchanged: .sloptimize/perf.jsonl, still the source
 cloud.enqueue(batch);     // the same records, teed to the cloud sink's own queue
 ```
 
+A player thrown back to the menu mid-game is a page being replaced, and no
+incident can say how. `createExitTrail` has the NEXT page report it: killed (no
+pagehide, the browser ended the process), your own code by name, or the browser.
+See docs/INTEGRATION.md, "How the last page ended".
+
 (The `sources: [rec]` option exists only for a host with no file sink at all:
 the sink drains those sources itself, so anything it takes never reaches your
 own `drainRecords()`.)

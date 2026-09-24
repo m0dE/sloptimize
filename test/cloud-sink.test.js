@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCloudSink } from '../src/cloud-sink.js';
 
-function harness({ statuses = [] } = {}) {
+function harness({ statuses = [], bodies = [] } = {}) {
   const calls = [];
   let t = 0;
   const timers = [];
   const fetch = async (url, init) => {
     calls.push({ url, body: JSON.parse(init.body), headers: init.headers, keepalive: init.keepalive });
     const status = statuses.shift() ?? 202;
-    return { ok: status < 300, status, headers: { get: (h) => (h.toLowerCase() === 'retry-after' && status === 429 ? '30' : null) }, json: async () => ({ accepted: 1, dropped: [] }) };
+    const answer = bodies.shift() ?? { accepted: 1, dropped: [] };
+    return { ok: status < 300, status, headers: { get: (h) => (h.toLowerCase() === 'retry-after' && status === 429 ? '30' : null) }, json: async () => answer };
   };
   const beacons = [];
   const listeners = {};
@@ -310,4 +311,60 @@ test('session: false stamps nothing — the server runtime\'s records are a proc
   h.runTimers();
   await sink.flush();
   assert.equal('session' in h.calls[0].body.records[0], false);
+});
+
+// ── The cap (cloud rulings 32/34): incidents are shed, beats and exits keep flowing ──
+
+const beat = (n) => ({ type: 'heartbeat', at: `b${n}`, p95Ms: 20 });
+const inc = (n) => ({ type: 'hitch', at: `h${n}` });
+const exit = () => ({ type: 'page-exit', at: 'e', verdict: 'killed' });
+const capAnswer = (records) => ({ error: 'daily cap reached', accepted: 0, dropped: records.map((_, index) => ({ index, reason: 'cap' })) });
+
+test('a cap 429 sheds the batch\'s incidents, keeps its beats and exits, and posts them at once', async () => {
+  const first = [inc(1), beat(1), inc(2), exit()];
+  const h = harness({ statuses: [429, 202], bodies: [capAnswer(first)] });
+  const sink = mk(h);
+  sink.enqueue(first);
+  await sink.flush();
+  assert.equal(sink.stats().capped, 2);
+  assert.equal(sink.stats().backoffUntil, 0, 'the cap is not a reason to stop posting');
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat', 'page-exit']);
+});
+
+test('while capped, new incidents are shed as they come; after the Retry-After they flow again', async () => {
+  const h = harness({ statuses: [429], bodies: [capAnswer([inc(1)])] });
+  const sink = mk(h);
+  sink.enqueue([inc(1)]);
+  await sink.flush();
+  sink.enqueue([inc(2), beat(2), inc(3)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+  assert.equal(sink.stats().capped, 3);
+  h.tick(31_000);                       // past the harness's Retry-After (30 s)
+  sink.enqueue([inc(4)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[2].body.records.map((r) => r.type), ['hitch']);
+});
+
+test('a 202 that says capped (a mixed batch the service split) enters capped mode too', async () => {
+  const h = harness({ bodies: [{ accepted: 0, series: 1, dropped: [{ index: 0, reason: 'cap' }], capped: 'daily', retryAfter: 600 }] });
+  const sink = mk(h);
+  sink.enqueue([inc(1), beat(1)]);
+  await sink.flush();
+  assert.equal(sink.stats().capped, 1);
+  assert.ok(sink.stats().cappedUntil >= 600_000);
+  sink.enqueue([inc(2), beat(2)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+});
+
+test('a rate-limit 429 (drops not all cap) still backs off and keeps the batch', async () => {
+  const h = harness({ statuses: [429], bodies: [{ error: 'rate limited' }] });
+  const sink = mk(h);
+  sink.enqueue([inc(1), beat(1)]);
+  await sink.flush();
+  assert.equal(sink.stats().queued, 2);
+  assert.ok(sink.stats().backoffUntil > 0);
+  assert.equal(sink.stats().capped, 0);
 });
