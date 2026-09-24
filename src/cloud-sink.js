@@ -5,7 +5,21 @@
 // timer, posts batches with the publishable key, backs off on 429/5xx, caps
 // its queue, and tells the service how many it had to drop locally so the
 // dashboard's "dropped" column is honest. Never throws into the host.
+//
+// THE CAP (cloud rulings 32/34): a project's daily cap and an account's
+// monthly quota bind INCIDENTS only. The series (`heartbeat`) and a page's exit
+// (`page-exit`) are never quota — they are what says a tab is alive and how it
+// ended, and they must keep flowing when the incidents cannot. So a cap answer
+// (a 202 that says `capped`, or a 429 whose drops are all `cap`) puts the sink
+// in CAPPED mode until the answer's Retry-After: incidents are shed as they
+// come (counted in `capped`, never re-sent — the service refused them, and a
+// retry would only be refused again), and everything else keeps posting. The
+// refused batch's incidents are shed with it rather than parked at the head of
+// the queue, where they would hold every later beat back until the reset.
 const BACKOFF_MS = [5000, 30000, 120000, 300000];
+/** Records the cap never binds (cloud rulings 31/32/35). */
+export const UNCAPPED_TYPES = Object.freeze(new Set(['heartbeat', 'page-exit']));
+const isUncapped = (r) => !!r && UNCAPPED_TYPES.has(r.type);
 
 export function createCloudSink(opts = {}) {
   if (!opts.key) throw new Error('createCloudSink: key is required');
@@ -31,7 +45,19 @@ export function createCloudSink(opts = {}) {
   let queue = [];
   let droppedLocally = 0;
   let failures = 0, backoffUntil = 0, inflight = false;
-  const stats = { sent: 0, lastError: null, lastStatus: null };
+  /** While now() < cappedUntil the service refuses incidents: shed them. */
+  let cappedUntil = 0;
+  const stats = { sent: 0, lastError: null, lastStatus: null, capped: 0 };
+  function shedCapped() {
+    if (now() >= cappedUntil) return;
+    const before = queue.length;
+    queue = queue.filter(isUncapped);
+    stats.capped += before - queue.length;
+  }
+  function enterCapped(retryAfterSec) {
+    const wait = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : BACKOFF_MS[BACKOFF_MS.length - 1];
+    cappedUntil = Math.max(cappedUntil, now() + wait);
+  }
 
   function trim() {
     if (queue.length > maxQueue) { droppedLocally += queue.length - maxQueue; queue = queue.slice(queue.length - maxQueue); }
@@ -83,6 +109,7 @@ export function createCloudSink(opts = {}) {
   }
   async function flush() {
     drain();
+    shedCapped();
     if (inflight || queue.length === 0 || now() < backoffUntil) return;
     inflight = true;
     // Remove the batch from the queue BEFORE sending, not after the await:
@@ -106,9 +133,26 @@ export function createCloudSink(opts = {}) {
         body: JSON.stringify(body(batch)),
       });
       stats.lastStatus = res.status;
+      const retryAfter = Number(res.headers?.get?.('retry-after'));
       if (res.ok) {
         droppedLocally = Math.max(0, droppedLocally - sentDropped);
         failures = 0; backoffUntil = 0; stats.sent += batch.length; if (!droppedThisPass) stats.lastError = null;
+        // Read AFTER the batch is accounted: the answer only says whether the
+        // service split it at the cap.
+        const answer = res.status === 202 ? await readJson(res) : null;
+        if (answer?.capped) {
+          stats.capped += Array.isArray(answer.dropped) ? answer.dropped.filter((d) => d?.reason === 'cap').length : 0;
+          enterCapped(Number.isFinite(Number(answer.retryAfter)) ? Number(answer.retryAfter) : retryAfter);
+        }
+      } else if (res.status === 429 && isCapRefusal(await readJson(res))) {
+        // The cap, not the rate: shed the batch's incidents, keep its beats
+        // and exits at the front, and post those at once — no backoff.
+        const keep = batch.filter(isUncapped);
+        stats.capped += batch.length - keep.length;
+        queue = keep.concat(queue);
+        trim();
+        enterCapped(retryAfter);
+        stats.lastError = 'HTTP 429 (cap)';
       } else if (res.status === 429 || res.status >= 500) {
         // Retryable: put the batch back at the front (it's the oldest data)
         // and re-apply the cap, counting any resulting drops.
@@ -137,6 +181,7 @@ export function createCloudSink(opts = {}) {
   function onHide() {
     try {
       drain(true);
+      shedCapped();
       if (queue.length === 0 || !beacon) return;
       // Any batch currently in flight via flush() was already spliced out of
       // `queue`, so what's here is guaranteed disjoint from it — no duplicate
@@ -169,9 +214,17 @@ export function createCloudSink(opts = {}) {
     },
     /** The id every record of this sink is stamped with. */
     session: () => session,
-    stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
+    stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, cappedUntil, capped: stats.capped, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
     dispose() { clearI(timer); target.removeEventListener?.('pagehide', onHide); target.removeEventListener?.('visibilitychange', onVis); },
   };
+}
+
+async function readJson(res) {
+  try { return typeof res.json === 'function' ? await res.json() : null; } catch { return null; }
+}
+/** A 429 that is the cap or the quota (every drop `cap`), not the rate limit. */
+function isCapRefusal(answer) {
+  return Array.isArray(answer?.dropped) && answer.dropped.length > 0 && answer.dropped.every((d) => d?.reason === 'cap');
 }
 
 const SESSION_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';

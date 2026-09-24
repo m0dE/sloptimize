@@ -203,6 +203,44 @@ the SAME recorder from §1, not a bare call — so uncaught client errors land
 in `rec` via `recorder.emit()` and ride `rec.drainRecords()` into `batch`
 above like any hitch, with no separate wiring to the cloud sink needed.
 
+**The cap.** A project's daily cap and an account's monthly quota bind
+incidents only; the heartbeat series and page exits (below) are never quota.
+When the service says the cap is spent (a `202` carrying `capped`, or a `429`
+whose drops are all `cap`), the sink sheds incidents until the answer's
+`Retry-After` and keeps posting beats and exits, so a capped day does not
+blind the Sessions view. `sink.stats().capped` counts what it shed.
+
+### How the last page ended (optional — `createExitTrail`)
+
+A player "thrown back to the menu" is a page being replaced, and no incident
+can say so: the page that could have reported it is gone. The exit trail keeps
+each page's last events in `sessionStorage` (it survives a reload AND a killed
+process). The NEXT page in the tab reports how the previous one ended, as one
+`page-exit` record:
+
+- `killed`: no `pagehide`. The browser ended the process (out of memory, a
+  crash). On a phone the tab then reloads.
+- `code-reload`: your code left through `trail.reload(reason)` /
+  `trail.navigate(url, reason)`, named.
+- `browser-navigation`: a `pagehide` your code did not ask for (a refresh
+  gesture, back, the address bar).
+
+```js
+import { createExitTrail } from 'sloptimize';
+// as early in the page as you can — a page replaced before this line leaves nothing
+const trail = createExitTrail({ build, touchStripPx: 60 });   // touchStripPx: record taps near the top edge (0 = off)
+const cloud = createCloudSink({ key, endpoint, build, session: trail.session, sources: [trail] });
+trail.crumb('phase', 'match');          // what only your game knows: phases, kicks, GPU loss…
+trail.reload('return-to-menu');         // instead of location.reload(): the next page can say who
+```
+
+Give the sink the trail's `session`, so the dead page's records and its exit
+join on one id. The trail records `pagehide`, bfcache restores, visibility,
+viewport changes, uncaught errors, and taps and clicks on controls by itself.
+`trail.previous()` hands the host the same exit to read. The cloud's Sessions
+page opens with "How sessions ended" (verdicts per build) and shows a session's
+last events; `/v1/exits` answers the same.
+
 ### Game server (optional — the same project's secret key)
 
 The server side of the same catalogue: ticks that overran their budget,
