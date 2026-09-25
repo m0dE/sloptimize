@@ -353,13 +353,20 @@ sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-h
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how
-                         recently, which fixes were applied; --fp <id> for one,
-                         --phase <p> for one phase's occurrences
+                         recently, which fixes were applied; --fp <id> for one
 sloptimize watch         the push channel: one stdout line per usermark /
                          ≥100ms hitch / gpu cap-hit / coordinate jitter /
                          feed dark, each with fp=<id> ×N; never exits
 sloptimize doctor        what is wired, what is degraded, stated limits
 ```
+
+`--phase play[,sample]` scopes `report`, `issues`, `history` and `fix` to
+the records stamped with those phases (tier 1: `rec.frame({ phase })`;
+tier 0: `window.__sloptimizePhase = 'play'`). A session with a load phase
+and a play phase is two workloads in one ledger; read together, the bigger
+one wins on volume alone. Records with no phase answer only to `--phase ?`.
+A filter that matches nothing exits 4 and names the phases the ledger does
+carry (with `--json`: the usual empty output, the reason on stderr).
 
 ## What it will tell you it cannot do
 
