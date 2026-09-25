@@ -99,6 +99,18 @@ runs a rolling sampling profiler so a freeze is attributed like:
 INCIDENT long-script|seededFreezeWork@game.js:512 — 900ms
 ```
 
+Every attributed cause is its own issue in `sloptimize issues`, keyed by
+function name so the same cause on the next build is the same row. Tell attach
+which build it is measuring (`--build <id>`) and repeated runs of one build
+fold into one build with its runs' range in `sloptimize history`: run-to-run
+noise is real (the first field report measured byte-identical bundles 27%
+apart in hitch count), and the page beats once a minute so rates are over
+the minutes actually recorded. A page with distinct phases can say so with
+one optional line, `window.__sloptimizePhase = 'steady'`, and `sloptimize
+issues --phase steady` reads just that phase. Draws are counted at the
+WebGL/WebGPU API the way `renderer.info` counts them — instanced and
+multi-draw calls included — as a mean over the sample window.
+
 The sampler's cost is bounded so it can never be the hitch it reports:
 10 ms sampling, one profile rotation per second at most, and only for
 stalls of 80 ms or more (shorter hitches are still recorded, marked
@@ -337,11 +349,12 @@ sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
-sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N]
+sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N] [--build <id>]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how
-                         recently, which fixes were applied; --fp <id> for one
+                         recently, which fixes were applied; --fp <id> for one,
+                         --phase <p> for one phase's occurrences
 sloptimize watch         the push channel: one stdout line per usermark /
                          ≥100ms hitch / gpu cap-hit / coordinate jitter /
                          feed dark, each with fp=<id> ×N; never exits

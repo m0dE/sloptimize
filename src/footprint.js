@@ -140,12 +140,54 @@ function mintSite(rec) {
   return ids.join(',');
 }
 
+/** A file name apart from the build that served it: no line, no query, and
+ *  no bundler content hash (`index-CNbvoNb_.js` → `index.js`, `main.3f2a9c1b.js`
+ *  → `main.js`). A hash is 8+ url-safe characters after a `-` or `.` with a
+ *  digit or a capital in it, so a plain word (`long-function.js`) survives. */
+function stableFile(loc) {
+  const file = String(loc ?? '').replace(/:\d+(?::\d+)?$/, '').replace(/[?#].*$/, '').split(/[/\\]/).pop();
+  return file.replace(/[-.]([A-Za-z0-9_-]{8,})(?=\.[A-Za-z]+$)/, (m, h) => (/[0-9A-Z]/.test(h) ? '' : m));
+}
+
+/** The site a tier-0 (attach) hitch names: the function its sampler caught
+ *  spending the stall. The record's cluster frame first — attach already
+ *  merged a cause seen from two leaves into one cluster (V8 inlining) — else
+ *  the heaviest `topFrames` entry. By NAME, never by `url:line`: a bundle's
+ *  file name and line move with every build, and the same cause on the next
+ *  build must be the same row (that is how a fix's before/after is read). An
+ *  anonymous function keeps its file, hash stripped, so every anonymous
+ *  callback in the game is not one row. A shader-compile's cluster frame is
+ *  the creation stack's head: the function that asked for the program. A
+ *  hitch the sampler did not attribute (`unattributed`) names no site. */
+function attachSite(rec) {
+  const ck = typeof rec.cluster?.key === 'string' ? rec.cluster.key : '';
+  const frame = ck.includes('|') ? ck.slice(ck.indexOf('|') + 1).trim() : '';
+  let kind = 'fn', fn = '', loc = '';
+  if (/^at\s/.test(frame)) {
+    const site = topFrameSite([frame]);
+    if (site !== 'unknown') { kind = 'create'; fn = site.slice(site.lastIndexOf('#') + 1); loc = site.slice(0, site.lastIndexOf('#')); }
+  } else if (frame.includes('@')) {
+    fn = frame.slice(0, frame.lastIndexOf('@'));
+    loc = frame.slice(frame.lastIndexOf('@') + 1);
+  }
+  if (!fn) {
+    const top = Array.isArray(rec.topFrames) ? rec.topFrames[0] : undefined;
+    if (!top || typeof top.fn !== 'string' || !top.fn) return '';
+    fn = top.fn; loc = top.url ?? '';
+  }
+  const anon = fn === '(anonymous)' || fn === 'anonymous';
+  const name = anon ? `(anonymous)@${stableFile(loc) || '?'}` : fn;
+  return `${kind}:${name.replace(/[|,]/g, '_').slice(0, 60)}`;
+}
+
 /** The site of a browser hitch: the materials it minted when it minted any
  *  (a compile has a material), else the host's own attribution — the loop
  *  SECTION whose time was most above its baseline (`rec.sections`, written by
- *  a host that runs a per-frame profiler of its own). A long-script hitch
- *  with neither is one row per phase; with a section it is one row per cause,
- *  which is what makes a hundred players' "long-script in play" workable. */
+ *  a host that runs a per-frame profiler of its own) — else, for a tier-0
+ *  attach record, the function the sampler named (`attachSite`). A
+ *  long-script hitch with none is one row per phase; with a site it is one
+ *  row per cause, which is what makes a hundred players' "long-script in
+ *  play" workable. */
 function hitchSite(rec) {
   // A verdict the host's own measurement carried (classify.js `reclassify`)
   // names its site by that measurement: the cause IS the span. Ahead of the
@@ -161,7 +203,7 @@ function hitchSite(rec) {
   if (mints) return mints;
   const top = Array.isArray(rec.sections) ? rec.sections[0] : undefined;
   const label = top && typeof top.label === 'string' ? top.label.trim() : '';
-  return label ? `section:${label.replace(/[|,]/g, '_').slice(0, 60)}` : '';
+  return label ? `section:${label.replace(/[|,]/g, '_').slice(0, 60)}` : attachSite(rec);
 }
 
 /** Which way a jitter moved: vertical (a step, a ground clamp, a fall) or
@@ -247,6 +289,8 @@ function hitchSiteLabel(site) {
   if (!site) return '';
   if (site.startsWith('span:')) return ` · ${site.slice('span:'.length)}`;
   if (site.startsWith('section:')) return ` · ${site.slice('section:'.length)}`;
+  if (site.startsWith('fn:')) return ` · ${site.slice('fn:'.length)}`;
+  if (site.startsWith('create:')) return ` · compiled from ${site.slice('create:'.length)}`;
   return ` · ${site.split(',').length} mint site(s)`;
 }
 

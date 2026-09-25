@@ -9,6 +9,7 @@
 // same files, same cluster identity either way.
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { mintSession } from './cloud-sink.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -86,6 +87,8 @@ export const PROFILE_WINDOW_MS = 10_000;
  * @param {string} opts.dir            .sloptimize/ directory (created)
  * @param {(method:string, params?:object)=>Promise<any>} opts.send  CDP call
  * @param {string} [opts.regime]       'hardware' | 'software' | 'unknown' — stamped on profile.json
+ * @param {string} [opts.build]        the bundle's identity, stamped on every ledger line (`attach --build`)
+ * @param {string} [opts.session]      this run's id; minted when absent — one attach = one session
  * @param {(...a:any[])=>void} [opts.log]
  * @param {(rec:object, key:string)=>void|Promise<void>} [opts.onNewCluster]
  *   Called once per NEW cause, before the record is written — a hook may
@@ -102,6 +105,16 @@ export function createIncidentPipeline(opts) {
   const log = opts.log ?? ((...a) => console.log('[attach]', ...a));
   const send = opts.send;
   const regime = opts.regime ?? 'unknown';
+  // Every line this run writes says which run and which build it was: the
+  // page cannot know either, and `history` needs both to hold several runs
+  // of one build apart (a hitch count from one run is one noisy sample).
+  const session = typeof opts.session === 'string' && opts.session ? opts.session : mintSession();
+  const build = typeof opts.build === 'string' && opts.build ? opts.build : undefined;
+  const stamp = (rec) => {
+    if (rec.session === undefined) rec.session = session;
+    if (build !== undefined && rec.build === undefined) rec.build = build;
+    return rec;
+  };
   if (typeof send !== 'function') throw new Error('createIncidentPipeline: send is required');
   const samplingIntervalUs = opts.samplingIntervalUs ?? SAMPLING_INTERVAL_US;
   const floorMs = opts.attributeFloorMs ?? ATTRIBUTE_FLOOR_MS;
@@ -178,6 +191,7 @@ export function createIncidentPipeline(opts) {
   }
 
   async function handle(rec) {
+    stamp(rec);
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
       appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
@@ -251,5 +265,5 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }
 
-  return { onRecord, clusters, start, stop, regime };
+  return { onRecord, clusters, start, stop, regime, session, build };
 }

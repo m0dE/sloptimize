@@ -40,6 +40,41 @@ function stamped(records) {
  *  means unmeasured, never zero. */
 const BEAT_COUNTERS = ['calls', 'triangles', 'programs'];
 
+/** Beats land once a minute while armed (INTEGRATION.md §2), so a silence
+ *  of five inside a beating session means nobody was recording. */
+const RUN_GAP_MS = 5 * 60_000;
+
+/**
+ * The recording runs inside [from, to]: the evidence grouped by `session`
+ * (records without one share a group), each group cut wherever a beating
+ * feed went silent for RUN_GAP_MS. A run spans its first record to its last
+ * (a beat interval short at most, the same for every run). `beats` 0 means
+ * the run cannot say when it stopped, and the caller does not trust its span.
+ */
+function runsOf(records, from, to) {
+  const groups = new Map();
+  for (const { t, r } of stamped(records)) {
+    if (t < from || t > to || !EVIDENCE.has(r.type)) continue;
+    const k = typeof r.session === 'string' ? r.session : '';
+    (groups.get(k) ?? groups.set(k, []).get(k)).push({ t, beat: r.type === 'heartbeat', hitch: r.type === 'hitch' && typeof r.frameMs === 'number' });
+  }
+  const runs = [];
+  for (const [session, list] of groups) {
+    list.sort((a, b) => a.t - b.t);
+    const beating = list.some((e) => e.beat);
+    let run = null;
+    for (const e of list) {
+      if (run && beating && e.t - run.toMs > RUN_GAP_MS) { runs.push(run); run = null; }
+      if (!run) run = { session, fromMs: e.t, toMs: e.t, beats: 0, hitches: 0 };
+      run.toMs = e.t;
+      if (e.beat) run.beats++;
+      if (e.hitch) run.hitches++;
+    }
+    if (run) runs.push(run);
+  }
+  return runs.sort((a, b) => a.fromMs - b.fromMs);
+}
+
 /**
  * Summarize one window [from, to] of the ledger: medians of the heartbeats
  * (frame p95/median and whichever counters they carry), the hitch count,
@@ -83,9 +118,31 @@ export function summarizeWindow(records, from, to) {
       jitters++;
     }
   }
-  const hours = Math.max((to - from) / 3_600_000, 1 / 60);
+  const runs = runsOf(records, from, to);
+  // The rate's denominator is the time the feed was RECORDING, when the
+  // window says so: heartbeats land once a minute while armed, so a window
+  // that carries them knows its runs, and the silence between two runs of
+  // one build is not time the build ran. A window with no beats cannot tell
+  // silence from a quiet session, and keeps its whole length.
+  const live = runs.some((r) => r.beats > 0);
+  const recordedMs = live ? runs.reduce((a, r) => a + (r.toMs - r.fromMs), 0) : to - from;
+  const hours = Math.max(recordedMs / 3_600_000, 1 / 60);
   const s = { from: new Date(from).toISOString(), to: new Date(to).toISOString(), beats: beats.length, hitches,
     hitchesPerHour: +(hitches / hours).toFixed(1) };
+  if (live) s.recordedMin = +(recordedMs / 60_000).toFixed(1);
+  if (live && runs.length > 1) {
+    // Several runs in one window — a build measured more than once. Each
+    // run's own rate, and their range: two runs of byte-identical bundles
+    // differed by 27% in the first field report, and one number with no
+    // spread invites reading that noise as a fix.
+    s.runs = runs.map((r) => {
+      const h = Math.max((r.toMs - r.fromMs) / 3_600_000, 1 / 60);
+      return { ...(r.session ? { session: r.session } : {}), from: new Date(r.fromMs).toISOString(), to: new Date(r.toMs).toISOString(),
+        minutes: +((r.toMs - r.fromMs) / 60_000).toFixed(1), hitches: r.hitches, hitchesPerHour: +(r.hitches / h).toFixed(1) };
+    });
+    const rates = s.runs.map((r) => r.hitchesPerHour);
+    s.spread = { n: rates.length, lo: Math.min(...rates), hi: Math.max(...rates) };
+  }
   if (p95s.length) s.p95Ms = median(p95s);
   if (meds.length) s.medianMs = median(meds);
   for (const k of BEAT_COUNTERS) if (counters[k].length) s[k] = median(counters[k]);
@@ -210,6 +267,7 @@ export function buildHistory(records, opts = {}) {
     const s = summarizeWindow(records, b0, b1);
     delete s.hitchesPerHour;                       // a bucket is a slice, not a rate
     delete s.jittersPerHour;
+    delete s.recordedMin; delete s.runs; delete s.spread;
     const inBucket = measured.filter(({ t }) => t >= b0 && t <= b1);
     const build = inBucket.map(({ r }) => r.build).filter(Boolean).pop();
     if (build) s.build = build;
@@ -285,6 +343,8 @@ export function buildFix(records, opts = {}) {
  * to before footprints existed.
  *
  * `from`/`to` scope the occurrences counted (ms or ISO; either end open);
+ * `phase` counts only occurrences stamped with that phase (`?` for records
+ * with none) — a run with a spawn flood and a steady state is two readings;
  * `now` is for `lastAgoMs`. Sorted most-frequent first; ties by most recent.
  */
 export function buildIssues(records, opts = {}) {
@@ -297,6 +357,7 @@ export function buildIssues(records, opts = {}) {
     if (r.automated === true && opts.includeAutomated !== true) continue;   // a robot's session is not a player's issue
     const fp = footprintOf(r);
     if (!fp) continue;
+    if (opts.phase && (r.phase ?? '?') !== opts.phase) continue;
     let g = groups.get(fp.id);
     if (!g) {
       const d = describeFootprint(fp.key);

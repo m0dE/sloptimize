@@ -38,7 +38,8 @@ const TOOLS = [
       files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
       before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
-    inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' } }, required: ['url'] } },
+    inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' },
+      build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
     inputSchema: { type: 'object', properties: {} } },
 ];
@@ -100,8 +101,8 @@ async function callTool(name, args = {}) {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {} });
-    return { ok: true, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build });
+    return { ok: true, session: attachSession.session, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {
     if (!attachSession) return { error: 'no attach session running' };
