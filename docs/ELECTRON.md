@@ -58,6 +58,7 @@ if (process.env.SLOPTIMIZE) {
     contentTracing,          // optional — enables trace: true
     trace: true,             // GPU/compositor trace around every NEW incident
     dir: '.sloptimize',      // default: cwd/.sloptimize, or userData/.sloptimize when packaged
+    build: app.getVersion(), // optional — stamped on every record; runs of one build compare as one build
   });
   app.on('before-quit', () => session.close());
 }

@@ -40,8 +40,10 @@ async function discoverTarget(port) {
  * @param {string} [opts.dir]        .sloptimize/ directory
  * @param {boolean} [opts.headless]
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
+ * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
+ *   runs of one build are then one build with n runs in `history`, not n builds
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
- * @returns {Promise<{close:()=>Promise<void>, closed:Promise<{code?:number, reason?:string}>, clusters:Map}>}
+ * @returns {Promise<{close:()=>Promise<void>, closed:Promise<{code?:number, reason?:string}>, clusters:Map, session:string, build?:string}>}
  *   `closed` settles when the socket does — the target went away, or close()
  *   ran. The CLI awaits it and exits: an attach that outlives its target has
  *   nothing to record and (ticket 2c11481d) once sat for 25 minutes on a
@@ -90,7 +92,7 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown' });
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build });
   const onRecord = pipeline.onRecord;
 
   ws.onmessage = (ev) => {
@@ -128,5 +130,7 @@ export async function attach(opts = {}) {
     },
     closed,
     clusters: pipeline.clusters,
+    session: pipeline.session,
+    build: pipeline.build,
   };
 }

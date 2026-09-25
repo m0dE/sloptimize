@@ -63,6 +63,42 @@ test('a long-script hitch keys on the host\'s own SECTION when it carries one, a
   assert.equal(odd.key.split('|').length, 4);
 });
 
+test('a tier-0 attach hitch keys on the function its sampler named — by name, apart from the bundle and line', () => {
+  // Exactly what attach writes: no phase, no sections, no mints — topFrames and the cluster.
+  const t0 = (fn, url, extra = {}) => ({
+    type: 'hitch', at: '2026-09-25T10:00:00.000Z', frame: 900, frameMs: 191, medianMs: 16.7, longTaskMs: 150, tier: 0,
+    classification: [{ guess: 'long-script', confidence: 'medium', evidence: 'e' }],
+    topFrames: [{ fn, url, selfMs: 120 }, { fn: 'tick', url: 'index-CNbvoNb_.js:9', selfMs: 3 }],
+    profileWindow: 'rolling-chunk', cluster: { key: `long-script|${fn}@${url}`, count: 1, new: true }, ...extra,
+  });
+  const pathing = footprintOf(t0('isTurnBanned', 'index-CNbvoNb_.js:4410'));
+  const world = footprintOf(t0('buildWorld', 'index-CNbvoNb_.js:120'));
+  assert.equal(pathing.key, 'hitch|?|long-script|fn:isTurnBanned');
+  assert.notEqual(pathing.id, world.id);                           // two causes, two rows
+  assert.notEqual(pathing.id, footprintOf(t0('x', 'y', { topFrames: [], cluster: undefined })).id);
+  // The next build moves the bundle's hash and the line: same cause, same row.
+  assert.equal(footprintOf(t0('isTurnBanned', 'index-D8x_qQ2a.js:4467')).id, pathing.id);
+  // The cluster's frame wins: attach merged an inlined leaf into its caller's cluster.
+  const merged = t0('stepAgents', 'index-CNbvoNb_.js:77', { cluster: { key: 'long-script|isTurnBanned@index-CNbvoNb_.js:4410', count: 3, new: false } });
+  assert.equal(footprintOf(merged).id, pathing.id);
+  // Anonymous functions keep their file (hash stripped), so they are not all one row.
+  assert.equal(footprintKey(t0('(anonymous)', 'worker-B1c2D3e4.js:5')), 'hitch|?|long-script|fn:(anonymous)@worker.js');
+  assert.equal(footprintKey(t0('(anonymous)', 'long-function.js:5')), 'hitch|?|long-script|fn:(anonymous)@long-function.js');
+  // A shader compile's cluster frame is the creation stack head: the site that asked.
+  const compile = t0('render', 'three.module.js:1', { classification: [{ guess: 'shader-compile', evidence: 'e' }],
+    cluster: { key: 'shader-compile|at WebGLRenderer.compile (http://localhost:5173/assets/index-CNbvoNb_.js:1:99)', count: 1, new: true } });
+  assert.equal(footprintKey(compile), 'hitch|?|shader-compile|create:WebGLRenderer.compile');
+  // A hitch the sampler's gate left unattributed names no site.
+  const gated = footprintOf(t0('x', 'y', { topFrames: [], profileWindow: 'none', unattributed: 'cooldown', cluster: undefined }));
+  assert.equal(gated.key, 'hitch|?|long-script');
+  // The host's own attribution still wins when a record carries both.
+  assert.equal(footprintKey(t0('isTurnBanned', 'a.js:1', { sections: [{ label: 'sim', excessMs: 9 }] })).split('|')[3], 'section:sim');
+  // The phase a page stamps (window.__sloptimizePhase) splits it like any hitch.
+  assert.equal(footprintKey(t0('isTurnBanned', 'a.js:1', { phase: 'spawn-flood' })), 'hitch|spawn-flood|long-script|fn:isTurnBanned');
+  assert.equal(describeFootprint(pathing.key).label, 'hitch · long-script · isTurnBanned');
+  assert.equal(describeFootprint(footprintKey(compile)).label, 'hitch · shader-compile · compiled from WebGLRenderer.compile');
+});
+
 test('every incident type has a footprint; heartbeats, arm-probes and settled waits have none', () => {
   assert.equal(footprintKey({ type: 'warm', tag: 'post', kind: 'batched', phase: 'boot:shaders', worstBatchMs: 2350 }), 'warm|post|batched|boot:shaders');
   assert.equal(footprintKey({ type: 'gpu-stall', phase: 'page-load', queueDoneMs: 878 }), 'gpu-stall|page-load');

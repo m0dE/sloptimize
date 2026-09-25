@@ -179,6 +179,7 @@ function createTracer(contentTracing, dir, log) {
  * @param {object} [opts.contentTracing]  with `trace: true`: GPU-side traces per new incident
  * @param {string} [opts.dir]
  * @param {boolean} [opts.trace]
+ * @param {string} [opts.build]      the bundle's identity (e.g. app.getVersion()), stamped on every record
  * @param {(...a:any[])=>void} [opts.log]
  */
 export async function attachInApp(opts = {}) {
@@ -193,7 +194,7 @@ export async function attachInApp(opts = {}) {
 
   const send = (method, params = {}) => dbg.sendCommand(method, params);
   const pipeline = createIncidentPipeline({
-    dir, log, send, regime,
+    dir, log, send, regime, build: opts.build,
     onNewCluster: tracer ? async (rec) => { const f = await tracer.cut(rec); if (f) rec.trace = f; } : undefined,
   });
 
@@ -222,6 +223,8 @@ export async function attachInApp(opts = {}) {
   return {
     clusters: pipeline.clusters,
     regime,
+    session: pipeline.session,
+    build: pipeline.build,
     async close() {
       if (tracer) await tracer.stop();
       if (!detached) { await pipeline.stop(); }

@@ -163,3 +163,27 @@ test('an unread window rolls itself over so Profiler.stop never serializes a ses
   await timers[2].fn();
   assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 3, 'a roll after stop is a no-op');
 });
+
+test('every line of one attach run carries its session and, when given, the build — and the catalogue splits causes', async () => {
+  const h = harness({ build: 'index-CNbvoNb_' });
+  await h.p.start();
+  assert.match(h.p.session, /^[0-9A-Za-z]{12}$/);
+  await h.p.onRecord({ type: 'heartbeat', at: '2026-09-09T00:00:00Z', medianFrameMs: 16 });
+  await h.p.onRecord(hitch('2026-09-09T00:00:02Z'));
+  h.setProfile('isTurnBanned');
+  await h.p.onRecord(hitch('2026-09-09T00:00:04Z'));
+  await h.p.onRecord({ type: 'hitch', at: '2026-09-09T00:00:06Z', frameMs: 120, session: 'theirs', build: 'b', classification: [{ guess: 'long-script' }] });
+  const l = h.lines();
+  assert.ok(l.slice(0, 3).every((r) => r.session === h.p.session && r.build === 'index-CNbvoNb_'));
+  assert.equal(l[3].session, 'theirs');   // a record that already names its own keeps it
+  assert.equal(l[3].build, 'b');
+  // Another run is another session; no build given, no build field.
+  const other = harness();
+  assert.notEqual(other.p.session, h.p.session);
+  await other.p.onRecord({ type: 'heartbeat', at: '2026-09-09T00:00:00Z' });
+  assert.equal('build' in other.lines()[0], false);
+  // What attach wrote, folded: two causes are two issues (the field report: one row for every hitch).
+  const { buildIssues } = await import('../src/history.js');
+  const rows = buildIssues(l.slice(0, 3));
+  assert.deepEqual(rows.map((r) => r.key).sort(), ['hitch|?|long-script|fn:buildWorld', 'hitch|?|long-script|fn:isTurnBanned']);
+});

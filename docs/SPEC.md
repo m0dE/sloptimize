@@ -417,6 +417,25 @@ frequent first, with `×N` and `last 3h ago`; picking a row opens its
 history — key, first and last seen, builds, worst, last verdict, and the
 fixes applied to it, or the exact command that would record one.
 
+**Tier 0's site.** An attach record carries no mints, sections or spans;
+it carries what the sampler saw (`topFrames`) and the cluster attach put it
+in (`cluster.key`, which already merged a cause seen from an inlined leaf
+into its caller's). Its site is the cluster frame's FUNCTION, else the
+heaviest top frame's: `fn:isTurnBanned` — by name, never `url:line`, since a
+content-hashed bundle and its line numbers move with every build and the
+same cause on the next build must be the same row. An anonymous function
+keeps its file with the bundler's hash stripped (`fn:(anonymous)@worker.js`);
+a shader-compile's cluster frame is its creation stack head
+(`create:WebGLRenderer.compile`); a hitch the sampler's gate left
+unattributed names no site. Until 0.8 no reader looked at `topFrames`, and
+every tier-0 hitch of every project was the one id `hitch|?|long-script`.
+The derivation's `v` stays 1: only keys that had no site gain one, a bump
+would reshuffle every host-instrumented id and orphan every fix linked to
+them, and the collapsed tier-0 id never named a cause a fix could address.
+A tier-0 page may also stamp its phase — `window.__sloptimizePhase =
+'steady'` — so a run with distinct workloads is keyed and filtered
+(`sloptimize issues --phase steady`) one phase at a time.
+
 Cloud path: the footprint is computed by the writer, so a service that
 ingests many clients' records dedupes on `footprint.id` from day one; the
 fold is the same code. The service is specified in the sloptimize-cloud repo
@@ -607,6 +626,18 @@ fixed 1/60s tick, run N frames, discard the first 120 (warmup: shader
 compiles, JIT), record per-frame deltas and counters, repeat the whole run R
 times (default 3), report per-metric median and p95 across runs plus the
 inter-run spread — the **noise floor**.
+
+Load comes from the snapshot, **never from a spawn ramp**. A flood that
+spawns N entities before measuring can't be timed reliably near map
+saturation. Spawns trickle through, so a zero-spawn stall guard never fires,
+yet the queue drains too slowly to beat a timeout. The same request then
+finishes in 262 s on one run and fails outright at 800 s on the next. If
+bench ever grows a population-ramp scenario, three rules apply. Stop the ramp
+once the current rate can't drain the queue before the deadline. Treat a
+timeout as a result: measure the entities actually placed and record
+`requested`/`placed`/`stopReason`. Put `placed` in `configHash`, so a short
+run is never compared as the full load. The reference guard is in slopjs
+`docs/research/stress-spawn-stall.md`.
 
 ### 6.2 Output (`bench/<name>.json`)
 
@@ -831,6 +862,20 @@ node and the page):
   the counters for this reason), hitch count and worst frame per bucket,
   and the build that ran. Plus one measured window per build. CLI:
   `sloptimize history [--json] [--buckets N]`; MCP: `get_history`.
+  A window's hitch RATE is over the minutes the feed was recording when
+  its records say so: heartbeats land once a minute while armed, so a
+  window that carries them is cut into **runs** — its evidence grouped by
+  `session` (tier 0 mints one per attach; the cloud sink one per tab),
+  each cut where a beating feed went silent for five minutes, each
+  spanning its first record to its last — and `hitchesPerHour` is hitches
+  over their summed span (`recordedMin`). A window with no beats cannot
+  tell silence from a quiet session and keeps its whole length. A window
+  holding several runs — one build measured more than once — carries
+  `runs` (each run's minutes, hitches and rate) and `spread: {n, lo, hi}`;
+  the Optimizations strip draws the spread as a whisker on the build's bar
+  and the CLI prints it beside the rate. The first field report measured
+  byte-identical bundles 27% apart in hitch count: a single run is one
+  noisy sample, and the number never again travels without its range.
 - **Fix ledger** — `.sloptimize/fixes.jsonl`, append-only, one record per
   verified fix: `title`, `issue`, `solution`, `commit`, `files`, `at`, and
   `before`/`after` — each a **measured window** of the ledger (the previous

@@ -163,7 +163,8 @@ npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 Add `--phase <name>[,<name>]` to `report`, `issues`, `history` or `fix` to
 read only the records stamped with those phases, e.g. the steady-state
 sample without the spawn flood before it (`fix --phase play` measures each
-build's play and records the phase on the fix).
+build's play and records the phase on the fix). Records with no phase
+answer to `--phase ?`.
 
 ## The cloud catalogue (optional — [sloptimizejs.com](https://sloptimizejs.com))
 

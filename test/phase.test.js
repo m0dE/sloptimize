@@ -38,12 +38,13 @@ test('parsePhases: a comma list, trimmed; absent or empty means no filter', () =
   assert.equal(parsePhases(' , '), null);
 });
 
-test('onlyPhases keeps the named phases and drops records with no phase at all', () => {
+test('onlyPhases keeps the named phases; a record with no phase answers only to `?`', () => {
   const recs = [...ledger(), hitch(300, 700, undefined, 'v2')];
   const play = onlyPhases(recs, parsePhases('play'));
   assert.ok(play.length > 0);
   assert.ok(play.every((r) => r.phase === 'play'));
-  assert.equal(onlyPhases(recs, parsePhases('play,flood')).length, recs.length - 1);   // the unphased hitch is not in any phase
+  assert.equal(onlyPhases(recs, parsePhases('play,flood')).length, recs.length - 1);   // the unphased hitch is not in any named phase
+  assert.deepEqual(onlyPhases(recs, parsePhases('?')).map((r) => r.frameMs), [700]);
   assert.equal(onlyPhases(recs, null), recs);
 });
 
@@ -95,6 +96,15 @@ test('a ledger with no phase at all says so, and says where a phase comes from',
   assert.equal(code, 4);
   assert.match(stdout, /no record on this ledger carries a phase/);
   assert.match(stdout, /frame\(\{ phase \}\)/);
+  assert.match(stdout, /__sloptimizePhase/);
+});
+
+test('--json: an empty match is the verb\'s usual empty shape, exit 0, and the reason goes to stderr', async () => {
+  const dir = ledgerDir(ledger());
+  const { code, stdout, stderr } = await run(['issues', '--dir', dir, '--phase', 'sample', '--json']);
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(stdout), []);
+  assert.match(stderr, /phases on this ledger: flood ×30, play ×8/);
 });
 
 test('report --phase: the hitch count and the issue head are that phase\'s alone', async () => {
@@ -102,7 +112,7 @@ test('report --phase: the hitch count and the issue head are that phase\'s alone
   const { code, stdout } = await run(['report', '--dir', dir, '--phase', 'play']);
   assert.equal(code, 0);
   assert.match(stdout, /phase: play/);
-  assert.match(stdout, /hitches recorded: 4\b/);
+  assert.match(stdout, /hitches in the last 80 play ledger lines: 4\b/);
   assert.doesNotMatch(stdout, /\[flood\]/);
 });
 
