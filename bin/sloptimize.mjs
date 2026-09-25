@@ -33,11 +33,35 @@ function readJsonl(name, limit = 50) {
 }
 function out(obj, human) { console.log(json ? JSON.stringify(obj, null, 2) : human); }
 
+// `--phase play[,sample]` scopes every ledger read below to those phases: a
+// load phase and a play phase are two workloads, and read together the
+// bigger one wins on volume alone. A filter that matches nothing exits 4
+// and says what the ledger does carry — never an empty report that reads
+// as "no problems".
+const phaseAt = args.indexOf('--phase');
+const H = phaseAt >= 0 ? await import('../src/history.js') : null;
+const phaseArg = args[phaseAt + 1];
+const PHASES = H?.parsePhases(phaseArg?.startsWith('--') ? undefined : phaseArg) ?? null;
+if (H && !PHASES) { console.error('sloptimize: --phase needs a name (or a comma list): --phase play'); process.exit(2); }
+function readLedger(limit = Infinity) {
+  if (!PHASES) return readJsonl('perf.jsonl', limit);
+  const all = readJsonl('perf.jsonl', Infinity);
+  const kept = H.onlyPhases(all, PHASES);
+  if (kept.length > 0 || all.length === 0) return kept.slice(-limit);   // an empty ledger is each verb's own message
+  const { phases, unphased } = H.phaseCounts(all);
+  const asked = [...PHASES].join(',');
+  out({ error: `no records in phase ${asked}`, phases: Object.fromEntries(phases), unphased },
+    phases.length === 0
+      ? `no record on this ledger carries a phase — the host stamps one per frame, rec.frame({ phase }) (tier 1, docs/INTEGRATION.md); tier-0 attach records carry none yet`
+      : `no records in phase ${asked} — phases on this ledger: ${phases.map(([p, n]) => `${p} ×${n}`).join(', ')}${unphased ? `; ${unphased} records carry no phase` : ''}`);
+  process.exit(4);
+}
+
 if (cmd === 'report') {
   const profile = readJson('profile.json');
   // 80 lines, not 20: heartbeats (1/min while a session is armed) share the
   // ledger and must not crowd the actual incidents out of the report window.
-  const hitches = readJsonl('perf.jsonl', 80);
+  const hitches = readLedger(80);
   const marks = hitches.filter((h) => h.type === 'usermark');
   const auto = hitches.filter((h) => h.type === 'hitch');
   const jitters = hitches.filter((h) => h.type === 'jitter');
@@ -45,6 +69,9 @@ if (cmd === 'report') {
   if (json) { out({ profile, hitches: auto, usermarks: marks, jitters, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
   console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}`);
+  // profile.json is the rolling summary of whatever ran last; everything
+  // read from the ledger below is the filtered phase's alone.
+  if (PHASES) console.log(`  phase: ${[...PHASES].join(',')} — heartbeat, host profile, hitches and issues below are this phase's only`);
   const beats = hitches.filter((h) => h.type === 'heartbeat');
   const lastBeat = beats[beats.length - 1];
   if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${lastBeat.medianFrameMs}ms p95 ${lastBeat.p95Ms}ms`);
@@ -85,7 +112,7 @@ if (cmd === 'report') {
   // The catalogue's head: which causes recur most (SPEC §3.7). The whole
   // ledger, not the 80-line window — recurrence is the point.
   const { buildIssues, agoText } = await import('../src/history.js');
-  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), { fixes: readJsonl('fixes.jsonl', Infinity) });
+  const issues = buildIssues(readLedger(), { fixes: readJsonl('fixes.jsonl', Infinity) });
   if (issues.length) {
     console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
     for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
@@ -113,13 +140,14 @@ if (cmd === 'issues') {
     let rows;
     try { rows = await fetchIssues(cfg, { preset: get('--preset'), from: get('--from'), to: get('--to'), source: get('--source'), kind: get('--kind') }); }
     catch (e) { console.error(`sloptimize issues --cloud: ${e.message}`); process.exit(4); }
+    if (PHASES) rows = rows.filter((i) => PHASES.has(i.phase));
     if (json) { out(rows); process.exit(0); }
-    if (rows.length === 0) { console.log('no incidents in this range on the cloud catalogue'); process.exit(4); }
+    if (rows.length === 0) { console.log(`no incidents in this range${PHASES ? ` and phase ${[...PHASES].join(',')}` : ''} on the cloud catalogue`); process.exit(4); }
     console.log(`cloud ${cfg.endpoint} · ${get('--preset') ?? (get('--from') ? 'custom' : '24h')} · ${rows.length} footprints`);
     for (const i of rows) console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}] ${i.source}  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.fixCount ? `  fixes ${i.fixCount}` : ''}`);
     process.exit(0);
   }
-  const issues = buildIssues(readJsonl('perf.jsonl', Infinity), {
+  const issues = buildIssues(readLedger(), {
     fixes: readJsonl('fixes.jsonl', Infinity), from: get('--from'), to: get('--to'), includeAutomated: args.includes('--all'),
   });
   if (json) { out(issues); process.exit(0); }
@@ -288,11 +316,11 @@ if ((cmd === 'fix' && ['propose', 'merge', 'reject', 'list'].includes(sub)) || c
     if (sub === 'propose') {
       if (!get('--title')) { console.error('sloptimize fix propose: --title is required'); process.exit(2); }
       const { buildFix } = await import('../src/history.js');
-      const records = readJsonl('perf.jsonl', Infinity);
+      const records = readLedger();
       const fix = P.proposeFix(REPO, DIR, {
         title: get('--title'), issue: get('--issue'), solution: get('--solution'), branch: get('--branch'),
         files: get('--files')?.split(','), push: !args.includes('--no-push'),
-        footprints: get('--footprints')?.split(',').filter(Boolean),
+        footprints: get('--footprints')?.split(',').filter(Boolean), phase: PHASES ? [...PHASES].join(',') : undefined,
         measure: () => { const f = buildFix(records, { title: get('--title'), before: get('--before'), after: get('--after') }); return { before: f.before, after: f.after }; },
       });
       out(fix, `proposed: ${fix.title}\n  branch ${fix.branch} @ ${fix.commit}${fix.pushed ? ' (pushed)' : ''}\n  id ${fix.id}${fix.before ? '' : '\n  (no measured before/after yet — the numbers land when it is played)'}`);
@@ -313,7 +341,7 @@ if (cmd === 'history' || cmd === 'fix') {
   // the agent names the issue, the solution and the commit; the numbers
   // come from the recorder, never from the agent.
   const { buildHistory, buildFix } = await import('../src/history.js');
-  const records = readJsonl('perf.jsonl', Infinity);
+  const records = readLedger();
   const fixes = readJsonl('fixes.jsonl', Infinity);
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
   const fmt = (v, unit = '') => (v === undefined ? '—' : `${v}${unit}`);
@@ -328,7 +356,7 @@ if (cmd === 'history' || cmd === 'fix') {
     try {
       fix = buildFix(records, { title: get('--title'), issue: get('--issue'), solution: get('--solution'), commit,
         files: get('--files')?.split(','), before: get('--before'), after: get('--after'),
-        footprints: get('--footprints')?.split(',').filter(Boolean) });
+        footprints: get('--footprints')?.split(',').filter(Boolean), phase: PHASES ? [...PHASES].join(',') : undefined });
     } catch (e) { console.error(`sloptimize fix: ${e.message}`); process.exit(4); }
     const { appendFileSync, mkdirSync } = await import('node:fs');
     mkdirSync(DIR, { recursive: true });
@@ -345,13 +373,13 @@ if (cmd === 'history' || cmd === 'fix') {
       ? [...fix.moved.sections.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before, 'ms')} → ${fmt(r.after, 'ms')}${r.share !== undefined && Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`),
         ...fix.moved.counts.slice(0, 12).map((r) => `    ${r.name}: ${fmt(r.before)} → ${fmt(r.after)}${Number.isFinite(r.share) ? ` (${r.share >= 0 ? '+' : ''}${Math.round(r.share * 100)}%)` : ''}`)]
       : [];
-    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}${moved.length ? `\n  moved (host sections, then counters that changed ≥20%):\n${moved.join('\n')}` : ''}`);
+    out(fix, `fix recorded: ${fix.title}${fix.commit ? ` (${fix.commit})` : ''}${fix.phase ? `  phase ${fix.phase}` : ''}\n  before ${fix.before.build ?? fix.before.from}: ${line(fix.before)}\n  after  ${fix.after.build ?? fix.after.from}: ${line(fix.after)}${moved.length ? `\n  moved (host sections, then counters that changed ≥20%):\n${moved.join('\n')}` : ''}`);
     process.exit(0);
   }
   const h = buildHistory(records, { fixes, buckets: Number(get('--buckets')) || 24 });
   if (json) { out(h); process.exit(0); }
   if (!h.span) { console.log('no measured records in perf.jsonl yet'); process.exit(4); }
-  console.log(`history ${h.span.from} → ${h.span.to}  (${h.builds.length} builds, ${h.fixes.length} fixes)`);
+  console.log(`history ${h.span.from} → ${h.span.to}  (${h.builds.length} builds, ${h.fixes.length} fixes)${PHASES ? `  phase ${[...PHASES].join(',')}` : ''}`);
   for (const b of h.builds) console.log(`  build ${b.build.padEnd(16)} ${b.from.slice(0, 16)}  ${line(b)}`);
   console.log('  buckets:');
   for (const b of h.buckets) console.log(`  ${b.from.slice(5, 16)}  p95 ${String(fmt(b.p95Ms)).padStart(7)}  calls ${String(fmt(b.calls)).padStart(5)}  hitches ${String(b.hitches).padStart(3)}  ${b.worstMs ? `worst ${b.worstMs}ms ${b.worstGuess ?? ''}` : ''}`);
@@ -444,5 +472,5 @@ if (cmd === 'attach') {
   await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

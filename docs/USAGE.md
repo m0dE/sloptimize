@@ -160,6 +160,11 @@ npx sloptimize history --dir <game>/.sloptimize  # p95/calls/hitches over time, 
 npx sloptimize doctor --dir <game>/.sloptimize   # what is wired/degraded
 ```
 
+Add `--phase <name>[,<name>]` to `report`, `issues`, `history` or `fix` to
+read only the records stamped with those phases, e.g. the steady-state
+sample without the spawn flood before it (`fix --phase play` measures each
+build's play and records the phase on the fix).
+
 ## The cloud catalogue (optional — [sloptimizejs.com](https://sloptimizejs.com))
 
 With a project on sloptimize cloud (sign in with GitHub, create a project,

@@ -261,7 +261,7 @@ export function buildFix(records, opts = {}) {
     at: opts.now ?? new Date().toISOString(),
     title: opts.title ?? '',
   };
-  for (const k of ['issue', 'solution', 'commit', 'files', 'footprints']) if (opts[k]) fix[k] = opts[k];
+  for (const k of ['issue', 'solution', 'commit', 'files', 'footprints', 'phase']) if (opts[k]) fix[k] = opts[k];
   fix.before = windowReport(records, resolveWindow(records, before, 'before'));
   fix.after = windowReport(records, resolveWindow(records, after, 'after'));
   // The host's own numbers, moved: present only when both windows carried
@@ -344,6 +344,38 @@ function worstOf(r) {
     case 'server-stall': return typeof r.p99Ms === 'number' ? { value: r.p99Ms, unit: 'ms' } : undefined;
     default: return undefined;
   }
+}
+
+/** `--phase play,sample` → the set of phases to keep; null when no filter
+ *  was asked for (absent, empty, or only commas). */
+export function parsePhases(spec) {
+  if (typeof spec !== 'string') return null;
+  const names = spec.split(',').map((s) => s.trim()).filter(Boolean);
+  return names.length ? new Set(names) : null;
+}
+
+/**
+ * The records of the named phases only. A session with a load phase and a
+ * play phase is two workloads in one ledger, and read together the bigger
+ * one wins on volume alone (ticket e605e66b: a 5-minute spawn flood outvoted
+ * a 60-second steady-state sample and named the wrong subsystem). A record
+ * with no phase is in none of them — it is dropped, never guessed into one.
+ */
+export function onlyPhases(records, phases) {
+  if (!phases) return records;
+  return records.filter((r) => typeof r?.phase === 'string' && phases.has(r.phase));
+}
+
+/** Which phases the ledger carries, busiest first, and how many records
+ *  carry none — what a filter that matched nothing says instead. */
+export function phaseCounts(records) {
+  const counts = new Map();
+  let unphased = 0;
+  for (const r of records) {
+    if (typeof r?.phase === 'string' && r.phase) counts.set(r.phase, (counts.get(r.phase) ?? 0) + 1);
+    else unphased++;
+  }
+  return { phases: [...counts].sort((a, b) => b[1] - a[1]), unphased };
 }
 
 /** "X ago", the way a human reads a last occurrence. */

@@ -348,6 +348,13 @@ sloptimize watch         the push channel: one stdout line per usermark /
 sloptimize doctor        what is wired, what is degraded, stated limits
 ```
 
+`--phase play[,sample]` scopes `report`, `issues`, `history` and `fix` to
+the records the host stamped with those phases (`rec.frame({ phase })`). A
+session with a load phase and a play phase is two workloads in one ledger;
+read together, the bigger one wins on volume alone. Records with no phase
+are in none, and a filter that matches nothing exits 4 and names the phases
+the ledger does carry.
+
 ## What it will tell you it cannot do
 
 Printed by `doctor`, kept in the spec, never silently degraded: no per-draw

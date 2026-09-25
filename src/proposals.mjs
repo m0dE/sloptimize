@@ -137,6 +137,7 @@ export function proposeFix(repoDir, dir, opts) {
     ...(opts.issue ? { issue: opts.issue } : {}), ...(opts.solution ? { solution: opts.solution } : {}),
     ...(opts.files ? { files: opts.files } : {}),
     ...(opts.footprints?.length ? { footprints: opts.footprints } : {}),
+    ...(opts.phase ? { phase: opts.phase } : {}),
     branch, commit, base, main, from: current, pushed, status: 'proposed', before, after,
   };
   append(dir, fix);
