@@ -279,7 +279,7 @@ function isCapRefusal(answer) {
 }
 
 const SESSION_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-function mintSession() {
+export function mintSession() {
   const bytes = new Uint8Array(12);
   const c = globalThis.crypto;
   if (c && typeof c.getRandomValues === 'function') c.getRandomValues(bytes);

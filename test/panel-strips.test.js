@@ -77,3 +77,15 @@ test('buildHistory last: the newest N builds, a cut the ledger picks — and the
   recs.push(beat(3 * 1440 + 5, 'b0', 99));
   assert.deepEqual(buildHistory(recs, { last: 2 }).builds.map((b) => b.build), ['b2', 'b3']);
 });
+
+test('stripsSvg: a build measured in several runs draws its runs\' range as a whisker on the hitch bar', () => {
+  const recs = [];
+  const hit = (min, session) => ({ type: 'hitch', at: iso(min), frameMs: 200, medianMs: 8, session, build: 'b0', classification: [{ guess: 'long-script', evidence: 'e' }] });
+  for (let m = 0; m <= 10; m++) recs.push(beat(m, 'b0', 30, { session: 's1' }), beat(100 + m, 'b0', 30, { session: 's2' }));
+  recs.push(hit(1, 's1'), hit(101, 's2'), hit(102, 's2'), hit(103, 's2'));
+  for (let m = 0; m <= 10; m++) recs.push(beat(1440 + m, 'b1', 30));   // one run: no whisker
+  const h = buildHistory(recs);
+  assert.deepEqual(h.builds[0].spread, { n: 2, lo: 6, hi: 18 });
+  const { svg } = stripsSvg(h);
+  assert.equal((svg.match(/class="sl-spread"/g) || []).length, 1);
+});

@@ -33,7 +33,7 @@ test('summarizeWindow: jitters are counted with a rate, absent when there were n
   recs.push(jit(10, 'v1'), jit(11, 'v1'), jit(12, 'v1'));
   const before = summarizeWindow(recs, T0, T0 + 60 * 60_000 - 1);
   assert.equal(before.jitters, 3);
-  assert.equal(before.jittersPerHour, 3);
+  assert.equal(before.jittersPerHour, 3.1);         // over the 59 minutes the feed beat, not the window's 60
   assert.equal(before.hitches, 4);                 // a jitter is not a hitch
   const after = summarizeWindow(recs, T0 + 60 * 60_000, T0 + 120 * 60_000);
   assert.equal(after.jitters, undefined);
@@ -54,7 +54,7 @@ test('summarizeWindow: medians of the heartbeats, hitch count/rate/worst, top gu
   assert.equal(s.calls, 900);
   assert.equal(s.programs, 40);
   assert.equal(s.hitches, 4);
-  assert.equal(s.hitchesPerHour, 4);
+  assert.equal(s.hitchesPerHour, 4.1);              // 4 over the 59 recorded minutes (beats 0..59)
   assert.equal(s.worstMs, 900);
   assert.equal(s.topGuess, 'long-script');
   assert.equal(s.regime, 'hardware');

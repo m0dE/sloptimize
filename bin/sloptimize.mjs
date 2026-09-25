@@ -47,11 +47,22 @@ if (cmd === 'report') {
   console.log(`profile @ ${profile.at}  regime=${profile.regime ?? 'unknown'}`);
   const beats = hitches.filter((h) => h.type === 'heartbeat');
   const lastBeat = beats[beats.length - 1];
-  if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${lastBeat.medianFrameMs}ms p95 ${lastBeat.p95Ms}ms`);
+  // A field a record does not carry is '—', never "undefined": tier 0
+  // measures the rAF clock and the graphics API, not the engine, so it has
+  // no inside-render time and no program count to report — and a hidden
+  // page's beat drew no frames to time.
+  const fmt = (v, unit = '') => (v === undefined || v === null ? '—' : `${v}${unit}`);
+  if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${fmt(lastBeat.medianFrameMs, 'ms')} p95 ${fmt(lastBeat.p95Ms, 'ms')}`);
   if (profile.frame?.medianMs !== undefined) {
-    console.log(`  frame median ${profile.frame.medianMs}ms  p95 ${profile.frame.p95Ms}ms  (~${profile.frame.fps}fps)  inside-render ${profile.frame.insideRenderMs}ms`);
+    console.log(`  frame median ${fmt(profile.frame.medianMs, 'ms')}  p95 ${fmt(profile.frame.p95Ms, 'ms')}  (~${fmt(profile.frame.fps, 'fps')})  inside-render ${fmt(profile.frame.insideRenderMs, 'ms')}`);
   }
-  if (profile.render) console.log(`  calls ${profile.render.calls}  triangles ${profile.render.triangles}  programs ${profile.memory?.programs}`);
+  if (profile.render) {
+    // Tier 0 counts at the WebGL/WebGPU API, averaged over its sample window;
+    // tier 1 reads the engine's own renderer.info. Said, so the two are not
+    // read as the same instrument.
+    const per = profile.tier === 0 ? `  (tier 0: per frame, mean of ${fmt(profile.render.frames)} frames, counted at the graphics API)` : '';
+    console.log(`  calls ${fmt(profile.render.calls)}  triangles ${fmt(profile.render.triangles)}  programs ${fmt(profile.memory?.programs)}${per}`);
+  }
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
   // anyone at the keyboard. Twelve sections and the counters that moved
@@ -65,9 +76,12 @@ if (cmd === 'report') {
     const cnts = Object.entries(lastProf.counts ?? {});
     if (cnts.length) console.log(`    counts (${cnts.length}): ${cnts.slice(0, 12).map(([k, v]) => `${k} ${v}`).join('  ')}`);
   }
-  console.log(`  hitches recorded: ${auto.length} (showing last ${Math.min(auto.length, 20)})  usermarks: ${marks.length}`);
+  // The count is of the report window (the last 80 ledger lines), not the
+  // ledger — `sloptimize issues` and `history` fold all of it.
+  console.log(`  hitches in the last 80 ledger lines: ${auto.length} (showing last ${Math.min(auto.length, 5)})  usermarks: ${marks.length}`);
   for (const h of auto.slice(-5)) {
-    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}`);
+    const top = h.topFrames?.[0];
+    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${top ? `  top ${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms` : h.unattributed ? `  unattributed (${h.unattributed})` : ''}`);
   }
   for (const m of marks.slice(-3)) {
     const w = m.worstFrames?.[0];
@@ -121,9 +135,10 @@ if (cmd === 'issues') {
   }
   const issues = buildIssues(readJsonl('perf.jsonl', Infinity), {
     fixes: readJsonl('fixes.jsonl', Infinity), from: get('--from'), to: get('--to'), includeAutomated: args.includes('--all'),
+    phase: get('--phase'),
   });
   if (json) { out(issues); process.exit(0); }
-  if (issues.length === 0) { console.log('no incidents on the ledger yet'); process.exit(4); }
+  if (issues.length === 0) { console.log(get('--phase') ? `no incidents in phase "${get('--phase')}"` : 'no incidents on the ledger yet'); process.exit(4); }
   const only = get('--fp');
   for (const i of issues) {
     if (only && i.id !== only) continue;
@@ -317,7 +332,11 @@ if (cmd === 'history' || cmd === 'fix') {
   const fixes = readJsonl('fixes.jsonl', Infinity);
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
   const fmt = (v, unit = '') => (v === undefined ? '—' : `${v}${unit}`);
-  const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${fmt(s.hitchesPerHour)}/h, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
+  // The rate is over RECORDED minutes when the feed beat (`recordedMin`), and
+  // a build measured in several runs says so with their range — one run's
+  // count is one noisy sample.
+  const rate = (s) => `${fmt(s.hitchesPerHour)}/h${s.recordedMin !== undefined ? ` over ${s.recordedMin} min` : ''}${s.spread ? `, ${s.spread.n} runs ${s.spread.lo}–${s.spread.hi}/h` : ''}`;
+  const line = (s) => `p95 ${fmt(s.p95Ms, 'ms')}  calls ${fmt(s.calls)}  hitches ${s.hitches} (${rate(s)}, worst ${fmt(s.worstMs, 'ms')}${s.worstGuess ? ` ${s.worstGuess}` : ''})`;
   if (cmd === 'fix') {
     let commit = get('--commit');
     if (!commit) {
@@ -423,8 +442,9 @@ if (cmd === 'attach') {
     dir: get('--dir') ?? '.sloptimize',
     headless: args.includes('--headless'),
     minHitchMs: get('--min-hitch-ms') ? Number(get('--min-hitch-ms')) : undefined,
+    build: get('--build'),
   });
-  console.log('[attach] recording — Ctrl+C to stop');
+  console.log(`[attach] recording — session ${session.session}${session.build ? `, build ${session.build}` : ''} — Ctrl+C to stop`);
   // Any signal a wrapper sends stops the sampler in the page before we go;
   // and the target going away ends the session — an attach without a target
   // has nothing to record and must not linger with a CDP session open. Both
@@ -444,5 +464,5 @@ if (cmd === 'attach') {
   await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless] [--build <id>]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase p] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

@@ -98,15 +98,87 @@ try {
       return r;
     };
   }
-  // WebGL fallback counters — same shape, older API.
+  // WebGL counters — same shape, older API. EVERY draw entry point three.js
+  // uses, not just the two plain ones: an InstancedMesh draws through
+  // drawElementsInstanced, a BatchedMesh through WEBGL_multi_draw, and a
+  // WebGL1 context instances through ANGLE_instanced_arrays. The first field
+  // report (a WebGL2 game full of instanced cars) read 79 calls where the
+  // game's renderer.info read 306 — the instanced draws were invisible.
+  // Counted the way renderer.info counts them, so the two can be compared:
+  // one call per API call (a multi-draw is one), triangles by mode × instances.
+  const wrap = (proto, name, count) => {
+    const orig = proto && proto[name];
+    if (typeof orig !== 'function' || orig.__sloptimize) return;
+    // Positional, no rest array: this runs on every draw of every frame.
+    const w = function () { try { count.apply(null, arguments); } catch { /* never the game's error */ } return orig.apply(this, arguments); };
+    w.__sloptimize = true;
+    proto[name] = w;
+  };
+  const sum = (list, off, n) => { let s = 0; for (let i = 0; i < n; i++) s += list[off + i] ?? 0; return s; };
+  const sumProd = (xs, xo, ys, yo, n) => { let s = 0; for (let i = 0; i < n; i++) s += (xs[xo + i] ?? 0) * (ys[yo + i] ?? 0); return s; };
+  const drew = (mode, n, inst = 1) => { gpu.draws++; gpu.triangles += trianglesOf(mode, n) * inst; };
+  const drewMulti = (mode, verts) => { gpu.draws++; gpu.triangles += trianglesOf(mode, verts); };
+  const extPatched = new Set();
   for (const ctxName of ['WebGL2RenderingContext', 'WebGLRenderingContext']) {
     const C = globalThis[ctxName];
     if (!C) continue;
-    const de = C.prototype.drawElements, da = C.prototype.drawArrays;
-    C.prototype.drawElements = function (m, n, ...a) { gpu.draws++; gpu.triangles += Math.floor(n / 3); return de.call(this, m, n, ...a); };
-    C.prototype.drawArrays = function (m, f, n) { gpu.draws++; gpu.triangles += Math.floor(n / 3); return da.call(this, m, f, n); };
+    const p = C.prototype;
+    wrap(p, 'drawArrays', (m, first, n) => drew(m, n));
+    wrap(p, 'drawElements', (m, n) => drew(m, n));
+    wrap(p, 'drawArraysInstanced', (m, first, n, inst) => drew(m, n, inst));
+    wrap(p, 'drawElementsInstanced', (m, n, type, off, inst) => drew(m, n, inst));
+    wrap(p, 'drawRangeElements', (m, start, end, n) => drew(m, n));
+    // Program links: the WebGL half of "who compiled this?" — the same
+    // creation ledger the WebGPU pipeline wraps keep, so a WebGL compile
+    // stall classifies as shader-compile and names its call site.
+    const link = p.linkProgram;
+    if (typeof link === 'function' && !link.__sloptimize) {
+      p.linkProgram = function (...a) {
+        gpu.creates++; sessionCreates++;
+        const t0 = performance.now();
+        try { return link.apply(this, a); }
+        finally {
+          if (sessionCreates <= 500) {
+            emit({ type: 'gpu-create', at: new Date().toISOString(), fn: 'linkProgram', ms: +(performance.now() - t0).toFixed(2),
+              stack: (new Error().stack || '').split('\n').slice(2, 7).join('\n') });
+          }
+        }
+      };
+      p.linkProgram.__sloptimize = true;
+    }
+    // Extension draws: the objects have no global interface to patch, so
+    // their prototypes are patched as getExtension first hands one out.
+    const getExt = p.getExtension;
+    if (typeof getExt === 'function') {
+      p.getExtension = function (name) {
+        const ext = getExt.call(this, name);
+        const ep = (name === 'ANGLE_instanced_arrays' || name === 'WEBGL_multi_draw') && ext ? Object.getPrototypeOf(ext) : null;
+        if (ep && !extPatched.has(ep)) {
+          extPatched.add(ep);
+          if (name === 'ANGLE_instanced_arrays') {
+            wrap(ep, 'drawArraysInstancedANGLE', (m, first, n, inst) => drew(m, n, inst));
+            wrap(ep, 'drawElementsInstancedANGLE', (m, n, type, off, inst) => drew(m, n, inst));
+          } else {
+            wrap(ep, 'multiDrawArraysWEBGL', (m, fs, fo, cs, co, dc) => drewMulti(m, sum(cs, co, dc)));
+            wrap(ep, 'multiDrawElementsWEBGL', (m, cs, co, type, os, oo, dc) => drewMulti(m, sum(cs, co, dc)));
+            wrap(ep, 'multiDrawArraysInstancedWEBGL', (m, fs, fo, cs, co, is, io, dc) => drewMulti(m, sumProd(cs, co, is, io, dc)));
+            wrap(ep, 'multiDrawElementsInstancedWEBGL', (m, cs, co, type, os, oo, is, io, dc) => drewMulti(m, sumProd(cs, co, is, io, dc)));
+          }
+        }
+        return ext;
+      };
+    }
   }
 } catch (e) { emit({ type: 'wrap-error', error: String(e) }); }
+
+/** Triangles in a draw of `n` vertices/indices, by primitive mode — lines
+ *  and points draw none (renderer.info counts them apart). */
+function trianglesOf(mode, n) {
+  n = Number(n) || 0;
+  if (mode === 4) return Math.floor(n / 3);            // TRIANGLES
+  if (mode === 5 || mode === 6) return Math.max(n - 2, 0);   // TRIANGLE_STRIP, TRIANGLE_FAN
+  return 0;
+}
 
 // ── Long tasks: the JS half of attribution the profiler completes ───────────
 let longTaskMs = 0;
@@ -115,6 +187,32 @@ try {
     for (const e of list.getEntries()) longTaskMs += e.duration;
   }).observe({ type: 'longtask', buffered: true });
 } catch { /* unsupported */ }
+
+// ── The page's phase: the one knob a tier-0 page may turn ───────────────────
+// Attach needs no game code, but a run whose workload has distinct phases
+// (a spawn flood, then a steady state) is two measurements in one ledger,
+// and the long phase dominates on volume alone. One optional line in the
+// page — `window.__sloptimizePhase = 'steady'` — and every hitch, profile
+// and heartbeat after it carries `phase`, so the footprint splits by it and
+// `sloptimize issues --phase steady` reads one phase. Unset: no field.
+function pagePhase() {
+  const p = globalThis.__sloptimizePhase;
+  return typeof p === 'string' && p ? p.replace(/[|,=\s]+/g, '_').slice(0, 40) : undefined;
+}
+
+/** The p-th percentile of the frame ring (rare: once per profile/beat). */
+function ringPct(p) {
+  if (count === 0) return undefined;
+  const vals = Array.from(frameMsRing.subarray(0, count)).sort((a, b) => a - b);
+  return vals[Math.min(count - 1, Math.floor(p * count))];
+}
+
+// Draw counters folded over a window, so a profile or a beat reports the
+// MEAN frame, not whichever single frame the timer landed on.
+const PROFILE_EVERY = 120;
+const win = { frames: 0, draws: 0, tris: 0 };
+const beat = { frames: 0, draws: 0, tris: 0 };
+const BEAT_MS = 60_000;
 
 // ── The frame loop: detection lives HERE (SPEC v2 §2) ───────────────────────
 function tick(ts) {
@@ -130,6 +228,8 @@ function tick(ts) {
   const draws = gpu.draws, tris = gpu.triangles, creates = gpu.creates, upKB = gpu.uploadKB;
   const lt = longTaskMs;
   gpu.draws = 0; gpu.triangles = 0; gpu.creates = 0; gpu.uploadKB = 0; longTaskMs = 0;
+  win.frames++; win.draws += draws; win.tris += tris;
+  beat.frames++; beat.draws += draws; beat.tris += tris;
 
   const median = rollingMedian();
   if (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS)) {
@@ -140,18 +240,49 @@ function tick(ts) {
       // draw share and long-task ms are the honest stand-ins, and the node
       // side attaches profiler topFrames.
       longTaskMs: +lt.toFixed(1),
-      delta: { calls: draws, triangles: tris, programs: creates, textures: 0, geometries: 0 },
+      // `delta` is a CHANGE, as in tier 1 (programs created in this frame);
+      // what the frame drew is a count, and rides as `render` — the same
+      // name and meaning as a profile's. Textures and geometries are not
+      // measured at this tier, so they are absent, not zero.
+      delta: { programs: creates },
+      render: { calls: draws, triangles: tris },
       gpu: { uploadKB: +upKB.toFixed(1) },
       classification: classifyHitch({ frameMs, medianMs: median, insideRenderMs: 0, delta: { programs: creates }, spawned: 0 }),
-      tier: 0,
+      tier: 0, phase: pagePhase(),
     });
   }
-  if (frameNo % 120 === 0) {
+  if (frameNo % PROFILE_EVERY === 0) {
+    const p95 = ringPct(0.95);
     emit({ type: 'profile', at: new Date().toISOString(),
-      frame: { medianMs: +median.toFixed(2) },
-      render: { calls: draws, triangles: tris }, tier: 0 });
+      frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2) },
+      render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
+      tier: 0, phase: pagePhase() });
+    win.frames = 0; win.draws = 0; win.tris = 0;
   }
 }
+
+// ── Heartbeat (INTEGRATION.md §2): once a minute while attached ─────────────
+// A quiet ledger then MEANS the session ended, and `history` measures a
+// build's hitch rate over the minutes the feed was live — not over the gap
+// between two runs of the same build. On a timer, not the rAF: a hidden page
+// still beats (with no frame numbers, because it drew none).
+try {
+  setInterval(() => {
+    // `programs` here is creations since the page loaded (links + pipelines);
+    // tier 1's is the engine's live count. Both only grow when a compile ran.
+    const rec = { type: 'heartbeat', at: new Date().toISOString(), tier: 0, programs: sessionCreates, phase: pagePhase() };
+    if (beat.frames > 0) {
+      const med = ringPct(0.5), p95 = ringPct(0.95);
+      rec.medianFrameMs = med === undefined ? undefined : +med.toFixed(2);
+      rec.p95Ms = p95 === undefined ? undefined : +p95.toFixed(2);
+      rec.calls = Math.round(beat.draws / beat.frames);
+      rec.triangles = Math.round(beat.tris / beat.frames);
+      rec.frames = beat.frames;
+    }
+    beat.frames = 0; beat.draws = 0; beat.tris = 0;
+    emit(rec);
+  }, BEAT_MS);
+} catch { /* no timers */ }
 requestAnimationFrame(tick);
 // A hidden window (minimized Electron BrowserWindow, background tab) stops
 // rAF entirely; without this the first frame back would report the whole
