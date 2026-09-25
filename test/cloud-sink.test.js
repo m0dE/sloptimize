@@ -22,7 +22,9 @@ function harness({ statuses = [], bodies = [] } = {}) {
     fetch, sendBeacon: (url, blob) => { beacons.push({ url, blob }); return true; },
   };
 }
-const mk = (h, over = {}) => createCloudSink({ key: 'pk_live_x', endpoint: 'https://c.example/v1/ingest', build: 'b1', sources: [h.source], fetch: h.fetch, sendBeacon: h.sendBeacon, target: h.target, setInterval: h.setInterval, clearInterval: h.clearInterval, now: h.now, ...over });
+// The device record (ruling 36) is its own test block below; everything else counts records
+// without it.
+const mk = (h, over = {}) => createCloudSink({ key: 'pk_live_x', endpoint: 'https://c.example/v1/ingest', build: 'b1', sources: [h.source], fetch: h.fetch, sendBeacon: h.sendBeacon, target: h.target, setInterval: h.setInterval, clearInterval: h.clearInterval, now: h.now, device: false, ...over });
 
 test('drains sources on the timer and posts a batch with the key and build', async () => {
   const h = harness();
@@ -367,4 +369,68 @@ test('a rate-limit 429 (drops not all cap) still backs off and keeps the batch',
   assert.equal(sink.stats().queued, 2);
   assert.ok(sink.stats().backoffUntil > 0);
   assert.equal(sink.stats().capped, 0);
+});
+
+// ── The device (cloud ruling 36) and profiles (ruling 37) ──────────────────────
+
+const PHONE = { ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', platform: 'iOS', mobile: true, dpr: 3, cores: 6 };
+
+test('a sink files one device record first: the browser facts, then the host facts over them', async () => {
+  const h = harness();
+  const sink = mk(h, { device: { gpu: 'Apple GPU', backend: 'webgl2', mobile: true }, browserDevice: () => PHONE, session: 'tab-A' });
+  h.source.pending.push({ type: 'hitch', at: 'x' });
+  await sink.flush();
+  const [dev, hitch] = h.calls[0].body.records;
+  assert.equal(dev.type, 'device');
+  assert.equal(dev.session, 'tab-A');
+  assert.equal(dev.build, 'b1');
+  assert.deepEqual(dev.device, { ...PHONE, gpu: 'Apple GPU', backend: 'webgl2' });
+  assert.equal(hitch.type, 'hitch');
+});
+
+test('sink.device(facts) files again only when something changed, and cleans what it sends', async () => {
+  const h = harness();
+  const sink = mk(h, { device: { level: 'low' }, browserDevice: () => PHONE });
+  sink.device({ level: 'low' });                                  // unchanged: nothing
+  sink.device({ level: 'medium', nested: { no: 1 }, long: 'x'.repeat(500), 'bad key!': 1 });
+  await sink.flush();
+  const devs = h.calls[0].body.records.filter((r) => r.type === 'device');
+  assert.equal(devs.length, 2);
+  assert.equal(devs[1].device.level, 'medium');
+  assert.equal(devs[1].device.nested, undefined);
+  assert.equal(devs[1].device['bad key!'], undefined);
+  assert.equal(devs[1].device.long.length, 160);
+});
+
+test('no device record without a session, or when the host says device: false', async () => {
+  for (const over of [{ session: false, device: {} }, { device: false }]) {
+    const h = harness();
+    const sink = mk(h, { browserDevice: () => PHONE, ...over });
+    sink.device({ level: 'low' });
+    h.source.pending.push({ type: 'hitch', at: 'x' });
+    await sink.flush();
+    assert.equal(h.calls[0].body.records.filter((r) => r.type === 'device').length, 0, JSON.stringify(over));
+  }
+});
+
+test('profiles go to the cloud at most one per profileEveryMs; the rest are counted as thinned', async () => {
+  const h = harness();
+  const sink = mk(h, { profileEveryMs: 60_000 });
+  const profile = () => ({ type: 'profile', at: 'x', window: { frames: 120 }, sections: { render: 4 } });
+  for (let i = 0; i < 7; i++) { sink.enqueue([profile()]); h.tick(10_000); }   // 0 s … 60 s
+  h.source.pending.push(profile());                                           // at 70 s, from a source
+  await sink.flush();
+  assert.equal(h.calls[0].body.records.filter((r) => r.type === 'profile').length, 2, 'the first, and the one a minute later');
+  assert.equal(sink.stats().profilesThinned, 6);
+});
+
+test('over the cap, devices and profiles keep flowing with the beats', async () => {
+  const h = harness({ statuses: [202], bodies: [{ accepted: 0, capped: 'daily', retryAfter: 3600, dropped: [{ index: 0, reason: 'cap' }] }] });
+  const sink = mk(h, { device: {}, browserDevice: () => PHONE });
+  h.source.pending.push({ type: 'hitch', at: 'x' });
+  await sink.flush();
+  sink.device({ level: 'medium' });
+  sink.enqueue([{ type: 'profile', at: 'x', window: { frames: 1 }, sections: { a: 1 } }, { type: 'hitch', at: 'y' }]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['device', 'profile']);
 });

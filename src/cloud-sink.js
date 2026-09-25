@@ -16,9 +16,25 @@
 // retry would only be refused again), and everything else keeps posting. The
 // refused batch's incidents are shed with it rather than parked at the head of
 // the queue, where they would hold every later beat back until the reset.
+//
+// THE DEVICE (cloud ruling 36): a sink with a session files one `device`
+// record when it is created — the browser's own facts (device.js) merged with
+// whatever the host passes as `device` — and a fresh one whenever the host
+// calls `sink.device(facts)` with something that changed (a quality level
+// picked, a renderer that resolved). `device: false` files none.
+//
+// PROFILES (cloud ruling 37): a host that samples its frame (SPEC §3.2b)
+// posts a `profile` record every ~10 s to its local ledger. The cloud keeps
+// one a minute per session: the sink forwards the first and then at most one
+// per `profileEveryMs`, and counts the rest in `stats().profilesThinned` —
+// thinned on purpose, never lost to a fault.
+import { browserDevice, cleanDevice } from './device.js';
+
 const BACKOFF_MS = [5000, 30000, 120000, 300000];
-/** Records the cap never binds (cloud rulings 31/32/35). */
-export const UNCAPPED_TYPES = Object.freeze(new Set(['heartbeat', 'page-exit']));
+/** Records the cap never binds (cloud rulings 31/32/35/36/37). */
+export const UNCAPPED_TYPES = Object.freeze(new Set(['heartbeat', 'page-exit', 'device', 'profile']));
+/** How often a session's frame profile goes to the cloud (ruling 37). */
+export const PROFILE_EVERY_MS = 60_000;
 const isUncapped = (r) => !!r && UNCAPPED_TYPES.has(r.type);
 
 export function createCloudSink(opts = {}) {
@@ -47,7 +63,20 @@ export function createCloudSink(opts = {}) {
   let failures = 0, backoffUntil = 0, inflight = false;
   /** While now() < cappedUntil the service refuses incidents: shed them. */
   let cappedUntil = 0;
-  const stats = { sent: 0, lastError: null, lastStatus: null, capped: 0 };
+  const stats = { sent: 0, lastError: null, lastStatus: null, capped: 0, profilesThinned: 0 };
+  const profileEveryMs = opts.profileEveryMs ?? PROFILE_EVERY_MS;
+  let lastProfileAt = -Infinity;
+  /** Profiles past the cadence are thinned here, before they take a queue slot. */
+  function admit(records) {
+    if (!records.some((r) => r?.type === 'profile')) return records;
+    return records.filter((r) => {
+      if (r?.type !== 'profile') return true;
+      const t = now();
+      if (t - lastProfileAt < profileEveryMs) { stats.profilesThinned++; return false; }
+      lastProfileAt = t;
+      return true;
+    });
+  }
   function shedCapped() {
     if (now() >= cappedUntil) return;
     const before = queue.length;
@@ -73,7 +102,7 @@ export function createCloudSink(opts = {}) {
   function drain(final = false) {
     for (const s of sources) {
       let r; try { r = s.drainRecords(final ? FINAL : undefined); } catch { continue; }
-      if (r && r.length) queue.push(...stamp(r));
+      if (r && r.length) queue.push(...stamp(admit(r)));
     }
     trim();
   }
@@ -194,6 +223,25 @@ export function createCloudSink(opts = {}) {
       if (ok) { queue = queue.slice(batch.length); droppedLocally = Math.max(0, droppedLocally - beaconedDropped); stats.sent += batch.length; }
     } catch { /* never throw into the host */ }
   }
+  // The device record (ruling 36): only a session has one, and a host may opt out.
+  const deviceOn = session !== null && opts.device !== false;
+  let hostFacts = typeof opts.device === 'object' && opts.device !== null ? opts.device : {};
+  let lastDevice = '';
+  const readBrowser = opts.browserDevice ?? (() => browserDevice());
+  function fileDevice(facts) {
+    if (!deviceOn) return;
+    try {
+      if (facts && typeof facts === 'object') hostFacts = facts;
+      const device = cleanDevice({ ...readBrowser(), ...hostFacts });
+      const sig = JSON.stringify(device);
+      if (sig === lastDevice) return;
+      lastDevice = sig;
+      queue.push(...stamp([{ type: 'device', at: new Date(now()).toISOString(), ...(build ? { build } : {}), device }]));
+      trim();
+    } catch { /* never throw into the host */ }
+  }
+  fileDevice();
+
   const timer = setI(() => { flush(); }, flushMs);
   // Never keep a game server's (or any Node host's) event loop alive just
   // to poll for records — this sink runs beside the host's own liveness,
@@ -209,12 +257,15 @@ export function createCloudSink(opts = {}) {
       // A host tee that hands over something other than an array is a wiring
       // bug in the host, not a reason to throw into its drain loop.
       if (!Array.isArray(records)) { stats.lastError = 'enqueue: expected an array of records'; return; }
-      if (records.length) queue.push(...stamp(records));
+      if (records.length) queue.push(...stamp(admit(records)));
       trim();
     },
+    /** File the session's device again with the host's facts now (ruling 36): only when they
+     *  differ from the last filed. The browser's facts are re-read too (a rotated phone). */
+    device(facts) { fileDevice(facts); },
     /** The id every record of this sink is stamped with. */
     session: () => session,
-    stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, cappedUntil, capped: stats.capped, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
+    stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, cappedUntil, capped: stats.capped, profilesThinned: stats.profilesThinned, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
     dispose() { clearI(timer); target.removeEventListener?.('pagehide', onHide); target.removeEventListener?.('visibilitychange', onVis); },
   };
 }
