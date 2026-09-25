@@ -627,6 +627,18 @@ compiles, JIT), record per-frame deltas and counters, repeat the whole run R
 times (default 3), report per-metric median and p95 across runs plus the
 inter-run spread — the **noise floor**.
 
+Load comes from the snapshot, **never from a spawn ramp**. A flood that
+spawns N entities before measuring can't be timed reliably near map
+saturation. Spawns trickle through, so a zero-spawn stall guard never fires,
+yet the queue drains too slowly to beat a timeout. The same request then
+finishes in 262 s on one run and fails outright at 800 s on the next. If
+bench ever grows a population-ramp scenario, three rules apply. Stop the ramp
+once the current rate can't drain the queue before the deadline. Treat a
+timeout as a result: measure the entities actually placed and record
+`requested`/`placed`/`stopReason`. Put `placed` in `configHash`, so a short
+run is never compared as the full load. The reference guard is in slopjs
+`docs/research/stress-spawn-stall.md`.
+
 ### 6.2 Output (`bench/<name>.json`)
 
 ```json
