@@ -210,6 +210,27 @@ whose drops are all `cap`), the sink sheds incidents until the answer's
 `Retry-After` and keeps posting beats and exits, so a capped day does not
 blind the Sessions view. `sink.stats().capped` counts what it shed.
 
+**The device and the frame (0.7.0).** A sink with a session files one
+`device` record when it is created (cloud ruling 36). It carries the browser's
+own facts (`ua`, `platform`, `mobile`, `touch`, `dpr`, `screenW/H`, `vw/vh`,
+`cores`, `memGB`; `browserDevice()` reads them) merged with what only the host
+knows, passed as `device`: its GPU as its renderer resolved it, its backend,
+its quality level, its drawing buffer. Call `sink.device(facts)` when those
+change; it files again only if something differs. `device: false` files none.
+Keep it to performance facts: the cloud refuses more than 48 fields or
+strings over 160 chars.
+
+```js
+const cloud = createCloudSink({ key, endpoint, build, device: { gpu, backend: 'webgl2', level: 'low', bw: 603, bh: 276 } });
+cloud.device({ gpu, backend: 'webgl2', level: 'medium', bw: 1206, bh: 552 });   // the player picked Medium
+```
+
+A host that samples its frame (the SPEC §3.2b `profile` record) can tee it to
+the cloud like any record. The sink forwards the first and then one per
+`profileEveryMs` (60 s), and counts the rest in `stats().profilesThinned`.
+The cloud keeps each map's largest entries and shows ms/frame per section,
+per phase, on the session's page (ruling 37). Neither record is ever quota.
+
 ### How the last page ended (optional — `createExitTrail`)
 
 A player "thrown back to the menu" is a page being replaced, and no incident
