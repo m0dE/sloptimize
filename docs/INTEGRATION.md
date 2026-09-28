@@ -209,6 +209,12 @@ When the service says the cap is spent (a `202` carrying `capped`, or a `429`
 whose drops are all `cap`), the sink sheds incidents until the answer's
 `Retry-After` and keeps posting beats and exits, so a capped day does not
 blind the Sessions view. `sink.stats().capped` counts what it shed.
+Errors outlast the cap (0.7.1, cloud ruling 38): the service keeps a daily
+reserve past the cap for them alone, so the sink keeps posting errors until an
+answer says `errorsCapped`, then sheds them too until its `Retry-After`
+(`stats().errorsCapped` counts those, `stats().errorsCappedUntil` says when
+they flow again). A cloud older than the ruling never says `errorsCapped`;
+when it refuses errors for the cap, the sink treats them as capped.
 
 **The device and the frame (0.7.0).** A sink with a session files one
 `device` record when it is created (cloud ruling 36). It carries the browser's
