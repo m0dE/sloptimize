@@ -371,6 +371,103 @@ test('a rate-limit 429 (drops not all cap) still backs off and keeps the batch',
   assert.equal(sink.stats().capped, 0);
 });
 
+// ── Errors outlast the cap (cloud ruling 38): shed only once the service says errorsCapped ──
+
+const err = (n) => ({ type: 'error', at: `x${n}`, name: 'TypeError', message: 'boom' });
+
+test('while capped, errors keep posting with the beats; only the other incidents are shed', async () => {
+  const h = harness({ bodies: [{ accepted: 0, series: 1, dropped: [{ index: 0, reason: 'cap' }], capped: 'daily', retryAfter: 600 }] });
+  const sink = mk(h);
+  sink.enqueue([inc(1), beat(1)]);
+  await sink.flush();
+  sink.enqueue([inc(2), err(1), beat(2)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['error', 'heartbeat']);
+  assert.equal(sink.stats().capped, 2);
+  assert.equal(sink.stats().errorsCapped, 0);
+  assert.equal(sink.stats().errorsCappedUntil, 0);
+});
+
+test('a cap 429 that does not cap errors keeps the batch\'s errors at the front with its beats', async () => {
+  // The service refused a batch of nothing but incidents; the reserve is not spent, so its
+  // answer has no errorsCapped (a cap refusal of jitter alone from a ruling-38 cloud).
+  const first = [inc(1), inc(2)];
+  const h = harness({ statuses: [429, 202], bodies: [capAnswer(first)] });
+  const sink = mk(h);
+  sink.enqueue(first);
+  await sink.flush();
+  sink.enqueue([err(1), inc(3), beat(1)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['error', 'heartbeat']);
+  assert.equal(sink.stats().capped, 3);
+  assert.equal(sink.stats().errorsCapped, 0);
+});
+
+test('errorsCapped sheds errors too until its deadline; then they flow again', async () => {
+  const h = harness({ bodies: [{ accepted: 0, series: 1, dropped: [{ index: 0, reason: 'cap' }, { index: 1, reason: 'cap' }], capped: 'daily', errorsCapped: true, retryAfter: 600 }] });
+  const sink = mk(h);
+  sink.enqueue([err(1), inc(1), beat(1)]);
+  await sink.flush();
+  assert.equal(sink.stats().capped, 2);
+  assert.equal(sink.stats().errorsCapped, 1);
+  assert.ok(sink.stats().errorsCappedUntil >= 600_000);
+  sink.enqueue([err(2), inc(2), beat(2)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+  assert.equal(sink.stats().errorsCapped, 2);
+  h.tick(601_000);
+  sink.enqueue([err(3), inc(3)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[2].body.records.map((r) => r.type), ['error', 'hitch']);
+});
+
+test('a cap 429 that says errorsCapped sheds the batch\'s errors with its incidents, and caps the rest too', async () => {
+  const first = [err(1), beat(1), err(2)];
+  const h = harness({ statuses: [429, 202], bodies: [{ ...capAnswer(first), errorsCapped: true }] });
+  const sink = mk(h);
+  sink.enqueue(first);
+  await sink.flush();
+  assert.equal(sink.stats().errorsCapped, 2);
+  assert.ok(sink.stats().errorsCappedUntil >= 30_000);
+  assert.ok(sink.stats().cappedUntil >= 30_000, 'the reserve lies past the cap');
+  sink.enqueue([inc(1), err(3)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+  assert.equal(sink.stats().capped, 4);
+});
+
+test('an older cloud (no errorsCapped field) that refused errors for the cap caps them: no retry storm', async () => {
+  // Before ruling 38 the service had no reserve: its 429 refuses errors with the rest.
+  const first = [err(1), inc(1), beat(1)];
+  const h = harness({ statuses: [429, 202, 202], bodies: [capAnswer(first)] });
+  const sink = mk(h);
+  sink.enqueue(first);
+  await sink.flush();
+  assert.equal(sink.stats().errorsCapped, 1);
+  assert.equal(sink.stats().capped, 2);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+  sink.enqueue([err(2), beat(2)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[2].body.records.map((r) => r.type), ['heartbeat'], 'shed until the Retry-After');
+  h.tick(31_000);
+  sink.enqueue([err(3)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[3].body.records.map((r) => r.type), ['error']);
+});
+
+test('an older cloud\'s 202 that dropped an error for the cap caps errors too', async () => {
+  const h = harness({ bodies: [{ accepted: 0, series: 1, dropped: [{ index: 0, reason: 'cap' }], capped: 'daily', retryAfter: 600 }] });
+  const sink = mk(h);
+  sink.enqueue([err(1), beat(1)]);
+  await sink.flush();
+  assert.equal(sink.stats().errorsCapped, 1);
+  assert.ok(sink.stats().errorsCappedUntil >= 600_000);
+  sink.enqueue([err(2), beat(2)]);
+  await sink.flush();
+  assert.deepEqual(h.calls[1].body.records.map((r) => r.type), ['heartbeat']);
+});
+
 // ── The device (cloud ruling 36) and profiles (ruling 37) ──────────────────────
 
 const PHONE = { ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', platform: 'iOS', mobile: true, dpr: 3, cores: 6 };

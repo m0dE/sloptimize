@@ -6,16 +6,23 @@
 // its queue, and tells the service how many it had to drop locally so the
 // dashboard's "dropped" column is honest. Never throws into the host.
 //
-// THE CAP (cloud rulings 32/34): a project's daily cap and an account's
+// THE CAP (cloud rulings 32/34/38): a project's daily cap and an account's
 // monthly quota bind INCIDENTS only. The series (`heartbeat`) and a page's exit
 // (`page-exit`) are never quota — they are what says a tab is alive and how it
 // ended, and they must keep flowing when the incidents cannot. So a cap answer
 // (a 202 that says `capped`, or a 429 whose drops are all `cap`) puts the sink
-// in CAPPED mode until the answer's Retry-After: incidents are shed as they
-// come (counted in `capped`, never re-sent — the service refused them, and a
-// retry would only be refused again), and everything else keeps posting. The
-// refused batch's incidents are shed with it rather than parked at the head of
-// the queue, where they would hold every later beat back until the reset.
+// in CAPPED mode until the answer's Retry-After: incidents other than errors
+// are shed as they come (counted in `capped`, never re-sent — the service
+// refused them, and a retry would only be refused again), and everything else
+// keeps posting. The refused batch's incidents are shed with it rather than
+// parked at the head of the queue, where they would hold every later beat back
+// until the reset. ERRORS (ruling 38) outlast the cap: the service keeps a daily
+// reserve for them past it, because errors are how a load failure is found. They
+// keep posting until an answer says `errorsCapped` (the reserve or the month's
+// quota is spent), and are shed from then until that answer's Retry-After
+// (counted in `errorsCapped` as well as `capped`). A cap refusal that turned
+// errors away without an `errorsCapped` field at all comes from a cloud older
+// than ruling 38, which has no reserve: errors are capped with the rest there.
 //
 // THE DEVICE (cloud ruling 36): a sink with a session files one `device`
 // record when it is created — the browser's own facts (device.js) merged with
@@ -36,6 +43,8 @@ export const UNCAPPED_TYPES = Object.freeze(new Set(['heartbeat', 'page-exit', '
 /** How often a session's frame profile goes to the cloud (ruling 37). */
 export const PROFILE_EVERY_MS = 60_000;
 const isUncapped = (r) => !!r && UNCAPPED_TYPES.has(r.type);
+/** The one incident the cap binds last (ruling 38). */
+const isError = (r) => !!r && r.type === 'error';
 
 export function createCloudSink(opts = {}) {
   if (!opts.key) throw new Error('createCloudSink: key is required');
@@ -61,9 +70,11 @@ export function createCloudSink(opts = {}) {
   let queue = [];
   let droppedLocally = 0;
   let failures = 0, backoffUntil = 0, inflight = false;
-  /** While now() < cappedUntil the service refuses incidents: shed them. */
+  /** While now() < cappedUntil the service refuses incidents other than errors: shed them. */
   let cappedUntil = 0;
-  const stats = { sent: 0, lastError: null, lastStatus: null, capped: 0, profilesThinned: 0 };
+  /** While now() < errorsCappedUntil it refuses errors too (ruling 38): shed them as well. */
+  let errorsCappedUntil = 0;
+  const stats = { sent: 0, lastError: null, lastStatus: null, capped: 0, errorsCapped: 0, profilesThinned: 0 };
   const profileEveryMs = opts.profileEveryMs ?? PROFILE_EVERY_MS;
   let lastProfileAt = -Infinity;
   /** Profiles past the cadence are thinned here, before they take a queue slot. */
@@ -77,15 +88,35 @@ export function createCloudSink(opts = {}) {
       return true;
     });
   }
+  /** True when the service would refuse this record for the cap right now. */
+  function isShed(r) {
+    if (isUncapped(r)) return false;
+    return now() < (isError(r) ? errorsCappedUntil : cappedUntil);
+  }
+  /** Count records shed for the cap: every one in `capped`, the errors in `errorsCapped` too. */
+  function countShed(records) {
+    stats.capped += records.length;
+    stats.errorsCapped += records.filter(isError).length;
+  }
   function shedCapped() {
-    if (now() >= cappedUntil) return;
-    const before = queue.length;
-    queue = queue.filter(isUncapped);
-    stats.capped += before - queue.length;
+    if (now() >= cappedUntil && now() >= errorsCappedUntil) return;
+    const shed = queue.filter(isShed);
+    if (shed.length === 0) return;
+    queue = queue.filter((r) => !isShed(r));
+    countShed(shed);
+  }
+  function capDeadline(retryAfterSec) {
+    const wait = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : BACKOFF_MS[BACKOFF_MS.length - 1];
+    return now() + wait;
   }
   function enterCapped(retryAfterSec) {
-    const wait = Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec * 1000 : BACKOFF_MS[BACKOFF_MS.length - 1];
-    cappedUntil = Math.max(cappedUntil, now() + wait);
+    cappedUntil = Math.max(cappedUntil, capDeadline(retryAfterSec));
+  }
+  /** The reserve lies past the cap, so errors capped means every incident is. */
+  function enterErrorsCapped(retryAfterSec) {
+    const until = capDeadline(retryAfterSec);
+    errorsCappedUntil = Math.max(errorsCappedUntil, until);
+    cappedUntil = Math.max(cappedUntil, until);
   }
 
   function trim() {
@@ -163,24 +194,31 @@ export function createCloudSink(opts = {}) {
       });
       stats.lastStatus = res.status;
       const retryAfter = Number(res.headers?.get?.('retry-after'));
+      const refusal = res.status === 429 ? await readJson(res) : null;
       if (res.ok) {
         droppedLocally = Math.max(0, droppedLocally - sentDropped);
         failures = 0; backoffUntil = 0; stats.sent += batch.length; if (!droppedThisPass) stats.lastError = null;
         // Read AFTER the batch is accounted: the answer only says whether the
         // service split it at the cap.
         const answer = res.status === 202 ? await readJson(res) : null;
-        if (answer?.capped) {
-          stats.capped += Array.isArray(answer.dropped) ? answer.dropped.filter((d) => d?.reason === 'cap').length : 0;
-          enterCapped(Number.isFinite(Number(answer.retryAfter)) ? Number(answer.retryAfter) : retryAfter);
+        if (answer?.capped || answer?.errorsCapped) {
+          const capDrops = Array.isArray(answer.dropped) ? answer.dropped.filter((d) => d?.reason === 'cap') : [];
+          countShed(capDrops.map((d) => batch[d.index]).filter((r) => r !== undefined));
+          const ra = Number.isFinite(Number(answer.retryAfter)) ? Number(answer.retryAfter) : retryAfter;
+          if (answer.capped) enterCapped(ra);
+          if (errorsCapped(answer, capDrops.map((d) => batch[d.index]))) enterErrorsCapped(ra);
         }
-      } else if (res.status === 429 && isCapRefusal(await readJson(res))) {
-        // The cap, not the rate: shed the batch's incidents, keep its beats
-        // and exits at the front, and post those at once — no backoff.
-        const keep = batch.filter(isUncapped);
-        stats.capped += batch.length - keep.length;
-        queue = keep.concat(queue);
+      } else if (res.status === 429 && isCapRefusal(refusal)) {
+        // The cap, not the rate: shed the batch's incidents, keep its beats,
+        // exits and devices — and its errors, unless the answer says they are
+        // capped too — at the front, and post those at once: no backoff.
+        const errorsToo = errorsCapped(refusal, batch);
+        const kept = (r) => isUncapped(r) || (isError(r) && !errorsToo);
+        countShed(batch.filter((r) => !kept(r)));
+        queue = batch.filter(kept).concat(queue);
         trim();
         enterCapped(retryAfter);
+        if (errorsToo) enterErrorsCapped(retryAfter);
         stats.lastError = 'HTTP 429 (cap)';
       } else if (res.status === 429 || res.status >= 500) {
         // Retryable: put the batch back at the front (it's the oldest data)
@@ -265,13 +303,25 @@ export function createCloudSink(opts = {}) {
     device(facts) { fileDevice(facts); },
     /** The id every record of this sink is stamped with. */
     session: () => session,
-    stats() { return { queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, cappedUntil, capped: stats.capped, profilesThinned: stats.profilesThinned, lastError: stats.lastError, lastStatus: stats.lastStatus }; },
+    stats() {
+      return {
+        queued: queue.length, sent: stats.sent, droppedLocally, backoffUntil, cappedUntil, errorsCappedUntil,
+        capped: stats.capped, errorsCapped: stats.errorsCapped, profilesThinned: stats.profilesThinned, lastError: stats.lastError, lastStatus: stats.lastStatus,
+      };
+    },
     dispose() { clearI(timer); target.removeEventListener?.('pagehide', onHide); target.removeEventListener?.('visibilitychange', onVis); },
   };
 }
 
 async function readJson(res) {
   try { return typeof res.json === 'function' ? await res.json() : null; } catch { return null; }
+}
+/** Whether a cap answer turned errors away too (ruling 38): it says `errorsCapped`, or it is from a
+ *  cloud older than the ruling (no `errorsCapped` field at all) and errors were among the records
+ *  it refused for the cap — such a cloud has no reserve, and retrying them would only be refused. */
+function errorsCapped(answer, refused) {
+  if (answer && typeof answer === 'object' && Object.hasOwn(answer, 'errorsCapped')) return answer.errorsCapped === true;
+  return refused.some(isError);
 }
 /** A 429 that is the cap or the quota (every drop `cap`), not the rate limit. */
 function isCapRefusal(answer) {
