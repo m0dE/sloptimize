@@ -110,6 +110,16 @@ poses as a tier-1 measurement.
   clustering (same classification + same top frame ⇒ same incident id,
   count incremented) is REQUIRED in v2 so the agent investigates a cause
   once, not per occurrence. New in this draft; unimplemented.
+- **Detection has an absolute arm**: in the page, a frame is a hitch
+  above 2× the rolling median (and the `--min-hitch-ms` floor, 25 ms by
+  default) once the ring holds 60 frames — OR above 200 ms (never below
+  the floor) regardless of the median and the ring. The relative arm
+  alone was blind to a load, learned in the field: attach reloads the
+  page, a boot-time restore spends its first seconds in a handful of
+  multi-second frames, and a 12-second city load never put 60 frames in
+  the ring — zero hitches, a ledger that read as "nothing went wrong". A
+  phase slow long enough to fill half the ring also lifts the median past
+  its own spikes; the absolute bar does not move.
 - **Profiler observer effect**: 1–3% steady overhead plus GC from stack
   sampling. Bounded and labeled (`profiled: true` on the window) so a
   profiled p95 is never compared against an unprofiled one. The bound is

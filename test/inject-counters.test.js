@@ -126,3 +126,19 @@ test('window.__sloptimizePhase stamps hitches, profiles and beats; unset, there 
   p.intervals[0].fn();
   assert.equal(p.of('heartbeat')[0].phase, 'steady_state');
 });
+
+// Ticket dd02a72f: the phase was stamped at three call sites, so a load's
+// records — mostly shader links and pipeline creates — carried none, and
+// `--phase load` read 3 of 73 records. emit() stamps every type now.
+test('the phase rides every record type, gpu-create included, not just hitches/profiles/beats', () => {
+  const p = page();
+  p.gl.linkProgram();
+  assert.equal('phase' in p.of('gpu-create')[0], false);
+  p.ctx.__sloptimizePhase = 'load';
+  p.gl.linkProgram();
+  assert.equal(p.of('gpu-create')[1].phase, 'load');
+  p.ctx.__sloptimizePhase = 'play';
+  p.frame(16);
+  p.frame(300);
+  assert.equal(p.of('hitch')[0].phase, 'play');
+});

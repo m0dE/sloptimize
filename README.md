@@ -106,8 +106,12 @@ fold into one build with its runs' range in `sloptimize history`: run-to-run
 noise is real (the first field report measured byte-identical bundles 27%
 apart in hitch count), and the page beats once a minute so rates are over
 the minutes actually recorded. A page with distinct phases can say so with
-one optional line, `window.__sloptimizePhase = 'steady'`, and `sloptimize
-issues --phase steady` reads just that phase. Draws are counted at the
+one optional line, `window.__sloptimizePhase = 'steady'`, and every record
+after it — hitches, beats and pipeline creations alike — carries the phase, so
+`sloptimize issues --phase steady` reads just that phase. A frame is a hitch
+at 2× the rolling median (once 60 frames are in), or at 200 ms whatever the
+median — so a load that is slow from its first frame still records its
+stalls. Draws are counted at the
 WebGL/WebGPU API the way `renderer.info` counts them — instanced and
 multi-draw calls included — as a mean over the sample window.
 
