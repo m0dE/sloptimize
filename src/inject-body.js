@@ -17,9 +17,17 @@
 
 const RING = 600;
 // The absolute floor for detection: a frame is a hitch above 2× the rolling
-// median AND above this. 25 ms by default; `attach --min-hitch-ms N` raises
+// median AND above this (or above ABS_HITCH_MS, below). 25 ms by default; `attach --min-hitch-ms N` raises
 // it in the page, so sub-floor frames never cross the binding at all.
 const MIN_HITCH_MS = Math.max(25, (typeof __sloptimizeOpts !== 'undefined' && +__sloptimizeOpts.minHitchMs) || 0);
+// The absolute arm: a frame this long is a hitch whatever the median says and
+// however few frames the ring holds. The relative arm alone was blind to a
+// load: attach reloads the page, a boot-time restore spends its first seconds
+// in a handful of multi-second frames, and a field report's 12-second city
+// load (rows of 4489/1963/1305 ms) never put 60 frames in the ring — zero
+// hitches, an empty ledger that read as "nothing went wrong". A phase slow
+// for long enough also lifts the median past its own spikes; this bar never moves.
+const ABS_HITCH_MS = Math.max(8 * 25, MIN_HITCH_MS);
 const frameMsRing = new Float64Array(RING);
 let head = 0, count = 0, frameNo = 0;
 let lastRaf = -1;
@@ -30,11 +38,19 @@ const gpu = { draws: 0, triangles: 0, creates: 0, uploadKB: 0 };
 let sessionCreates = 0;
 
 function emit(obj) {
+  // Stamped here, not at each call site: per-site stamping is how gpu-create,
+  // gpu-queue-lag, wrap-error and armed all went out with no phase, and a
+  // load — mostly creates — was invisible to `--phase load`.
+  const phase = pagePhase();
+  if (phase !== undefined) obj.phase = phase;
   try { __sloptimizeEmit(JSON.stringify(obj)); } catch { /* binding gone */ }
 }
 
 function rollingMedian() {
-  if (--medianStale > 0) return medianCache;
+  // Fresh every frame while the ring is young (≤60 values: cheap), so an
+  // absolute-arm hitch in the first second reads the median of the frames
+  // so far — not the first frame's, cached for sixty.
+  if (count > 60 && --medianStale > 0) return medianCache;
   const vals = [];
   for (let i = 0; i < count; i++) vals.push(frameMsRing[i]);
   vals.sort((a, b) => a - b);
@@ -192,8 +208,8 @@ try {
 // Attach needs no game code, but a run whose workload has distinct phases
 // (a spawn flood, then a steady state) is two measurements in one ledger,
 // and the long phase dominates on volume alone. One optional line in the
-// page — `window.__sloptimizePhase = 'steady'` — and every hitch, profile
-// and heartbeat after it carries `phase`, so the footprint splits by it and
+// page — `window.__sloptimizePhase = 'steady'` — and every record after it
+// (emit() stamps it) carries `phase`, so the footprint splits by it and
 // `sloptimize issues --phase steady` reads one phase. Unset: no field.
 function pagePhase() {
   const p = globalThis.__sloptimizePhase;
@@ -232,7 +248,7 @@ function tick(ts) {
   beat.frames++; beat.draws += draws; beat.tris += tris;
 
   const median = rollingMedian();
-  if (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS)) {
+  if (frameMs > ABS_HITCH_MS || (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS))) {
     emit({
       type: 'hitch', at: new Date().toISOString(), frame: frameNo,
       frameMs: +frameMs.toFixed(1), medianMs: +median.toFixed(2),
@@ -248,7 +264,7 @@ function tick(ts) {
       render: { calls: draws, triangles: tris },
       gpu: { uploadKB: +upKB.toFixed(1) },
       classification: classifyHitch({ frameMs, medianMs: median, insideRenderMs: 0, delta: { programs: creates }, spawned: 0 }),
-      tier: 0, phase: pagePhase(),
+      tier: 0,
     });
   }
   if (frameNo % PROFILE_EVERY === 0) {
@@ -256,7 +272,7 @@ function tick(ts) {
     emit({ type: 'profile', at: new Date().toISOString(),
       frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2) },
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
-      tier: 0, phase: pagePhase() });
+      tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0;
   }
 }
@@ -270,7 +286,7 @@ try {
   setInterval(() => {
     // `programs` here is creations since the page loaded (links + pipelines);
     // tier 1's is the engine's live count. Both only grow when a compile ran.
-    const rec = { type: 'heartbeat', at: new Date().toISOString(), tier: 0, programs: sessionCreates, phase: pagePhase() };
+    const rec = { type: 'heartbeat', at: new Date().toISOString(), tier: 0, programs: sessionCreates };
     if (beat.frames > 0) {
       const med = ringPct(0.5), p95 = ringPct(0.95);
       rec.medianFrameMs = med === undefined ? undefined : +med.toFixed(2);

@@ -60,3 +60,37 @@ test('minHitchMs raises the in-page floor above 2× median', () => {
   d.frame(60);
   assert.equal(d.hitches().length, 1, 'the default floor is unchanged');
 });
+
+// Ticket dd02a72f: 2× the median needs a ring of 60 frames and a fast
+// baseline. A boot-time load has neither — attach reloads the page, and a
+// 12-second city load spent itself in a handful of multi-second frames:
+// zero hitches recorded. The absolute arm (200 ms) fires regardless.
+test('a multi-second stall in the first 60 frames is a hitch (the absolute arm)', () => {
+  const p = page();
+  for (let i = 0; i < 20; i++) p.frame(16);
+  for (let i = 0; i < 10; i++) p.frame(100);   // slow, but under the absolute bar: no ring yet, no hitch
+  assert.equal(p.hitches().length, 0);
+  p.frame(4489); p.frame(100); p.frame(1963); p.frame(1305);
+  assert.deepEqual(p.hitches().map((h) => h.frameMs), [4489, 1963, 1305]);
+  // The median it reports is of the frames so far — not the first frame's, cached.
+  assert.equal(p.hitches()[0].medianMs, 16);
+});
+
+test('a phase slow long enough to lift the median still records a stall past the absolute bar', () => {
+  const p = page();
+  for (let i = 0; i < 300; i++) p.frame(16);
+  for (let i = 0; i < 400; i++) p.frame(120);   // the median climbs to 120: 2× is 240
+  const before = p.hitches().length;
+  p.frame(230);
+  assert.equal(p.hitches().length, before + 1);
+  assert.equal(p.hitches().at(-1).medianMs, 120);
+});
+
+test('the absolute arm respects a raised --min-hitch-ms', () => {
+  const p = page({ minHitchMs: 500 });
+  p.frame(16);
+  p.frame(400);
+  assert.equal(p.hitches().length, 0);
+  p.frame(600);
+  assert.equal(p.hitches().length, 1);
+});
