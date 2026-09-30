@@ -87,3 +87,21 @@ test('drawRange trims the triangle count — a merged pool bills only what it su
   const c = buildCensus({ entities: [{ id: 'pool', root: group('pool', [mesh(g, mat())]) }] });
   assert.equal(c.entities[0].triangles, 20);
 });
+
+test('instanced-stale-slots: between two walks, a moving InstancedMesh with drawn slots that never changed is said, with its numbers', () => {
+  // The field bug: a cull stopped writing off-screen transforms, count stayed at the high-water mark.
+  const arr = new Float32Array(100 * 16);
+  const cars = { isMesh: true, isInstancedMesh: true, name: 'cars', geometry: geo(10), material: mat(), visible: true, children: [], count: 100, instanceMatrix: { array: arr } };
+  const city = group('city', [cars]);
+  const first = buildCensus({ entities: [{ id: 'traffic', root: city }], now: 1000 });
+  assert.equal(first.hints.filter((h) => h.kind === 'instanced-stale-slots').length, 0, 'one walk has nothing to compare');
+  for (let i = 0; i < 5; i++) arr[i * 16 + 12] += 1;       // only 5 cars were written
+  const second = buildCensus({ entities: [{ id: 'traffic', root: city }], now: 3000 });
+  const h = second.hints.find((x) => x.kind === 'instanced-stale-slots');
+  assert.deepEqual(h.estimate, { drawn: 100, changed: 5, unchanged: 95 });
+  assert.match(h.detail, /cars: 100 slots drawn, 5 of 100 changed over the last 2\.0s — 95 unchanged/);
+  assert.deepEqual(second.entities[0].instanceSlots, [{ name: 'cars', drawn: 100, compared: 100, changed: 5, sinceMs: 2000 }]);
+  // A mesh where nothing moved is static, and says nothing.
+  const third = buildCensus({ entities: [{ id: 'traffic', root: city }], now: 4000 });
+  assert.equal(third.hints.filter((x) => x.kind === 'instanced-stale-slots').length, 0);
+});

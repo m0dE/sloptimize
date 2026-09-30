@@ -111,7 +111,23 @@ after it — hitches, beats and pipeline creations alike — carries the phase, 
 `sloptimize issues --phase steady` reads just that phase. A frame is a hitch
 at 2× the rolling median (once 60 frames are in), or at 200 ms whatever the
 median — so a load that is slow from its first frame still records its
-stalls. Draws are counted at the
+stalls.
+
+Attach **reloads the page** so the recorder runs before any page script: an
+app that was already up boots once more, and the app's own log shows that
+boot (terrain generation, save parse, the lot) twice. Only the boot after the
+reload is recorded — one `armed` line per session — so sloptimize's load-phase
+counts are of one boot; the app's own counters are not. If the page
+navigates or reloads itself while attached, every boot is recorded, and
+`report` says so (`note: session … armed 2×`): read load-phase hitch counts
+and worst frames from such a session as covering all of them.
+
+Tier-0 timings are **rAF intervals with the recorder attached**: vsync-quantized
+(a 26 ms frame body presents every 33.3 ms on a 60 Hz display) and paying for
+the recorder and the sampler. Compare them with other attached runs only —
+never with the app's own frame timer or with an unattached run. `report`
+says so under every tier-0 profile, and `compare` warns when its two sides
+were measured by different tiers. Draws are counted at the
 WebGL/WebGPU API the way `renderer.info` counts them — instanced and
 multi-draw calls included — as a mean over the sample window.
 
@@ -119,6 +135,42 @@ The sampler's cost is bounded so it can never be the hitch it reports:
 10 ms sampling, one profile rotation per second at most, and only for
 stalls of 80 ms or more (shorter hitches are still recorded, marked
 `unattributed`). `--min-hitch-ms N` raises the detection floor itself.
+A function is named as a hitch's cause only when its self time is at least
+a tenth of the frame: every top frame carries its `share` of the frame, and
+a stall whose heaviest JS function explains less (`687.5ms → _aStarLoop
+11.2ms` is 1.6%) reads `unattributed (heaviest JS … = 1.6% of the frame;
+the chunk's other time: native …ms, gc …ms)` — the rest was GC, native
+work or unsampled, and optimising that function would not touch it.
+
+Every sample of the run is also kept, per function and phase, in
+`.sloptimize/runs/<session>.json` — which is what two more verbs read:
+
+```bash
+# Did the benchmark execute the change at all? (default: git diff of the tree, else the last commit)
+npx sloptimize touched [--changed src/a.ts,src/b.ts | --since main] [--map dist/index.js.map]
+#   ✔ src/sim/cars.ts      412 samples under stepCars (6.7% of JS), 380 self in the file
+#   ✗ src/entities/tram.ts 0 samples — if it ran, it took under 0.05% of JS time (95%)
+#   0 samples in 1 of 2 changed code file(s) … — exit 1
+
+# A vs B (a build, a session, or <ISO>..<ISO>), each metric against its OWN run-to-run floor
+npx sloptimize compare before-build after-build [--phase steady]
+```
+
+`touched` exits 1 when a changed code file received no samples: a clean
+A/B on a scene that never ran the new code path is a rubber stamp, not a
+measurement. `compare` reads every metric per run — frame median/p95/body,
+draw calls, hitches/h, each host loop section, each hot function's share —
+and marks each one `significant` only when every B run lies beyond every A
+run and the delta exceeds twice that metric's own run-to-run range; one run
+on a side is `unproven`. A frame delta can be noise while one section's
++0.24 ms reproduces to two decimals — a single global threshold would hide
+it. When the frame moved ≥10% but the composition (section or function
+shares) did not, and the draw calls are equal, `compare` flags it as the
+machine, not the code.
+
+`attach --port N` against a port nothing listens on fails at once with
+`nothing is listening on 127.0.0.1:N`; `--wait <s>` keeps trying while
+an app starts.
 Keep DevTools closed on the target while attach records — a second CDP
 client costs the page ~25 ms per frame. Attach exits on its own when the
 target goes away.
@@ -219,8 +271,8 @@ That carries three surfaces into every session:
   exists, up to five lines land in the agent's context on your next prompt.
 - **MCP server** — `get_report`, `check_budgets`, `get_history`,
   `get_issues` (the catalogue by footprint), `record_fix` (with the
-  footprints it addresses), and `attach_start` / `attach_stop` for the live
-  tier.
+  footprints it addresses), `compare_runs` and `check_touched`, and
+  `attach_start` / `attach_stop` for the live tier.
 
 For instant wakeups (the agent starts fixing ~20s after the stutter, no
 prompt needed), arm `sloptimize watch` as a session Monitor — one line, in
@@ -351,9 +403,12 @@ sloptimize check         budgets → exit code (--counters-only for CI)
 sloptimize census        per-entity costs + closed-vocabulary hints
 sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
+sloptimize compare A B   A/B by run: each metric vs its own noise floor
+                         (significant / within noise / unproven), host-load flag
+sloptimize touched       did the run execute the changed files? (exit 1 if not)
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
-sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--min-hitch-ms N] [--build <id>]
+sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--wait <s>] [--min-hitch-ms N] [--build <id>]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how

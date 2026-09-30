@@ -1,0 +1,235 @@
+// ============================================================
+// compare.js — A vs B, each metric against its own noise floor
+// ============================================================
+// One global "within noise" hides exactly the signal that is provable. The
+// field A/B that asked for this: frame deltas of +0.20, +0.48 and +0.79 ms,
+// all inside a ~1.2 ms frame noise floor — unprovable; and one loop section
+// (collision, +0.24 ms) that reproduced to two decimals across both reps,
+// because its own run-to-run spread is an order of magnitude smaller. So a
+// side is a set of RUNS (one attach session / one tier-1 session each), every
+// metric is read per run, and every metric gets its own floor: the larger of
+// the two sides' run-to-run ranges.
+//
+// A delta is `significant` when every run of B lies beyond every run of A
+// AND the delta exceeds twice that floor. Separation alone is weak at two
+// reps a side (4 values fall fully apart by chance one time in three); the
+// floor multiple is what makes "reproduced to two decimals" count. A side
+// with one run has no floor at all, and the row says so rather than guess.
+//
+// The same runs answer the machine question. A code regression moves the
+// COMPOSITION — the function (or loop section) that got slower takes a
+// larger share. A machine that got slower (the dev build sharing the GPU:
+// once reported as a +46% regression) scales everything and leaves the
+// shares where they were. Uniform change + unchanged composition is flagged.
+//
+// Pure: the CLI reads perf.jsonl + runs/*.json and hands them to
+// resolveSide; a test hands a fixture.
+
+import { stableFile } from './footprint.js';
+import { runBucket } from './runs.js';
+
+function median(vals) {
+  if (vals.length === 0) return undefined;
+  const s = [...vals].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+const r3 = (x) => (x === undefined ? undefined : +x.toFixed(3));
+
+/** Composition moved less than this (total variation distance of the share
+ *  vectors) while the frame moved ≥ UNIFORM_RATIO: the machine, not the code. */
+export const COMPOSITION_STILL = 0.05;
+export const UNIFORM_RATIO = 1.1;
+/** A function joins the per-metric rows at ≥1% of JS samples on either side. */
+const FN_ROW_SHARE = 0.01;
+const FN_ROWS = 15;
+
+/**
+ * Everything one run measured, as flat metrics. `records` are that run's
+ * ledger lines (already phase-filtered); `run` its runs/<session>.json, if
+ * attach wrote one.
+ * @returns {{session:string, tier?:number, metrics:Record<string,number>, fnShares?:Map<string,number>, sectionShares?:Map<string,number>}}
+ */
+export function runMetrics(session, records, run, phases = null) {
+  const beats = records.filter((r) => r.type === 'heartbeat');
+  const profiles = records.filter((r) => r.type === 'profile' && (r.sections || r.counts));
+  const hitches = records.filter((r) => r.type === 'hitch' && typeof r.frameMs === 'number');
+  const nums = (xs) => xs.filter((v) => typeof v === 'number');
+  const bucket = run ? runBucket(run, phases) : null;
+  const m = {};
+  const put = (k, v) => { if (v !== undefined && Number.isFinite(v)) m[k] = v; };
+  // Tier 0's run file folds every 120-frame window of the run; the beats hold
+  // one 600-frame ring a minute. The fuller one wins.
+  put('frame median ms', bucket?.frame?.medianMs ?? median(nums([...beats.map((b) => b.medianFrameMs), ...profiles.map((p) => p.frame?.medianMs)])));
+  put('frame p95 ms', bucket?.frame?.p95Ms ?? median(nums([...beats.map((b) => b.p95Ms), ...profiles.map((p) => p.frame?.p95Ms)])));
+  put('frame body ms', median(nums(profiles.map((p) => p.frame?.bodyMs))));
+  put('draw calls', bucket?.frame?.calls ?? median(nums(beats.map((b) => b.calls))));
+  put('triangles', median(nums(beats.map((b) => b.triangles))));
+  const times = records.map((r) => Date.parse(r.at)).filter(Number.isFinite);
+  if (run?.from) times.push(Date.parse(run.from), Date.parse(run.to));
+  if (times.length && (beats.length || hitches.length || bucket?.frame)) {
+    const hours = Math.max((Math.max(...times) - Math.min(...times)) / 3_600_000, 1 / 60);
+    put('hitches/h', +(hitches.length / hours).toFixed(1));
+  }
+  const sections = new Map();
+  for (const p of profiles) for (const [k, v] of Object.entries(p.sections ?? {})) if (typeof v === 'number') (sections.get(k) ?? sections.set(k, []).get(k)).push(v);
+  let sectionShares;
+  if (sections.size) {
+    const meds = [...sections].map(([k, v]) => [k, median(v)]);
+    for (const [k, v] of meds) put(`section ${k} ms`, v);
+    const sum = meds.reduce((a, [, v]) => a + Math.max(v, 0), 0);
+    if (sum > 0) sectionShares = new Map(meds.map(([k, v]) => [k, Math.max(v, 0) / sum]));
+  }
+  let fnShares;
+  const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;
+  if (bucket && js > 0) {
+    // By NAME and hash-stripped file, never by position: A and B are two
+    // bundles, and every line moved.
+    fnShares = new Map();
+    for (const r of bucket.fns.values()) {
+      if (!r.self) continue;
+      const k = `${r.fn}@${stableFile(r.url) || '?'}`;
+      fnShares.set(k, (fnShares.get(k) ?? 0) + r.self / js);
+    }
+  }
+  const tier = records.some((r) => r.tier === 0) || run ? 0 : records.some((r) => r.type === 'heartbeat' || r.type === 'profile') ? 1 : undefined;
+  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}) };
+}
+
+function spread(vals) {
+  if (vals.length === 0) return undefined;
+  return { n: vals.length, median: r3(median(vals)), lo: r3(Math.min(...vals)), hi: r3(Math.max(...vals)) };
+}
+
+/** Half the L1 distance of two share maps — 0 identical, 1 disjoint. */
+export function tvd(a, b) {
+  let d = 0;
+  for (const k of new Set([...a.keys(), ...b.keys()])) d += Math.abs((a.get(k) ?? 0) - (b.get(k) ?? 0));
+  return d / 2;
+}
+
+/** The side's shares, averaged over its runs. */
+function meanShares(list) {
+  const out = new Map();
+  for (const m of list) for (const [k, v] of m) out.set(k, (out.get(k) ?? 0) + v / list.length);
+  return out;
+}
+
+function row(metric, av, bv) {
+  const a = spread(av), b = spread(bv);
+  const delta = r3(b.median - a.median);
+  const r = { metric, a, b, delta };
+  if (a.n < 2 || b.n < 2) { r.verdict = 'unproven'; r.why = `n=${Math.min(a.n, b.n)} on a side: no noise floor`; return r; }
+  const noise = r3(Math.max(a.hi - a.lo, b.hi - b.lo));
+  r.noise = noise;
+  const apart = a.hi < b.lo || b.hi < a.lo;
+  r.verdict = apart && Math.abs(delta) > 2 * noise ? 'significant' : 'within noise';
+  return r;
+}
+
+/**
+ * @param {{label:string, runs:ReturnType<typeof runMetrics>[]}} A
+ * @param {{label:string, runs:ReturnType<typeof runMetrics>[]}} B
+ */
+export function compareSides(A, B) {
+  const names = [];
+  for (const r of [...A.runs, ...B.runs]) for (const k of Object.keys(r.metrics)) if (!names.includes(k)) names.push(k);
+  const rows = [];
+  const vals = (side, k) => side.runs.map((r) => r.metrics[k]).filter((v) => v !== undefined);
+  for (const k of names) {
+    const av = vals(A, k), bv = vals(B, k);
+    if (av.length && bv.length) rows.push(row(k, av, bv));
+  }
+  // Functions, as rows of their own: each is a metric with its own floor —
+  // the per-function compare the diff script was written for.
+  const fa = A.runs.filter((r) => r.fnShares), fb = B.runs.filter((r) => r.fnShares);
+  const out = { a: { label: A.label, runs: A.runs.map((r) => r.session) }, b: { label: B.label, runs: B.runs.map((r) => r.session) }, rows, warnings: [] };
+  if (fa.length && fb.length) {
+    const ma = meanShares(fa.map((r) => r.fnShares)), mb = meanShares(fb.map((r) => r.fnShares));
+    const keys = [...new Set([...ma.keys(), ...mb.keys()])]
+      .filter((k) => Math.max(ma.get(k) ?? 0, mb.get(k) ?? 0) >= FN_ROW_SHARE)
+      .sort((x, y) => Math.max(mb.get(y) ?? 0, ma.get(y) ?? 0) - Math.max(mb.get(x) ?? 0, ma.get(x) ?? 0))
+      .slice(0, FN_ROWS);
+    for (const k of keys) rows.push(row(`fn ${k} %js`, fa.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2)), fb.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2))));
+  }
+  // Composition: sections when the host measured them (exact), else the
+  // sampled function shares. `within` is the largest distance between two
+  // runs of ONE side — the composition's own noise.
+  const comp = (key) => {
+    const ra = A.runs.filter((r) => r[key]).map((r) => r[key]), rb = B.runs.filter((r) => r[key]).map((r) => r[key]);
+    if (!ra.length || !rb.length) return undefined;
+    let within = 0;
+    for (const side of [ra, rb]) for (let i = 0; i < side.length; i++) for (let j = i + 1; j < side.length; j++) within = Math.max(within, tvd(side[i], side[j]));
+    return { by: key === 'sectionShares' ? 'sections' : 'functions', moved: r3(tvd(meanShares(ra), meanShares(rb))), ...(ra.length + rb.length > 2 ? { within: r3(within) } : {}) };
+  };
+  const composition = comp('sectionShares') ?? comp('fnShares');
+  if (composition) out.composition = composition;
+  const frame = rows.find((r) => r.metric === 'frame body ms') ?? rows.find((r) => r.metric === 'frame median ms');
+  if (frame && composition && frame.a.median > 0) {
+    const ratio = frame.b.median / frame.a.median;
+    const calls = rows.find((r) => r.metric === 'draw calls');
+    const sameDraws = !calls || Math.abs(calls.b.median - calls.a.median) <= 0.02 * Math.max(calls.a.median, 1);
+    const still = composition.moved < Math.max(COMPOSITION_STILL, 1.5 * (composition.within ?? 0));
+    if ((ratio >= UNIFORM_RATIO || ratio <= 1 / UNIFORM_RATIO) && still && sameDraws) {
+      const pct = Math.round((ratio - 1) * 100);
+      out.hostSuspect = { ratio: r3(ratio), metric: frame.metric, moved: composition.moved };
+      out.warnings.push(`uniform ${pct > 0 ? 'slowdown' : 'speedup'} (${frame.metric.replace(/ ms$/, '')} ${pct > 0 ? '+' : ''}${pct}%) with unchanged composition (${composition.by} shares moved ${+(composition.moved * 100).toFixed(1)}%${calls ? ', draw calls equal' : ''}) — suspect the machine (another process on the GPU/CPU, thermals, power), not the code: a code change moves shares`);
+    }
+  }
+  const tiers = (side) => new Set(side.runs.map((r) => r.tier).filter((t) => t !== undefined));
+  const ta = tiers(A), tb = tiers(B);
+  if (ta.size && tb.size && [...ta, ...tb].some((t) => !ta.has(t) || !tb.has(t))) {
+    out.warnings.push(`the sides were measured by different instruments (tier ${[...ta].join('/')} vs tier ${[...tb].join('/')}) — an attached run pays for its recorder and reads rAF intervals; its timings do not compare with an unattached run's`);
+  }
+  return out;
+}
+
+/** Silence that ends a run of records carrying no `session` (tier-1 ledger
+ *  lines) — the same five minutes `history` cuts runs at. */
+const RUN_GAP_MS = 5 * 60_000;
+
+/**
+ * One side of a compare, from a spec: a build, a session id, an
+ * `<ISO>..<ISO>` window, or a comma list of those (their runs pooled — how
+ * back-to-back sessionless runs are named one by one). Runs are sessions;
+ * records with no session are cut into runs at RUN_GAP_MS silences, except
+ * inside one window element, which is one run by construction.
+ * @returns {{label:string, runs:object[]} | {error:string}}
+ */
+export function resolveSide(spec, records, runFiles, phases = null) {
+  const runs = [];
+  for (const el of String(spec).split(',').map((x) => x.trim()).filter(Boolean)) {
+    let recs, files, window = false;
+    if (el.includes('..')) {
+      const [a, b] = el.split('..').map((x) => Date.parse(x));
+      if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return { error: `bad window "${el}" — want <ISO>..<ISO>` };
+      recs = records.filter((r) => { const t = Date.parse(r.at); return t >= a && t <= b; });
+      files = runFiles.filter((r) => Date.parse(r.from) <= b && Date.parse(r.to) >= a);
+      window = true;
+    } else {
+      const byBuild = records.some((r) => r.build === el) || runFiles.some((r) => r.build === el);
+      const pick = (r) => (byBuild ? r.build === el : r.session === el);
+      recs = records.filter(pick); files = runFiles.filter(pick);
+    }
+    const groups = new Map();
+    for (const r of recs) if (r.session) (groups.get(r.session) ?? groups.set(r.session, []).get(r.session)).push(r);
+    for (const f of files) if (!groups.has(f.session)) groups.set(f.session, []);
+    const loose = recs.filter((r) => !r.session && Number.isFinite(Date.parse(r.at))).sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
+    let cut = [], n = 0;
+    const flush = () => { if (cut.length) groups.set(`(run ${++n}${window ? ` of ${el}` : ''})`, cut); cut = []; };
+    for (const r of loose) {
+      if (!window && cut.length && Date.parse(r.at) - Date.parse(cut.at(-1).at) > RUN_GAP_MS) flush();
+      cut.push(r);
+    }
+    flush();
+    for (const [session, list] of groups) {
+      const m = runMetrics(session, list, files.find((f) => f.session === session), phases);
+      if (Object.keys(m.metrics).length || m.fnShares) runs.push(m);
+    }
+  }
+  if (runs.length === 0) {
+    const builds = [...new Set([...records.map((r) => r.build), ...runFiles.map((r) => r.build)].filter(Boolean))];
+    return { error: `no measured run for "${spec}" — builds on this ledger: ${builds.join(', ') || 'none'} (a session id, <ISO>..<ISO>, or a comma list of them also works)` };
+  }
+  return { label: spec, runs };
+}

@@ -148,7 +148,7 @@ function fakeWebContents({ gpuStatus = { gpu_compositing: 'enabled' } } = {}) {
     off: (ev, fn) => { listeners[ev] = (listeners[ev] ?? []).filter((f) => f !== fn); },
     sendCommand: async (method, params) => {
       commands.push(method);
-      if (method === 'Profiler.stop') return { profile: { nodes: [{ id: 1, callFrame: { functionName: 'simStep', url: 'app://game.js', lineNumber: 4 } }], samples: [1], timeDeltas: [3000] } };
+      if (method === 'Profiler.stop') return { profile: { nodes: [{ id: 1, callFrame: { functionName: 'simStep', url: 'app://game.js', lineNumber: 4 } }], samples: [1], timeDeltas: [180000] } };
       return {};
     },
     emit: (ev, ...a) => { for (const f of listeners[ev] ?? []) f(...a); },

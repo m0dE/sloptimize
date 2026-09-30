@@ -37,3 +37,13 @@ test('cluster identity: same cause = same key, different cause = different key',
   assert.notEqual(clusterKey(hitchA, 'buildWorld@game.min.js:42'), clusterKey(hitchA, 'other@x.js:1'));
   assert.notEqual(clusterKey(hitchA, 'x'), clusterKey(hitchC, 'x'));
 });
+
+test('discovery: a port with nothing on it is NothingListening, said at once; --wait retries until it answers', async () => {
+  const { waitForTarget, NothingListening } = await import('../src/attach.mjs');
+  const refused = async () => { const e = new TypeError('fetch failed'); e.cause = { code: 'ECONNREFUSED' }; throw e; };
+  await assert.rejects(waitForTarget(9222, 0, { fetch: refused }), (e) => e instanceof NothingListening && /nothing is listening on 127\.0\.0\.1:9222/.test(e.message));
+  let t = 0, calls = 0;
+  const late = async () => { if (++calls < 3) return refused(); return { json: async () => [{ type: 'page', url: 'app://x', webSocketDebuggerUrl: 'ws://t' }] }; };
+  assert.equal(await waitForTarget(9222, 5000, { fetch: late, sleep: async (ms) => { t += ms; }, now: () => t }), 'ws://t');
+  assert.equal(calls, 3);
+});

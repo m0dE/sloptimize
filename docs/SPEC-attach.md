@@ -67,6 +67,19 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
 - **Verify** closes the loop: counters compare exactly on any renderer;
   timing only within its regime; verdicts land in the append-only ledger
   so a reverted strategy is never retried.
+- **Attribute honestly**: a function names a hitch's cause only when its
+  self time is ≥10% of the frame (`ATTRIBUTE_MIN_SHARE`); below that the
+  record keeps its `topFrames` (each with `share`) and `sampled` (the
+  chunk's JS / GC / native / idle ms) but reads `unattributed: 'low-share'`
+  and clusters on the verdict alone. (Field report: a 687.5 ms frame
+  printed `top _aStarLoop 11.2ms` — 1.6% — and nearly sent an agent to
+  optimise A*.)
+- **Keep the whole run**: every profiler chunk (hitch rotation, window
+  roll, final stop) folds into `runs/<session>.json` before it is dropped
+  — self and inclusive samples per function, per page phase, plus the
+  tier-0 frame windows. `touched` reads it to say whether the changed
+  files received any sample; `compare` reads it for per-run function
+  shares and the machine-vs-code composition check.
 
 ## 3. Tiers of sensing (progressive precision, none required to start)
 

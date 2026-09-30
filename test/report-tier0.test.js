@@ -48,3 +48,25 @@ test('issues on a tier-0 ledger: one row per attributed cause, and --phase narro
   assert.deepEqual(JSON.parse(run('issues', '--json', '--phase', '?', '--dir', dir)).length, 2);
   assert.deepEqual(JSON.parse(run('issues', '--json', '--phase', 'steady', '--dir', dir)), []);
 });
+
+test('report: a top frame carries its share; one under a tenth of the stall reads unattributed; two arms in a session are said', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-t0-'));
+  const base = { type: 'hitch', medianMs: 29, tier: 0, session: 'S', classification: [{ guess: 'long-script', evidence: 'e' }] };
+  writeFileSync(join(dir, 'perf.jsonl'), [
+    { type: 'armed', at: '2026-09-25T10:00:00Z', session: 'S', url: 'app://x' },
+    { type: 'armed', at: '2026-09-25T10:00:20Z', session: 'S', url: 'app://x' },
+    // Written before the gate existed: no share, no unattributed — the report applies the bar itself.
+    { ...base, at: '2026-09-25T10:00:30Z', frameMs: 687.5, topFrames: [{ fn: '_aStarLoop', url: 'index-BOkDWhGO.js:90926', selfMs: 11.2 }] },
+    { ...base, at: '2026-09-25T10:00:31Z', frameMs: 700, unattributed: 'low-share', sampled: { jsMs: 12, gcMs: 30, programMs: 610, idleMs: 0 },
+      topFrames: [{ fn: '_aStarLoop', url: 'index-BOkDWhGO.js:90926', selfMs: 12, share: 0.017 }] },
+    { ...base, at: '2026-09-25T10:00:33Z', frameMs: 120, topFrames: [{ fn: 'buildWorld', url: 'index-BOkDWhGO.js:44', selfMs: 90, share: 0.75 }] },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify({ type: 'profile', frame: { medianMs: 34.7 }, tier: 0, regime: 'unknown', at: '2026-09-25T10:02:00Z' }));
+  const out = run('report', '--dir', dir);
+  assert.match(out, /687\.5ms .* unattributed \(heaviest JS _aStarLoop@index-BOkDWhGO\.js:90926 11\.2ms = 1\.6% of the frame\)/);
+  assert.match(out, /700ms .* unattributed \(heaviest JS _aStarLoop@\S+ 12ms = 1\.7% of the frame; the chunk's other time: native 610ms, gc 30ms\)/);
+  assert.match(out, /top buildWorld@index-BOkDWhGO\.js:44 90ms \(75% of frame\)/);
+  assert.doesNotMatch(out, /top _aStarLoop/);
+  assert.match(out, /note: session S armed 2×/);
+  assert.match(out, /compare only with other attached runs/);
+});

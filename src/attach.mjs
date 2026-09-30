@@ -24,12 +24,39 @@ export function buildInjectScript(opts = {}) {
 
 export { clusterKey, topFramesFromProfile } from './incident-pipeline.mjs';
 
-async function discoverTarget(port) {
-  const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-  const targets = await res.json();
+/** A port with nothing on it is its own failure, said as one: back-to-back
+ *  Electron runs collide on a fixed debugging port, and Chromium that could
+ *  not bind it starts anyway without an endpoint — a field report lost three
+ *  runs to an error that read like "attached, no data". */
+export class NothingListening extends Error {
+  constructor(port) {
+    super(`nothing is listening on 127.0.0.1:${port} — start the app with --remote-debugging-port=${port} (and check no other instance holds that port), or pass --wait <s> to wait for it`);
+    this.port = port;
+  }
+}
+
+async function discoverTarget(port, fetchImpl = fetch) {
+  let res;
+  try { res = await fetchImpl(`http://127.0.0.1:${port}/json/list`); }
+  catch (e) {
+    const code = e?.cause?.code ?? e?.code;
+    if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EADDRNOTAVAIL') throw new NothingListening(port);
+    throw new Error(`127.0.0.1:${port} did not answer /json/list: ${e?.cause?.message ?? e?.message ?? e}`);
+  }
+  let targets;
+  try { targets = await res.json(); } catch { throw new Error(`127.0.0.1:${port} answered, but not as a DevTools endpoint (no /json/list) — is that port the app's --remote-debugging-port?`); }
   const page = targets.find((t) => t.type === 'page' && !t.url.startsWith('devtools'));
-  if (!page) throw new Error('no page target — is a tab open?');
+  if (!page) throw new Error(`the DevTools endpoint on :${port} has no page target yet (${targets.length} target(s)) — is a window open?`);
   return page.webSocketDebuggerUrl;
+}
+
+/** Discover, retrying until `waitMs` has passed — for an app still starting. */
+export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now } = {}) {
+  const until = now() + waitMs;
+  for (;;) {
+    try { return await discoverTarget(port, fetchImpl); }
+    catch (e) { if (now() >= until) throw e; await sleep(300); }
+  }
 }
 
 /**
@@ -37,6 +64,7 @@ async function discoverTarget(port) {
  * @param {string} [opts.launch]     URL to open in a spawned browser
  * @param {number} [opts.port]       remote-debugging port (default 9222)
  * @param {string} [opts.wsUrl]      an explicit target socket; skips discovery
+ * @param {number} [opts.waitMs]     keep retrying discovery this long (an app still starting)
  * @param {string} [opts.dir]        .sloptimize/ directory
  * @param {boolean} [opts.headless]
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
@@ -63,12 +91,9 @@ export async function attach(opts = {}) {
       ...(opts.headless ? ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-angle=swiftshader'] : []),
       opts.launch], { stdio: 'ignore' });
     log(`launched ${bin} → ${opts.launch}`);
-    for (let i = 0; i < 50; i++) {
-      try { await discoverTarget(port); break; } catch { await new Promise((r) => setTimeout(r, 300)); }
-    }
   }
 
-  const wsUrl = opts.wsUrl ?? await discoverTarget(port);
+  const wsUrl = opts.wsUrl ?? await waitForTarget(port, opts.waitMs ?? (child ? 15_000 : 0));
   const ws = new WS(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
