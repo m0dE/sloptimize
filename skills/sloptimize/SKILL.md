@@ -22,7 +22,10 @@ The playbook, in order:
    material-dedup-candidate, oversized-texture, undisposed-suspect,
    instanced-stale-slots — call census twice a few seconds apart; drawn
    slots that never changed in a moving InstancedMesh are static
-   instances or ghosts, and only you can tell which).
+   instances or ghosts, and only you can tell which). Under attach the
+   same finding arrives on its own as ◫ `instance-slots` records: N drawn,
+   M written, K untouched for Ns. Ghosts are usually `count` left at a
+   high-water mark while fewer slots are written — look at who sets count.
 4. ONE change at a time.
 5. Verify: counters (draw calls, triangles, programs) compare EXACTLY on any
    renderer, including software rasterizers. Timing numbers only count in

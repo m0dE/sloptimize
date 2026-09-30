@@ -6,6 +6,8 @@
 // runtime fact and are reported as `null` here — profile.json carries the
 // measured number (principle 4).
 
+import { changedSlots } from './instance-slots.js';
+
 const INSTANCING_MIN_COUNT = 20;      // N same-geometry+material meshes worth a hint
 const MATERIAL_DEDUP_MIN = 8;
 const OVERSIZED_TEXTURE_DIM = 4096;
@@ -45,7 +47,9 @@ function materialKey(m) {
 // A mesh where some slots moved and others did not is either holding static
 // instances on purpose or drawing ghosts — the developer knows which; the
 // census only says the numbers. "Changed", not "written": a write of the same
-// matrix is invisible here, so a parked car reads as unchanged too.
+// matrix is invisible here, so a parked car reads as unchanged too. This is
+// the on-demand tier-1 view; a tier-0 attach watches continuously and sees
+// setMatrixAt writes as well (instance-slots.js).
 const lastSlots = new WeakMap();
 
 function slotChange(mesh, nowMs) {
@@ -56,10 +60,7 @@ function slotChange(mesh, nowMs) {
   lastSlots.set(mesh, { copy: arr.slice(0, drawn * 16), at: nowMs });
   if (!prev) return null;
   const compared = Math.min(drawn, prev.copy.length / 16);
-  let changed = 0;
-  for (let i = 0; i < compared; i++) {
-    for (let j = i * 16, e = j + 16; j < e; j++) if (arr[j] !== prev.copy[j]) { changed++; break; }
-  }
+  const changed = changedSlots(arr, prev.copy, compared).reduce((a, b) => a + b, 0);
   return { drawn, compared, changed, sinceMs: nowMs - prev.at };
 }
 

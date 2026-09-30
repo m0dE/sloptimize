@@ -17,9 +17,10 @@ const SRC = dirname(fileURLToPath(import.meta.url));
 /** @param {{minHitchMs?: number}} [opts]  page-side knobs, inlined as `__sloptimizeOpts` */
 export function buildInjectScript(opts = {}) {
   const classify = readFileSync(join(SRC, 'classify.js'), 'utf8').replace(/^export /gm, '');
+  const slots = readFileSync(join(SRC, 'instance-slots.js'), 'utf8').replace(/^export /gm, '');
   const body = readFileSync(join(SRC, 'inject-body.js'), 'utf8');
   const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined };
-  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${body}\n})();`;
+  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${slots}\n${body}\n})();`;
 }
 
 export { clusterKey, topFramesFromProfile } from './incident-pipeline.mjs';

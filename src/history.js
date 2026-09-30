@@ -396,6 +396,7 @@ function worstOf(r) {
   switch (r.type) {
     case 'hitch': return typeof r.frameMs === 'number' ? { value: r.frameMs, unit: 'ms' } : undefined;
     case 'usermark': return typeof r.worstFrames?.[0]?.frameMs === 'number' ? { value: r.worstFrames[0].frameMs, unit: 'ms' } : undefined;
+    case 'instance-slots': return typeof r.stale === 'number' ? { value: r.stale, unit: ' slots' } : undefined;
     case 'jitter': { const v = r.kind === 'oscillation' ? r.amplitude : r.units; return typeof v === 'number' ? { value: v, unit: 'u' } : undefined; }
     case 'warm': return typeof r.worstBatchMs === 'number' ? { value: r.worstBatchMs, unit: 'ms' } : undefined;
     case 'gpu-stall': return typeof r.queueDoneMs === 'number' ? { value: r.queueDoneMs, unit: 'ms' } : undefined;

@@ -168,6 +168,22 @@ it. When the frame moved ≥10% but the composition (section or function
 shares) did not, and the draw calls are equal, `compare` flags it as the
 machine, not the code.
 
+Attach also sees a three.js page's scenes, through three's own devtools
+hook (`__THREE_DEVTOOLS__`: every `Scene` three constructs announces itself
+there, and the recorder defines it before any page script). It uses that
+for one thing no counter can: InstancedMesh slots drawn but no longer
+written. Every slot below `.count` draws, written or not — a cull that
+stopped writing off-screen transforms while `count` stayed at the
+high-water mark leaves ghosts at their last positions, invisible to draw
+counts, triangles and frame time, and to the graphics API, which uploads
+the whole buffer. Every ~2 s the recorder notes, per visible InstancedMesh,
+which slots were written (`setMatrixAt`, wrapped on the instance) or changed
+(a direct `instanceMatrix.array` write); slots idle ~10 s in a mesh whose
+other slots move land as `instance-slots` records — in `report`, `issues`
+and `watch`: `◫ bodies: 200 drawn, 105 written/moved in the last window, 95
+untouched for 10s`. That is static instances or ghosts; you know which.
+When the count drops back to the live set, a clearing record says so.
+
 `attach --port N` against a port nothing listens on fails at once with
 `nothing is listening on 127.0.0.1:N`; `--wait <s>` keeps trying while
 an app starts.

@@ -160,6 +160,19 @@ if (cmd === 'report') {
       console.log(`  ↯ ${j.at} ${j.track} ${shape} in a ${j.dtMs}ms frame → ${j.classification?.[0]?.guess}: ${j.classification?.[0]?.evidence}`);
     }
   }
+  // InstancedMesh slots drawn but no longer written (instance-slots.js):
+  // the newest word per mesh in the window, a clear included — ghosts are
+  // a correctness incident, visible to no counter above.
+  const slotRecs = new Map();
+  for (const r of hitches) if (r.type === 'instance-slots') slotRecs.set(r.name, r);
+  if (slotRecs.size) {
+    console.log(`  instance slots (drawn inside .count, per mesh — newest):`);
+    for (const r of slotRecs.values()) {
+      console.log(r.stale > 0
+        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s — static instances, or ghosts drawn at stale positions (count past the live set?)`
+        : `  ◫ ${r.name}: no stale slots any more (${r.drawn} drawn, ${r.active} active) @ ${r.at}`);
+    }
+  }
   // The catalogue's head: which causes recur most (SPEC §3.7). The whole
   // ledger, not the 80-line window — recurrence is the point.
   const { buildIssues, agoText } = await import('../src/history.js');

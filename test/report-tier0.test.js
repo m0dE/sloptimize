@@ -70,3 +70,15 @@ test('report: a top frame carries its share; one under a tenth of the stall read
   assert.match(out, /note: session S armed 2×/);
   assert.match(out, /compare only with other attached runs/);
 });
+
+test('report: instance-slot records per mesh, newest word wins, and the catalogue carries the ghost suspect', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-t0-'));
+  const rec = (at, name, stale, active = 105) => ({ type: 'instance-slots', at, name, drawn: 200, capacity: 200, active, written: active, changed: active, stale, staleSec: 10, tier: 0, session: 'S' });
+  writeFileSync(join(dir, 'perf.jsonl'), [rec('2026-09-25T10:00:00Z', 'bodies', 95), rec('2026-09-25T10:00:10Z', 'wheels', 12), rec('2026-09-25T10:00:20Z', 'wheels', 0, 200)].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify({ type: 'profile', frame: { medianMs: 16.7 }, tier: 0, at: '2026-09-25T10:02:00Z' }));
+  const out = run('report', '--dir', dir);
+  assert.match(out, /◫ bodies: 200 drawn, 105 written\/moved in the last window, 95 untouched for 10s/);
+  assert.match(out, /◫ wheels: no stale slots any more/);
+  const rows = JSON.parse(run('issues', '--json', '--dir', dir));
+  assert.deepEqual(rows.map((r) => [r.label, r.count, r.worst?.value]), [['instance slots drawn, not written · wheels', 1, 12], ['instance slots drawn, not written · bodies', 1, 95]]);
+});

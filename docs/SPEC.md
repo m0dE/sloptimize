@@ -557,7 +557,9 @@ across censuses), `oversized-texture` (dimension threshold),
 InstancedMesh where some drawn slots' matrices changed and others did not —
 static instances or ghosts: slots inside `.count` the code stopped writing,
 which no counter and no GL wrap can see; "changed", not "written", so a
-rewrite of the same matrix reads as unchanged). Texture bytes are labeled `Estimate` in the field
+rewrite of the same matrix reads as unchanged — tier-0 attach watches the
+same thing continuously, `setMatrixAt` writes included, as `instance-slots`
+records; see src/instance-slots.js). Texture bytes are labeled `Estimate` in the field
 name because that is what they are (width×height×format guess, no VRAM
 introspection in WebGL).
 
