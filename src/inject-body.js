@@ -203,9 +203,11 @@ function trianglesOf(mode, n) {
 // tier 0 the scene graph with no game code — which is what the instance-slot
 // watch (instance-slots.js) needs: stale slots inside an InstancedMesh's
 // .count are invisible at the graphics API. A hook already present (the
-// three.js devtools extension) is listened on, never replaced.
+// three.js devtools extension) is listened on, never replaced. `attach
+// --no-slots` turns the whole thing off: no global defined, no checks.
+const SLOTS_ON = !(typeof __sloptimizeOpts !== 'undefined' && __sloptimizeOpts.slots === false);
 const slotWatch = createSlotWatch();
-try {
+if (SLOTS_ON) try {
   let hook = globalThis.__THREE_DEVTOOLS__;
   if (!hook || typeof hook.addEventListener !== 'function') {
     hook = new EventTarget();
@@ -296,7 +298,7 @@ function tick(ts) {
       tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0;
   }
-  if (frameNo % SLOTS_EVERY === SLOTS_AT) {
+  if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
     let rows = [];
     try { rows = slotWatch.check(performance.now()); } catch { /* a mesh we could not read */ }
     for (const r of rows) emit({ type: 'instance-slots', at: new Date().toISOString(), ...r, tier: 0 });

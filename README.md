@@ -141,6 +141,8 @@ a stall whose heaviest JS function explains less (`687.5ms → _aStarLoop
 11.2ms` is 1.6%) reads `unattributed (heaviest JS … = 1.6% of the frame;
 the chunk's other time: native …ms, gc …ms)` — the rest was GC, native
 work or unsampled, and optimising that function would not touch it.
+`--min-share 0.05` moves the bar (it is a judgement, not a law — a stall
+spread thinly over many functions has no single cause at any bar).
 
 Every sample of the run is also kept, per function and phase, in
 `.sloptimize/runs/<session>.json` — which is what two more verbs read:
@@ -183,6 +185,7 @@ other slots move land as `instance-slots` records — in `report`, `issues`
 and `watch`: `◫ bodies: 200 drawn, 105 written/moved in the last window, 95
 untouched for 10s`. That is static instances or ghosts; you know which.
 When the count drops back to the live set, a clearing record says so.
+`--no-slots` turns the watch off and leaves `__THREE_DEVTOOLS__` undefined.
 
 `attach --port N` against a port nothing listens on fails at once with
 `nothing is listening on 127.0.0.1:N`; `--wait <s>` keeps trying while
@@ -425,6 +428,7 @@ sloptimize touched       did the run execute the changed files? (exit 1 if not)
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows
 sloptimize attach        tier-0: --launch <url> [--headless] [--port N] [--wait <s>] [--min-hitch-ms N] [--build <id>]
+                         [--min-share 0.1] [--no-slots]
 sloptimize hook-status   the prompt hook's ≤5-line ambient surface
 sloptimize issues        the catalogue: every incident grouped by FOOTPRINT
                          (cause + situation, never time) — how often, how

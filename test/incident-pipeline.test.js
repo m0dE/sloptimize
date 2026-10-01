@@ -244,3 +244,12 @@ test('every stopped chunk folds into runs/<session>.json: self + inclusive sampl
   assert.deepEqual(row('stepCars'), ['stepCars', 'http://h/src/sim/cars.ts', 10, 0, 4, 4]);
   assert.deepEqual(row('tick'), ['tick', 'http://h/src/loop.ts', 3, 2, 2, 6]);
 });
+
+test('attributeMinShare moves the bar: 3% names a cause at 0.02, not at the default', async () => {
+  const lo = harness({ attributeMinShare: 0.02 });
+  await lo.p.start();
+  lo.setProfileRaw({ nodes: [{ id: 1, callFrame: { functionName: 'pathfind', url: 'https://x/g.js', lineNumber: 1 } }], samples: [1], timeDeltas: [3600] });
+  await lo.p.onRecord(hitch());
+  assert.equal(lo.lines()[0].unattributed, undefined);
+  assert.equal(lo.lines()[0].cluster.key, 'long-script|pathfind@g.js:2');
+});

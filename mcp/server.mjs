@@ -44,7 +44,9 @@ const TOOLS = [
       build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' },
-      build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' } }, required: ['url'] } },
+      build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' },
+      minShare: { type: 'number', description: 'share of a frame (0–1) a function needs to be named a hitch\'s cause (default 0.1)' },
+      slots: { type: 'boolean', description: 'false: skip the InstancedMesh stale-slot watch and leave __THREE_DEVTOOLS__ undefined (default true)' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
     inputSchema: { type: 'object', properties: {} } },
 ];
@@ -124,7 +126,7 @@ async function callTool(name, args = {}) {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build });
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots });
     return { ok: true, session: attachSession.session, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {

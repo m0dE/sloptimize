@@ -14,12 +14,13 @@ import { spawn } from 'node:child_process';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 
-/** @param {{minHitchMs?: number}} [opts]  page-side knobs, inlined as `__sloptimizeOpts` */
+/** @param {{minHitchMs?: number, slots?: boolean}} [opts]  page-side knobs, inlined as `__sloptimizeOpts`;
+ *  `slots: false` leaves `__THREE_DEVTOOLS__` alone and skips the instance-slot watch */
 export function buildInjectScript(opts = {}) {
   const classify = readFileSync(join(SRC, 'classify.js'), 'utf8').replace(/^export /gm, '');
   const slots = readFileSync(join(SRC, 'instance-slots.js'), 'utf8').replace(/^export /gm, '');
   const body = readFileSync(join(SRC, 'inject-body.js'), 'utf8');
-  const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined };
+  const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined, slots: opts.slots === false ? false : undefined };
   return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${slots}\n${body}\n})();`;
 }
 
@@ -69,6 +70,8 @@ export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch
  * @param {string} [opts.dir]        .sloptimize/ directory
  * @param {boolean} [opts.headless]
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
+ * @param {number} [opts.minShare]   the share of a frame a function needs to be named its cause (default 0.1)
+ * @param {boolean} [opts.slots]     false: no instance-slot watch, no __THREE_DEVTOOLS__ (default on)
  * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
  *   runs of one build are then one build with n runs in `history`, not n builds
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
@@ -118,7 +121,7 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build });
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare });
   const onRecord = pipeline.onRecord;
 
   ws.onmessage = (ev) => {
@@ -137,7 +140,7 @@ export async function attach(opts = {}) {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Runtime.addBinding', { name: '__sloptimizeEmit' });
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ minHitchMs: opts.minHitchMs }) });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ minHitchMs: opts.minHitchMs, slots: opts.slots }) });
   await pipeline.start();
   // The injection applies to NAVIGATIONS — a page that was already loading
   // when we attached (the --launch race) never runs it. One reload closes

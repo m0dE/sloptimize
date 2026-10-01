@@ -82,3 +82,11 @@ test('report: instance-slot records per mesh, newest word wins, and the catalogu
   const rows = JSON.parse(run('issues', '--json', '--dir', dir));
   assert.deepEqual(rows.map((r) => [r.label, r.count, r.worst?.value]), [['instance slots drawn, not written · wheels', 1, 12], ['instance slots drawn, not written · bodies', 1, 95]]);
 });
+
+test('report trusts the share a recorder judged (any --min-share); only lines without one are judged at 10%', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-t0-'));
+  writeFileSync(join(dir, 'perf.jsonl'), JSON.stringify({ type: 'hitch', at: '2026-09-25T10:00:30Z', frameMs: 120, medianMs: 16, tier: 0,
+    classification: [{ guess: 'long-script', evidence: 'e' }], topFrames: [{ fn: 'pathfind', url: 'g.js:2', selfMs: 3.6, share: 0.03 }] }) + '\n');
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify({ type: 'profile', frame: { medianMs: 16.7 }, tier: 0, at: '2026-09-25T10:02:00Z' }));
+  assert.match(run('report', '--dir', dir), /top pathfind@g\.js:2 3\.6ms \(3% of frame\)/);
+});

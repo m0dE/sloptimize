@@ -124,9 +124,12 @@ if (cmd === 'report') {
     const top = h.topFrames?.[0];
     if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
     const name = `${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
+    // A line that carries a share was judged by the recorder (at whatever
+    // --min-share it ran with); only older lines are judged here.
+    const judged = top.share !== undefined;
     const share = top.share ?? (h.frameMs > 0 ? top.selfMs / h.frameMs : undefined);
     if (share === undefined) return `  top ${name}`;
-    if (h.unattributed === 'low-share' || (share < ATTRIBUTE_MIN_SHARE && h.classification?.[0]?.guess !== 'shader-compile')) {
+    if (h.unattributed === 'low-share' || (!judged && share < ATTRIBUTE_MIN_SHARE && h.classification?.[0]?.guess !== 'shader-compile')) {
       const s = h.sampled;
       const rest = s ? `; the chunk's other time: native ${s.programMs}ms, gc ${s.gcMs}ms` : '';
       return `  unattributed (heaviest JS ${name} = ${pct(share)} of the frame${rest})`;
@@ -617,6 +620,11 @@ if (cmd === 'attach') {
     if (!Number.isFinite(n) || n < 0) { console.error(`sloptimize attach: --wait takes seconds (got "${v}")`); process.exit(2); }
     return n;
   };
+  const share = (v) => {
+    const n = Number(v);
+    if (!(n >= 0 && n <= 1)) { console.error(`sloptimize attach: --min-share is a fraction of the frame, 0–1 (got "${v}")`); process.exit(2); }
+    return n;
+  };
   let session;
   try {
     session = await attach({
@@ -627,6 +635,8 @@ if (cmd === 'attach') {
       minHitchMs: get('--min-hitch-ms') ? Number(get('--min-hitch-ms')) : undefined,
       build: get('--build'),
       waitMs: get('--wait') !== undefined ? waitSeconds(get('--wait')) * 1000 : undefined,
+      minShare: get('--min-share') !== undefined ? share(get('--min-share')) : undefined,
+      slots: !args.includes('--no-slots'),
     });
   } catch (e) {
     // Nothing was recorded: say why on one line and leave non-zero, never a
@@ -654,5 +664,5 @@ if (cmd === 'attach') {
   await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

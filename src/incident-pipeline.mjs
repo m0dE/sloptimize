@@ -150,7 +150,7 @@ export function createIncidentPipeline(opts) {
   const samplingIntervalUs = opts.samplingIntervalUs ?? SAMPLING_INTERVAL_US;
   const floorMs = opts.attributeFloorMs ?? ATTRIBUTE_FLOOR_MS;
   const cooldownMs = opts.attributeCooldownMs ?? ATTRIBUTE_COOLDOWN_MS;
-  const minShare = opts.attributeMinShare ?? ATTRIBUTE_MIN_SHARE;
+  const minShare = Number.isFinite(opts.attributeMinShare) ? opts.attributeMinShare : ATTRIBUTE_MIN_SHARE;
   const windowMs = opts.windowMs ?? PROFILE_WINDOW_MS;
   const now = opts.now ?? Date.now;
   const setT = opts.setTimeout ?? setTimeout, clearT = opts.clearTimeout ?? clearTimeout;

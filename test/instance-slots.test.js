@@ -95,3 +95,16 @@ test('an existing devtools hook is listened on, never replaced', () => {
   vm.runInContext(buildInjectScript(), ctx);
   assert.equal(ctx.__THREE_DEVTOOLS__, hook);
 });
+
+test('--no-slots: the recorder defines no __THREE_DEVTOOLS__ and runs no checks', () => {
+  const rafs = [], emitted = [];
+  const ctx = { requestAnimationFrame: (cb) => rafs.push(cb), setInterval: () => 0, PerformanceObserver: class { observe() {} }, performance: { now: () => 0 },
+    location: { href: 'x' }, document: { addEventListener() {} }, __sloptimizeEmit: (j) => emitted.push(JSON.parse(j)), EventTarget, CustomEvent, WeakMap, WeakRef, Uint8Array, Uint16Array, Float32Array,
+    Error, JSON, Math, Float64Array, Date, String, Number, Array, Set, Object };
+  vm.createContext(ctx);
+  vm.runInContext(buildInjectScript({ slots: false }), ctx);
+  assert.equal(ctx.__THREE_DEVTOOLS__, undefined);
+  let ts = 0;
+  for (let f = 0; f < 800; f++) { ts += 16; const cb = rafs.pop(); rafs.length = 0; cb(ts); }
+  assert.equal(emitted.filter((e) => e.type === 'instance-slots').length, 0);
+});
