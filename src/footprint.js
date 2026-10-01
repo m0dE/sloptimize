@@ -144,7 +144,7 @@ function mintSite(rec) {
  *  no bundler content hash (`index-CNbvoNb_.js` → `index.js`, `main.3f2a9c1b.js`
  *  → `main.js`). A hash is 8+ url-safe characters after a `-` or `.` with a
  *  digit or a capital in it, so a plain word (`long-function.js`) survives. */
-function stableFile(loc) {
+export function stableFile(loc) {
   const file = String(loc ?? '').replace(/:\d+(?::\d+)?$/, '').replace(/[?#].*$/, '').split(/[/\\]/).pop();
   return file.replace(/[-.]([A-Za-z0-9_-]{8,})(?=\.[A-Za-z]+$)/, (m, h) => (/[0-9A-Z]/.test(h) ? '' : m));
 }
@@ -171,6 +171,10 @@ function attachSite(rec) {
     loc = frame.slice(frame.lastIndexOf('@') + 1);
   }
   if (!fn) {
+    // A record attach declined to attribute keeps its topFrames for the
+    // reader (`low-share`: the heaviest was under a tenth of the stall), but
+    // they name no cause, so they name no site either.
+    if (rec.unattributed) return '';
     const top = Array.isArray(rec.topFrames) ? rec.topFrames[0] : undefined;
     if (!top || typeof top.fn !== 'string' || !top.fn) return '';
     fn = top.fn; loc = top.url ?? '';
@@ -245,6 +249,10 @@ function baseKey(rec) {
       const w = rec.worstFrames?.[0];
       return `usermark|${phase}|${w?.classification?.[0]?.guess ?? 'unclassified'}`;
     }
+    case 'instance-slots':
+      // Drawn slots no longer written (instance-slots.js). The mesh is the
+      // site; a record that says the stale slots cleared is not an incident.
+      return rec.stale > 0 ? `instance-slots|${phase}|${String(rec.name ?? '?').replace(/[|,]/g, '_').slice(0, 60)}` : null;
     case 'jitter':
       return `jitter|${rec.track ?? '?'}|${rec.kind ?? '?'}|${phase}|${topGuess(rec)}|${jumpAxis(rec)}`;
     case 'warm':
@@ -299,6 +307,7 @@ function describeBase(parts, key) {
   switch (type) {
     case 'hitch': return { glyph: '⚡', label: `hitch · ${parts[2] ?? '?'}${hitchSiteLabel(parts[3])}`, phase: parts[1] ?? '?' };
     case 'usermark': return { glyph: '★', label: `keyframe · ${parts[2] ?? '?'}`, phase: parts[1] ?? '?' };
+    case 'instance-slots': return { glyph: '◫', label: `instance slots drawn, not written · ${parts[2] ?? '?'}`, phase: parts[1] ?? '?' };
     case 'jitter': return { glyph: '↯', label: `jitter · ${parts[1] ?? '?'} ${parts[2] ?? '?'} · ${parts[4] ?? '?'} · ${parts[5] ?? '?'}`, phase: parts[3] ?? '?' };
     case 'warm': return { glyph: '🔥', label: `warm · ${parts[1] ?? '?'} (${parts[2] ?? '?'})`, phase: parts[3] ?? '?' };
     case 'gpu-stall': return { glyph: '⏳', label: 'gpu-process stall', phase: parts[1] ?? '?' };

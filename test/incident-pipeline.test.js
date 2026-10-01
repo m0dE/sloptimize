@@ -9,7 +9,7 @@ import { createIncidentPipeline } from '../src/incident-pipeline.mjs';
 
 const profileWith = (fn) => ({
   nodes: [{ id: 1, callFrame: { functionName: fn, url: 'https://x/game.js', lineNumber: 9 } }],
-  samples: [1], timeDeltas: [4000],
+  samples: [1], timeDeltas: [90000],
 });
 
 function harness(opts = {}) {
@@ -25,7 +25,7 @@ function harness(opts = {}) {
   const logs = [];
   const p = createIncidentPipeline({ dir, send, log: (l) => logs.push(l), ...opts });
   const lines = () => readFileSync(join(dir, 'perf.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  return { dir, calls, sent, logs, p, lines, setProfile: (fn) => { nextProfile = profileWith(fn); } };
+  return { dir, calls, sent, logs, p, lines, setProfile: (fn) => { nextProfile = profileWith(fn); }, setProfileRaw: (pr) => { nextProfile = pr; } };
 }
 const hitch = (at = '2026-09-09T00:00:00Z') => ({ type: 'hitch', at, frameMs: 120, classification: [{ guess: 'long-script' }] });
 
@@ -186,4 +186,70 @@ test('every line of one attach run carries its session and, when given, the buil
   const { buildIssues } = await import('../src/history.js');
   const rows = buildIssues(l.slice(0, 3));
   assert.deepEqual(rows.map((r) => r.key).sort(), ['hitch|?|long-script|fn:buildWorld', 'hitch|?|long-script|fn:isTurnBanned']);
+});
+
+test('a top frame under a tenth of the stall is not named as its cause: low-share, shares on every frame, the chunk breakdown', async () => {
+  const h = harness();
+  await h.p.start();
+  // The field report: a 687.5 ms frame whose heaviest JS was 11.2 ms of _aStarLoop;
+  // the rest of the chunk was native work the JS rows cannot see.
+  h.setProfileRaw({
+    nodes: [
+      { id: 1, callFrame: { functionName: '(root)' }, children: [2, 3] },
+      { id: 2, callFrame: { functionName: '_aStarLoop', url: 'https://x/index-BOkDWhGO.js', lineNumber: 90925 } },
+      { id: 3, callFrame: { functionName: '(program)' } },
+    ],
+    samples: [2, 3, 3], timeDeltas: [11200, 500000, 150000],
+  });
+  await h.p.onRecord({ ...hitch(), frameMs: 687.5 });
+  const [rec] = h.lines();
+  assert.equal(rec.unattributed, 'low-share');
+  assert.equal(rec.topFrames[0].fn, '_aStarLoop');
+  assert.equal(rec.topFrames[0].share, 0.016);
+  assert.deepEqual(rec.sampled, { jsMs: 11.2, gcMs: 0, programMs: 650, idleMs: 0 });
+  assert.equal(rec.cluster.key, 'long-script|');
+  assert.ok(h.logs.some((l) => l.includes('top: unattributed')));
+  const { footprintKey } = await import('../src/footprint.js');
+  assert.equal(footprintKey(rec), 'hitch|?|long-script');
+  // At or above the bar the function is the cause, as before.
+  h.setProfile('buildWorld');
+  await h.p.onRecord({ ...hitch('2026-09-09T00:00:05Z'), frameMs: 120 });
+  assert.equal(h.lines()[1].unattributed, undefined);
+  assert.equal(h.lines()[1].topFrames[0].share, 0.75);
+});
+
+test('every stopped chunk folds into runs/<session>.json: self + inclusive samples per function, per phase, frame windows', async () => {
+  const h = harness({ build: 'b1' });
+  await h.p.start();
+  h.setProfileRaw({
+    nodes: [
+      { id: 1, callFrame: { functionName: '(root)' }, children: [2, 4] },
+      { id: 2, callFrame: { functionName: 'tick', url: 'http://h/src/loop.ts', lineNumber: 3, columnNumber: 2 }, children: [3] },
+      { id: 3, callFrame: { functionName: 'stepCars', url: 'http://h/src/sim/cars.ts', lineNumber: 10, columnNumber: 0 } },
+      { id: 4, callFrame: { functionName: '(idle)' } },
+    ],
+    samples: [3, 3, 2, 4], timeDeltas: [10000, 10000, 10000, 10000],
+  });
+  await h.p.onRecord({ type: 'profile', at: '2026-09-09T00:00:01Z', phase: 'steady', frame: { medianMs: 16.6, p95Ms: 20 }, render: { calls: 300 } });
+  await h.p.onRecord({ ...hitch(), phase: 'steady' });
+  await h.p.stop();
+  const run = JSON.parse(readFileSync(join(h.dir, 'runs', `${h.p.session}.json`), 'utf8'));
+  assert.equal(run.session, h.p.session);
+  assert.equal(run.build, 'b1');
+  const p = run.phases.steady;
+  assert.equal(p.samples, 6);   // idle is not a sample of the run's work; two chunks (rotation + final stop)
+  assert.equal(p.idle, 2);
+  assert.deepEqual(p.frame, { windows: 1, medianMs: 16.6, p95Ms: 20, calls: 300 });
+  const row = (fn) => p.fns.find((r) => r[0] === fn);
+  assert.deepEqual(row('stepCars'), ['stepCars', 'http://h/src/sim/cars.ts', 10, 0, 4, 4]);
+  assert.deepEqual(row('tick'), ['tick', 'http://h/src/loop.ts', 3, 2, 2, 6]);
+});
+
+test('attributeMinShare moves the bar: 3% names a cause at 0.02, not at the default', async () => {
+  const lo = harness({ attributeMinShare: 0.02 });
+  await lo.p.start();
+  lo.setProfileRaw({ nodes: [{ id: 1, callFrame: { functionName: 'pathfind', url: 'https://x/g.js', lineNumber: 1 } }], samples: [1], timeDeltas: [3600] });
+  await lo.p.onRecord(hitch());
+  assert.equal(lo.lines()[0].unattributed, undefined);
+  assert.equal(lo.lines()[0].cluster.key, 'long-script|pathfind@g.js:2');
 });

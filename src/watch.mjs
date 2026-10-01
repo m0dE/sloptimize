@@ -73,6 +73,11 @@ export function wakeLine(rec, dir, opts = {}) {
     }
     case 'gpu-stall':
       return `sloptimize ⏳ gpu-stall ${rec.queueDoneMs}ms @ ${rec.at} → ${cls(rec.classification)} ${ctx} ${where}`;
+    case 'instance-slots':
+      // Ghost suspects: drawn slots no longer written in a moving mesh. The
+      // cleared record is the report's business, not a wake.
+      if (!(rec.stale > 0)) return null;
+      return `sloptimize ◫ instance slots ${rec.name}: ${rec.drawn} drawn, ${rec.active} active, ${rec.stale} unwritten for ${rec.staleSec}s — static instances or ghosts @ ${rec.at} ${ctx} ${where}`;
     case 'jitter': {
       // The unit/camera landed off its own trajectory (SPEC §3.6). Not an
       // incident of its own when the stall it rode already woke (the catch-up

@@ -2,9 +2,10 @@
 // inject-body.js — the tier-0 in-page recorder (SPEC-attach §3)
 // ============================================================
 // Runs INSIDE the target page, injected over CDP before any page script.
-// Self-contained by construction: attach.mjs concatenates classify.js
-// (exports stripped) above this file and wraps both in an IIFE — there are
-// no imports here, and `classifyHitch` arrives from that concatenation.
+// Self-contained by construction: attach.mjs concatenates classify.js and
+// instance-slots.js (exports stripped) above this file and wraps them in an
+// IIFE — there are no imports here; `classifyHitch` and `createSlotWatch`
+// arrive from that concatenation.
 // Everything fails soft: a page with no WebGPU, no WebGL, or no rAF still
 // records frame timing; a page that never renders records nothing and
 // costs nothing.
@@ -13,7 +14,7 @@
 // process registered. One JSON record per call; the node side owns files,
 // clustering, and the profiler.
 
-/* global classifyHitch, __sloptimizeEmit, __sloptimizeOpts */
+/* global classifyHitch, createSlotWatch, __sloptimizeEmit, __sloptimizeOpts */
 
 const RING = 600;
 // The absolute floor for detection: a frame is a hitch above 2× the rolling
@@ -196,6 +197,25 @@ function trianglesOf(mode, n) {
   return 0;
 }
 
+// ── three.js scenes, through three's own devtools hook ──────────────────────
+// Every Scene three.js constructs dispatches itself to `__THREE_DEVTOOLS__`
+// when that global exists; defined here, before any page script, it hands
+// tier 0 the scene graph with no game code — which is what the instance-slot
+// watch (instance-slots.js) needs: stale slots inside an InstancedMesh's
+// .count are invisible at the graphics API. A hook already present (the
+// three.js devtools extension) is listened on, never replaced. `attach
+// --no-slots` turns the whole thing off: no global defined, no checks.
+const SLOTS_ON = !(typeof __sloptimizeOpts !== 'undefined' && __sloptimizeOpts.slots === false);
+const slotWatch = createSlotWatch();
+if (SLOTS_ON) try {
+  let hook = globalThis.__THREE_DEVTOOLS__;
+  if (!hook || typeof hook.addEventListener !== 'function') {
+    hook = new EventTarget();
+    globalThis.__THREE_DEVTOOLS__ = hook;
+  }
+  hook.addEventListener('observe', (e) => { try { slotWatch.observe(e.detail); } catch { /* not ours to break */ } });
+} catch { /* no EventTarget: no scenes, nothing else changes */ }
+
 // ── Long tasks: the JS half of attribution the profiler completes ───────────
 let longTaskMs = 0;
 try {
@@ -226,6 +246,9 @@ function ringPct(p) {
 // Draw counters folded over a window, so a profile or a beat reports the
 // MEAN frame, not whichever single frame the timer landed on.
 const PROFILE_EVERY = 120;
+// The slot watch, offset half a window from the profile so the two never
+// share a frame.
+const SLOTS_EVERY = 120, SLOTS_AT = 60;
 const win = { frames: 0, draws: 0, tris: 0 };
 const beat = { frames: 0, draws: 0, tris: 0 };
 const BEAT_MS = 60_000;
@@ -274,6 +297,11 @@ function tick(ts) {
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0;
+  }
+  if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
+    let rows = [];
+    try { rows = slotWatch.check(performance.now()); } catch { /* a mesh we could not read */ }
+    for (const r of rows) emit({ type: 'instance-slots', at: new Date().toISOString(), ...r, tier: 0 });
   }
 }
 

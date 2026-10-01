@@ -19,11 +19,28 @@ The playbook, in order:
    The record's `evidence` string says why the guess exists.
 3. `sloptimize census` — per-entity meshes/triangles/materials/shadow
    casters, plus the closed hint vocabulary (instancing-candidate,
-   material-dedup-candidate, oversized-texture, undisposed-suspect).
+   material-dedup-candidate, oversized-texture, undisposed-suspect,
+   instanced-stale-slots — call census twice a few seconds apart; drawn
+   slots that never changed in a moving InstancedMesh are static
+   instances or ghosts, and only you can tell which). Under attach the
+   same finding arrives on its own as ◫ `instance-slots` records: N drawn,
+   M written, K untouched for Ns. Ghosts are usually `count` left at a
+   high-water mark while fewer slots are written — look at who sets count.
 4. ONE change at a time.
 5. Verify: counters (draw calls, triangles, programs) compare EXACTLY on any
    renderer, including software rasterizers. Timing numbers only count in
    `regime: hardware`; never quote a timing from a `software` regime.
+   Before trusting ANY before/after, `sloptimize touched` (MCP:
+   `check_touched`): if the changed files got 0 samples, the benchmark never
+   ran your change and its verdict is about something else — change the
+   scene, not the conclusion. Then `sloptimize compare <before> <after>`
+   (MCP: `compare_runs`) with ≥2 runs a side: quote only rows marked
+   `significant`; `within noise` is not "no regression", it is "not
+   provable"; and a `suspect the machine` warning means re-measure. Tier-0
+   (attach) timings compare only with other attached runs.
+   A hitch line that reads `unattributed (heaviest JS … = 2% of the frame)`
+   is NOT a lead on that function — the stall was GC, native work or
+   unsampled; do not go optimise the name it printed.
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
 7. Record the fix once the new build has ledger evidence:

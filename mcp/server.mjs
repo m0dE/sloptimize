@@ -37,9 +37,16 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { title: { type: 'string' }, issue: { type: 'string' }, solution: { type: 'string' }, commit: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
       before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
+  { name: 'compare_runs', description: 'A vs B (each a build, a session id, or <ISO>..<ISO>): every metric — frame median/p95/body, draw calls, hitches/h, each host loop section, each hot function\'s share — read per RUN and judged against its OWN run-to-run noise floor (significant / within noise / unproven at n=1), plus a warning when the slowdown is uniform with unchanged composition (the machine changed, not the code). Run each side at least twice.',
+    inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' }, phase: { type: 'string', description: 'comma list of page phases' } }, required: ['a', 'b'] } },
+  { name: 'check_touched', description: 'Did the measured run EXECUTE the change under test? For each changed file (default: git diff of the working tree, else the last commit), whether any profiler sample of the attach run landed in it. Call before trusting any before/after: a clean A/B on a benchmark that never ran the new code path proves nothing. Bundled builds need `maps` to credit samples to sources.',
+    inputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string', description: 'git rev to diff against' },
+      build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
   { name: 'attach_start', description: 'Tier-0 attach: launch a Chromium at a URL with the injected recorder + rolling profiler (zero game integration). Records land in .sloptimize/ and incidents are clustered with file:line attribution.',
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' },
-      build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' } }, required: ['url'] } },
+      build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' },
+      minShare: { type: 'number', description: 'share of a frame (0–1) a function needs to be named a hitch\'s cause (default 0.1)' },
+      slots: { type: 'boolean', description: 'false: skip the InstancedMesh stale-slot watch and leave __THREE_DEVTOOLS__ undefined (default true)' } }, required: ['url'] } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
     inputSchema: { type: 'object', properties: {} } },
 ];
@@ -97,11 +104,29 @@ async function callTool(name, args = {}) {
     appendFileSync(join(DIR(), 'fixes.jsonl'), JSON.stringify(fix) + '\n');
     return { ok: true, fix };
   }
+  if (name === 'compare_runs' || name === 'check_touched') {
+    // The CLI's own --json: one implementation of both verbs.
+    const { execFileSync } = await import('node:child_process');
+    const argv = name === 'compare_runs' ? ['compare', String(args.a), String(args.b)] : ['touched'];
+    if (name === 'check_touched') {
+      if (args.changed?.length) argv.push('--changed', args.changed.join(','));
+      else if (args.since) argv.push('--since', args.since);
+      if (args.build) argv.push('--build', args.build); else if (args.session) argv.push('--session', args.session);
+      if (args.maps?.length) argv.push('--map', args.maps.join(','));
+    }
+    if (args.phase) argv.push('--phase', args.phase);
+    try {
+      return JSON.parse(execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'sloptimize.mjs'), ...argv, '--json', '--dir', DIR()], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    } catch (e) {
+      // touched exits 1 WITH its answer when a file got no samples.
+      try { return JSON.parse(e.stdout); } catch { return { error: (e.stderr || e.stdout || e.message).toString().trim() }; }
+    }
+  }
   if (name === 'attach_start') {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build });
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots });
     return { ok: true, session: attachSession.session, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {

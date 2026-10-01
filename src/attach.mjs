@@ -14,22 +14,51 @@ import { spawn } from 'node:child_process';
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 
-/** @param {{minHitchMs?: number}} [opts]  page-side knobs, inlined as `__sloptimizeOpts` */
+/** @param {{minHitchMs?: number, slots?: boolean}} [opts]  page-side knobs, inlined as `__sloptimizeOpts`;
+ *  `slots: false` leaves `__THREE_DEVTOOLS__` alone and skips the instance-slot watch */
 export function buildInjectScript(opts = {}) {
   const classify = readFileSync(join(SRC, 'classify.js'), 'utf8').replace(/^export /gm, '');
+  const slots = readFileSync(join(SRC, 'instance-slots.js'), 'utf8').replace(/^export /gm, '');
   const body = readFileSync(join(SRC, 'inject-body.js'), 'utf8');
-  const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined };
-  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${body}\n})();`;
+  const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined, slots: opts.slots === false ? false : undefined };
+  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${slots}\n${body}\n})();`;
 }
 
 export { clusterKey, topFramesFromProfile } from './incident-pipeline.mjs';
 
-async function discoverTarget(port) {
-  const res = await fetch(`http://127.0.0.1:${port}/json/list`);
-  const targets = await res.json();
+/** A port with nothing on it is its own failure, said as one: back-to-back
+ *  Electron runs collide on a fixed debugging port, and Chromium that could
+ *  not bind it starts anyway without an endpoint — a field report lost three
+ *  runs to an error that read like "attached, no data". */
+export class NothingListening extends Error {
+  constructor(port) {
+    super(`nothing is listening on 127.0.0.1:${port} — start the app with --remote-debugging-port=${port} (and check no other instance holds that port), or pass --wait <s> to wait for it`);
+    this.port = port;
+  }
+}
+
+async function discoverTarget(port, fetchImpl = fetch) {
+  let res;
+  try { res = await fetchImpl(`http://127.0.0.1:${port}/json/list`); }
+  catch (e) {
+    const code = e?.cause?.code ?? e?.code;
+    if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EADDRNOTAVAIL') throw new NothingListening(port);
+    throw new Error(`127.0.0.1:${port} did not answer /json/list: ${e?.cause?.message ?? e?.message ?? e}`);
+  }
+  let targets;
+  try { targets = await res.json(); } catch { throw new Error(`127.0.0.1:${port} answered, but not as a DevTools endpoint (no /json/list) — is that port the app's --remote-debugging-port?`); }
   const page = targets.find((t) => t.type === 'page' && !t.url.startsWith('devtools'));
-  if (!page) throw new Error('no page target — is a tab open?');
+  if (!page) throw new Error(`the DevTools endpoint on :${port} has no page target yet (${targets.length} target(s)) — is a window open?`);
   return page.webSocketDebuggerUrl;
+}
+
+/** Discover, retrying until `waitMs` has passed — for an app still starting. */
+export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now } = {}) {
+  const until = now() + waitMs;
+  for (;;) {
+    try { return await discoverTarget(port, fetchImpl); }
+    catch (e) { if (now() >= until) throw e; await sleep(300); }
+  }
 }
 
 /**
@@ -37,9 +66,12 @@ async function discoverTarget(port) {
  * @param {string} [opts.launch]     URL to open in a spawned browser
  * @param {number} [opts.port]       remote-debugging port (default 9222)
  * @param {string} [opts.wsUrl]      an explicit target socket; skips discovery
+ * @param {number} [opts.waitMs]     keep retrying discovery this long (an app still starting)
  * @param {string} [opts.dir]        .sloptimize/ directory
  * @param {boolean} [opts.headless]
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
+ * @param {number} [opts.minShare]   the share of a frame a function needs to be named its cause (default 0.1)
+ * @param {boolean} [opts.slots]     false: no instance-slot watch, no __THREE_DEVTOOLS__ (default on)
  * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
  *   runs of one build are then one build with n runs in `history`, not n builds
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
@@ -63,12 +95,9 @@ export async function attach(opts = {}) {
       ...(opts.headless ? ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-angle=swiftshader'] : []),
       opts.launch], { stdio: 'ignore' });
     log(`launched ${bin} → ${opts.launch}`);
-    for (let i = 0; i < 50; i++) {
-      try { await discoverTarget(port); break; } catch { await new Promise((r) => setTimeout(r, 300)); }
-    }
   }
 
-  const wsUrl = opts.wsUrl ?? await discoverTarget(port);
+  const wsUrl = opts.wsUrl ?? await waitForTarget(port, opts.waitMs ?? (child ? 15_000 : 0));
   const ws = new WS(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
@@ -92,7 +121,7 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build });
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare });
   const onRecord = pipeline.onRecord;
 
   ws.onmessage = (ev) => {
@@ -111,7 +140,7 @@ export async function attach(opts = {}) {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Runtime.addBinding', { name: '__sloptimizeEmit' });
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ minHitchMs: opts.minHitchMs }) });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ minHitchMs: opts.minHitchMs, slots: opts.slots }) });
   await pipeline.start();
   // The injection applies to NAVIGATIONS — a page that was already loading
   // when we attached (the --launch race) never runs it. One reload closes

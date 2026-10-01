@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ============================================================
-// sloptimize CLI — report | check | census | history | fix | doctor  (SPEC §8.1)
+// sloptimize CLI — report | check | census | history | compare | touched | fix | doctor  (SPEC §8.1)
 // ============================================================
 // Files-first: every verb reads `.sloptimize/` in the cwd (or --dir) and
 // says what it cannot know instead of guessing. Exit codes are API:
@@ -93,6 +93,12 @@ if (cmd === 'report') {
     const per = profile.tier === 0 ? `  (tier 0: per frame, mean of ${fmt(profile.render.frames)} frames, counted at the graphics API)` : '';
     console.log(`  calls ${fmt(profile.render.calls)}  triangles ${fmt(profile.render.triangles)}  programs ${fmt(profile.memory?.programs)}${per}`);
   }
+  // Tier 0's frame is the rAF-to-rAF interval of a page with a recorder and
+  // a sampler in it: vsync-quantized (a 26 ms body presents every 33.3 ms at
+  // 60 Hz) and paying for the instrument. Fine for attached-vs-attached; a
+  // field report compared it against the game's own frame timer and against
+  // unattached runs, and nothing said not to.
+  if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements');
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
   // anyone at the keyboard. Twelve sections and the counters that moved
@@ -109,10 +115,41 @@ if (cmd === 'report') {
   // The count is of the report window (the last 80 ledger lines), not the
   // ledger — `sloptimize issues` and `history` fold all of it.
   console.log(`  hitches in the last 80 ${PHASES ? `${[...PHASES].join(',')} ` : ''}ledger lines: ${auto.length} (showing last ${Math.min(auto.length, 5)})  usermarks: ${marks.length}`);
-  for (const h of auto.slice(-5)) {
+  // A top frame reads as a CAUSE, so it carries its share of the frame, and
+  // one under a tenth of the stall is not printed as one (attach's
+  // low-share gate; applied here too, to lines written before it existed).
+  const { ATTRIBUTE_MIN_SHARE } = await import('../src/incident-pipeline.mjs');
+  const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
+  const attribution = (h) => {
     const top = h.topFrames?.[0];
-    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${top ? `  top ${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms` : h.unattributed ? `  unattributed (${h.unattributed})` : ''}`);
+    if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
+    const name = `${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
+    // A line that carries a share was judged by the recorder (at whatever
+    // --min-share it ran with); only older lines are judged here.
+    const judged = top.share !== undefined;
+    const share = top.share ?? (h.frameMs > 0 ? top.selfMs / h.frameMs : undefined);
+    if (share === undefined) return `  top ${name}`;
+    if (h.unattributed === 'low-share' || (!judged && share < ATTRIBUTE_MIN_SHARE && h.classification?.[0]?.guess !== 'shader-compile')) {
+      const s = h.sampled;
+      const rest = s ? `; the chunk's other time: native ${s.programMs}ms, gc ${s.gcMs}ms` : '';
+      return `  unattributed (heaviest JS ${name} = ${pct(share)} of the frame${rest})`;
+    }
+    // The chunk spans more than the frame, so a share can pass 100%: that
+    // reads as "all of it", not as more than all of it.
+    return `  top ${name} (${pct(Math.min(share, 1))} of frame)`;
+  };
+  for (const h of auto.slice(-5)) {
+    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}`);
   }
+  // A page that armed more than once in one attach session booted more than
+  // once under the recorder (it navigated or reloaded itself): its load-phase
+  // hitches and worst frames cover every boot. Attach's own reload is not
+  // one of them — the first boot runs before the recorder, so one `armed`
+  // per session is the normal case.
+  const armedBy = new Map();
+  for (const r of readJsonl('perf.jsonl', Infinity)) if (r.type === 'armed' && r.session) armedBy.set(r.session, (armedBy.get(r.session) ?? 0) + 1);
+  const reboots = [...new Set(hitches.map((r) => r.session).filter(Boolean))].filter((s) => armedBy.get(s) > 1);
+  for (const s of reboots) console.log(`  note: session ${s} armed ${armedBy.get(s)}× — the page loaded ${armedBy.get(s)} times under the recorder, so load-phase hitch counts and worst frames span every one of those boots`);
   for (const m of marks.slice(-3)) {
     const w = m.worstFrames?.[0];
     console.log(`  ★ usermark ${m.at} ${m.note ?? ''} — window ${m.window?.frames}f median ${m.window?.medianMs}ms; worst ${w?.frameMs}ms → ${w?.classification?.[0]?.guess}`);
@@ -124,6 +161,19 @@ if (cmd === 'report') {
     for (const j of jitters.slice(-5)) {
       const shape = j.kind === 'oscillation' ? `oscillation ×${j.frames} amp ${j.amplitude}` : `snap ${j.units} [${(j.jump ?? []).join(', ')}]`;
       console.log(`  ↯ ${j.at} ${j.track} ${shape} in a ${j.dtMs}ms frame → ${j.classification?.[0]?.guess}: ${j.classification?.[0]?.evidence}`);
+    }
+  }
+  // InstancedMesh slots drawn but no longer written (instance-slots.js):
+  // the newest word per mesh in the window, a clear included — ghosts are
+  // a correctness incident, visible to no counter above.
+  const slotRecs = new Map();
+  for (const r of hitches) if (r.type === 'instance-slots') slotRecs.set(r.name, r);
+  if (slotRecs.size) {
+    console.log(`  instance slots (drawn inside .count, per mesh — newest):`);
+    for (const r of slotRecs.values()) {
+      console.log(r.stale > 0
+        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s — static instances, or ghosts drawn at stale positions (count past the live set?)`
+        : `  ◫ ${r.name}: no stale slots any more (${r.drawn} drawn, ${r.active} active) @ ${r.at}`);
     }
   }
   // The catalogue's head: which causes recur most (SPEC §3.7). The whole
@@ -408,6 +458,105 @@ if (cmd === 'history' || cmd === 'fix') {
   process.exit(0);
 }
 
+if (cmd === 'compare') {
+  // A vs B, each a build, a session, <ISO>..<ISO>, or a comma list of them;
+  // each side is its RUNS (sessions), every metric read per run and judged
+  // against its own run-to-run floor (src/compare.js). Tier-0 function
+  // shares come from runs/<session>.json, which attach writes.
+  const { resolveSide, compareSides } = await import('../src/compare.js');
+  const { readRuns } = await import('../src/runs.js');
+  const specs = args.slice(1).filter((a, i, all) => !a.startsWith('--') && !['--dir', '--phase'].includes(all[i - 1]));
+  if (specs.length < 2) { console.error('sloptimize compare: two sides are required — sloptimize compare <build|session|ISO..ISO> <build|session|ISO..ISO>'); process.exit(2); }
+  const records = readLedger();
+  const runs = readRuns(DIR);
+  const side = (spec) => {
+    const r = resolveSide(spec, records, runs, PHASES);
+    if (r.error) { console.error(`sloptimize compare: ${r.error}${PHASES ? ` (phase ${[...PHASES].join(',')})` : ''}`); process.exit(4); }
+    return r;
+  };
+  const c = compareSides(side(specs[0]), side(specs[1]));
+  if (json) { out(c); process.exit(0); }
+  const sp = (s) => `${s.median} [${s.lo}–${s.hi}]`;
+  console.log(`compare A=${c.a.label} (${c.a.runs.length} run${c.a.runs.length === 1 ? '' : 's'}) → B=${c.b.label} (${c.b.runs.length} run${c.b.runs.length === 1 ? '' : 's'})${PHASES ? `  phase ${[...PHASES].join(',')}` : ''}`);
+  const w = Math.min(Math.max(...c.rows.map((r) => r.metric.length), 12), 56);
+  console.log(`  ${'metric'.padEnd(w)}  ${'A median [lo–hi]'.padEnd(24)}  ${'B median [lo–hi]'.padEnd(24)}  ${'Δ'.padStart(9)}  ${'noise'.padStart(7)}  verdict`);
+  for (const r of c.rows) {
+    const d = `${r.delta > 0 ? '+' : ''}${r.delta}`;
+    const v = r.verdict === 'significant' ? '✱ significant' : r.verdict === 'unproven' ? `unproven (${r.why})` : 'within noise';
+    console.log(`  ${r.metric.slice(0, w).padEnd(w)}  ${sp(r.a).padEnd(24)}  ${sp(r.b).padEnd(24)}  ${d.padStart(9)}  ${String(r.noise ?? '—').padStart(7)}  ${v}`);
+  }
+  if (c.composition) console.log(`  composition (${c.composition.by}): shares moved ${+(c.composition.moved * 100).toFixed(1)}% A→B${c.composition.within !== undefined ? `, ${+(c.composition.within * 100).toFixed(1)}% between runs of one side` : ''}`);
+  for (const wn of c.warnings) console.log(`  ⚠ ${wn}`);
+  console.log('  significant = every B run beyond every A run AND |Δ| > 2× noise (the larger side\'s run-to-run range); one run on a side has no floor.');
+  process.exit(0);
+}
+
+if (cmd === 'touched') {
+  // Did the run execute the change under test? For each changed file: did
+  // any profiler sample land in it (src/runs.js touchedFiles). A clean A/B
+  // on a benchmark that never ran the new code path is a rubber stamp, and
+  // only this can say so.
+  const { readRuns, runBucket, touchedFiles, CODE_FILE } = await import('../src/runs.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  let runs = readRuns(DIR);
+  if (runs.length === 0) { console.log(`no runs/*.json under ${DIR} — attach writes one per session (sloptimize attach); tier 1 has no whole-run sampler`); process.exit(4); }
+  if (get('--build')) runs = runs.filter((r) => r.build === get('--build'));
+  else if (get('--session')) runs = runs.filter((r) => r.session === get('--session'));
+  else runs = [runs.sort((a, b) => Date.parse(a.to ?? 0) - Date.parse(b.to ?? 0)).at(-1)];
+  if (runs.length === 0) { console.log(`no run matches ${get('--build') ? `build ${get('--build')}` : `session ${get('--session')}`}`); process.exit(4); }
+  let changed = get('--changed')?.split(',').map((s) => s.trim()).filter(Boolean);
+  let source = '--changed';
+  if (!changed) {
+    const { execFileSync } = await import('node:child_process');
+    const git = (...a) => { try { return execFileSync('git', a, { cwd: get('--repo') ?? process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean); } catch { return null; } };
+    const since = get('--since');
+    if (since) { changed = git('diff', '--name-only', since); source = `git diff ${since}`; }
+    else {
+      changed = git('diff', '--name-only', 'HEAD'); source = 'uncommitted changes';
+      if (changed && changed.length === 0) { changed = git('diff', '--name-only', 'HEAD~1', 'HEAD'); source = 'the last commit (the tree is clean)'; }
+    }
+    if (!changed) { console.error('sloptimize touched: not a git repo — pass --changed a.js,b.js'); process.exit(2); }
+  }
+  if (changed.length === 0) { console.log(`no changed files (${source})`); process.exit(4); }
+  const maps = [];
+  if (get('--map')) {
+    const { loadSourceMap } = await import('../src/node/sourcemap.js');
+    const { basename } = await import('node:path');
+    for (const m of get('--map').split(',')) {
+      try { maps.push({ file: basename(m).replace(/\.map$/, ''), sm: loadSourceMap(m) }); } catch (e) { console.error(`sloptimize touched: --map ${m}: ${e.message}`); process.exit(2); }
+    }
+  }
+  const bucket = runBucket(runs, PHASES);
+  if (bucket.samples === 0) {
+    // No samples at all says nothing about any file — never "0 samples in N of N".
+    const have = [...new Set(runs.flatMap((r) => Object.keys(r.phases ?? {})))];
+    console.log(`no samples in ${PHASES ? `phase ${[...PHASES].join(',')}` : 'this run'} — phases in the run file: ${have.join(', ') || 'none'}`);
+    process.exit(4);
+  }
+  const t = touchedFiles(bucket, changed, { maps });
+  const code = t.files.filter((f) => f.code), missed = code.filter((f) => !f.hit);
+  if (json) { out({ runs: runs.map((r) => ({ session: r.session, build: r.build })), source, ...t }); process.exit(missed.length ? 1 : 0); }
+  const iv = runs[0].intervalUs ? `${runs[0].intervalUs / 1000}ms` : '?';
+  console.log(`touched: ${runs.length === 1 ? `run ${runs[0].session}` : `${runs.length} runs`}${runs[0].build ? ` (build ${runs[0].build})` : ''} · ${t.jsSamples} JS samples at ${iv}${PHASES ? ` · phase ${[...PHASES].join(',')}` : ''} · ${changed.length} changed file(s) from ${source}`);
+  const pct = (x) => `${+(x * 100).toFixed(x < 0.01 ? 2 : 1)}%`;
+  const w = Math.min(Math.max(...t.files.map((f) => f.file.length)), 60);
+  for (const f of t.files) {
+    if (!f.code) console.log(`  · ${f.file.padEnd(w)}  not JS — the sampler cannot see it run (a shader, data, style)`);
+    else if (f.hit) console.log(`  ✔ ${f.file.padEnd(w)}  ${f.heaviest} samples under ${f.top} (${pct(f.share)} of JS), ${f.self} self in the file`);
+    else console.log(`  ✗ ${f.file.padEnd(w)}  0 samples${t.bound !== undefined ? ` — if it ran, it took under ${pct(t.bound)} of JS time (95%)` : ''}`);
+  }
+  if (missed.length) {
+    console.log(`0 samples in ${missed.length} of ${code.length} changed code file(s) — this run did not measurably execute ${missed.length === code.length ? 'the change' : 'part of the change'}; a before/after from it says nothing about ${missed.length === 1 ? 'that file' : 'those files'}.`);
+    if (!maps.length) {
+      const scripts = new Map();
+      for (const r of bucket.fns.values()) { const b = String(r.url).replace(/[?#].*$/, '').split('/').pop(); if (b) scripts.set(b, (scripts.get(b) ?? 0) + r.self); }
+      const top = [...scripts].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([b]) => b);
+      if (top.length && !top.some((b) => CODE_FILE.test(b) && code.some((f) => f.file.endsWith(b)))) console.log(`  (the samples name these scripts: ${top.join(', ')} — if those are bundles, pass --map <bundle>.js.map so samples are credited to sources)`);
+    }
+  }
+  process.exit(missed.length ? 1 : 0);
+}
+
 if (cmd === 'serve') {
   // The dev server for any app (SPEC §8.6): the ingest/ledger/ask routes on
   // a bare http server, plus the app's static files with the js-profiling
@@ -466,14 +615,35 @@ if (cmd === 'attach') {
   // browser; bare attach uses an existing --remote-debugging-port session.
   const { attach } = await import('../src/attach.mjs');
   const get = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
-  const session = await attach({
-    launch: get('--launch'),
-    port: get('--port') ? Number(get('--port')) : undefined,
-    dir: get('--dir') ?? '.sloptimize',
-    headless: args.includes('--headless'),
-    minHitchMs: get('--min-hitch-ms') ? Number(get('--min-hitch-ms')) : undefined,
-    build: get('--build'),
-  });
+  const waitSeconds = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) { console.error(`sloptimize attach: --wait takes seconds (got "${v}")`); process.exit(2); }
+    return n;
+  };
+  const share = (v) => {
+    const n = Number(v);
+    if (!(n >= 0 && n <= 1)) { console.error(`sloptimize attach: --min-share is a fraction of the frame, 0–1 (got "${v}")`); process.exit(2); }
+    return n;
+  };
+  let session;
+  try {
+    session = await attach({
+      launch: get('--launch'),
+      port: get('--port') ? Number(get('--port')) : undefined,
+      dir: get('--dir') ?? '.sloptimize',
+      headless: args.includes('--headless'),
+      minHitchMs: get('--min-hitch-ms') ? Number(get('--min-hitch-ms')) : undefined,
+      build: get('--build'),
+      waitMs: get('--wait') !== undefined ? waitSeconds(get('--wait')) * 1000 : undefined,
+      minShare: get('--min-share') !== undefined ? share(get('--min-share')) : undefined,
+      slots: !args.includes('--no-slots'),
+    });
+  } catch (e) {
+    // Nothing was recorded: say why on one line and leave non-zero, never a
+    // stack trace that reads like an attach that ran and saw nothing.
+    console.error(`sloptimize attach: ${e?.message ?? e}`);
+    process.exit(4);
+  }
   console.log(`[attach] recording — session ${session.session}${session.build ? `, build ${session.build}` : ''} — Ctrl+C to stop`);
   // Any signal a wrapper sends stops the sampler in the page before we go;
   // and the target going away ends the session — an attach without a target
@@ -494,5 +664,5 @@ if (cmd === 'attach') {
   await bye(`target gone (${why.code ?? 'socket closed'})`);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--headless] [--build <id>]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots]\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

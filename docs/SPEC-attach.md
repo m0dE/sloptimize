@@ -67,6 +67,28 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
 - **Verify** closes the loop: counters compare exactly on any renderer;
   timing only within its regime; verdicts land in the append-only ledger
   so a reverted strategy is never retried.
+- **Attribute honestly**: a function names a hitch's cause only when its
+  self time is ≥10% of the frame (`ATTRIBUTE_MIN_SHARE`); below that the
+  record keeps its `topFrames` (each with `share`) and `sampled` (the
+  chunk's JS / GC / native / idle ms) but reads `unattributed: 'low-share'`
+  and clusters on the verdict alone. (Field report: a 687.5 ms frame
+  printed `top _aStarLoop 11.2ms` — 1.6% — and nearly sent an agent to
+  optimise A*.)
+- **Watch the instances**: the recorder defines `__THREE_DEVTOOLS__`
+  before page scripts (listening on an existing one instead), so every
+  three.js `Scene` announces itself; every 120 frames it checks visible
+  InstancedMeshes for slots inside `.count` neither written through
+  `setMatrixAt` nor changed for 5 checks while other slots move, and emits
+  `instance-slots` (an incident, footprint `instance-slots|phase|mesh`),
+  plus one clearing record when they go. Verified against three.js 0.183
+  in headless Chromium: a cull that stopped writing 95 of 200 slots read
+  `95 untouched for 10s`; the fixed page emitted nothing.
+- **Keep the whole run**: every profiler chunk (hitch rotation, window
+  roll, final stop) folds into `runs/<session>.json` before it is dropped
+  — self and inclusive samples per function, per page phase, plus the
+  tier-0 frame windows. `touched` reads it to say whether the changed
+  files received any sample; `compare` reads it for per-run function
+  shares and the machine-vs-code composition check.
 
 ## 3. Tiers of sensing (progressive precision, none required to start)
 

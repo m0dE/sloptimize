@@ -10,6 +10,7 @@
 import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mintSession } from './cloud-sink.js';
+import { createRunFold } from './runs.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -47,6 +48,24 @@ export function topFramesFromProfile(profile, limit = 5) {
   return rows.slice(0, limit);
 }
 
+/** Where a chunk's sampled time went apart from named JS: V8's collector,
+ *  `(program)` (native work — layout, GPU sync, compiles, the embedder) and
+ *  idle. A stall the JS rows cannot explain is usually in one of these, and
+ *  topFramesFromProfile drops all three. ms, one decimal. */
+export function sampledBreakdown(profile) {
+  if (!profile || !profile.nodes) return undefined;
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const out = { jsMs: 0, gcMs: 0, programMs: 0, idleMs: 0 };
+  const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
+  for (let i = 0; i < samples.length; i++) {
+    const name = byId.get(samples[i])?.callFrame?.functionName;
+    const k = name === '(idle)' ? 'idleMs' : name === '(program)' ? 'programMs' : name === '(garbage collector)' ? 'gcMs' : 'jsMs';
+    out[k] += (deltas[i] ?? 0) / 1000;
+  }
+  for (const k of Object.keys(out)) out[k] = +out[k].toFixed(1);
+  return out;
+}
+
 // ── The observer effect, bounded ─────────────────────────────────────────────
 // The sampler runs INSIDE the game's renderer, and a Profiler.stop serializes
 // every sample it holds on that same main thread. The first field build
@@ -73,6 +92,14 @@ export function topFramesFromProfile(profile, limit = 5) {
 //              node/profiler.js carries, and for the same reason: a quiet
 //              hour's samples are of no use to anyone and cost the game
 //              exactly when it finally hitches).
+//   share      a function is named as the CAUSE only when its self time is
+//              at least a tenth of the stall. A field report printed
+//              "687.5ms → top _aStarLoop 11.2ms" — 1.6% of the frame, one
+//              sample, read as the explanation by the agent that nearly went
+//              to optimise A*. Below the bar the record keeps its topFrames
+//              (each with its `share` of the frame) but says `unattributed:
+//              'low-share'` and clusters on the verdict alone; `sampled`
+//              says where the chunk's time went instead (GC, native, idle).
 // What the gate drops is COUNTED, never silent: a skipped hitch carries
 // `unattributed: 'below-floor' | 'cooldown'` and the next minted record
 // carries `skippedSinceLast`. Detection itself is untouched — every hitch
@@ -80,7 +107,9 @@ export function topFramesFromProfile(profile, limit = 5) {
 export const SAMPLING_INTERVAL_US = 10_000;
 export const ATTRIBUTE_FLOOR_MS = 80;
 export const ATTRIBUTE_COOLDOWN_MS = 1000;
+export const ATTRIBUTE_MIN_SHARE = 0.1;
 export const PROFILE_WINDOW_MS = 10_000;
+const RUN_WRITE_MS = 5000;
 
 /**
  * @param {object} opts
@@ -96,7 +125,9 @@ export const PROFILE_WINDOW_MS = 10_000;
  * @param {number} [opts.samplingIntervalUs]  see the header; default 10 000
  * @param {number} [opts.attributeFloorMs]    default 80
  * @param {number} [opts.attributeCooldownMs] default 1000, in page time (`rec.at`)
+ * @param {number} [opts.attributeMinShare]   default 0.1 — the top frame's self time / frameMs
  * @param {number} [opts.windowMs]            default 10 000; 0 disables the roll
+ * @param {boolean} [opts.runs]               default true: fold every chunk into runs/<session>.json (runs.js)
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -119,10 +150,31 @@ export function createIncidentPipeline(opts) {
   const samplingIntervalUs = opts.samplingIntervalUs ?? SAMPLING_INTERVAL_US;
   const floorMs = opts.attributeFloorMs ?? ATTRIBUTE_FLOOR_MS;
   const cooldownMs = opts.attributeCooldownMs ?? ATTRIBUTE_COOLDOWN_MS;
+  const minShare = Number.isFinite(opts.attributeMinShare) ? opts.attributeMinShare : ATTRIBUTE_MIN_SHARE;
   const windowMs = opts.windowMs ?? PROFILE_WINDOW_MS;
   const now = opts.now ?? Date.now;
   const setT = opts.setTimeout ?? setTimeout, clearT = opts.clearTimeout ?? clearTimeout;
   mkdirSync(dir, { recursive: true });
+
+  // The whole run's samples (runs.js): every chunk is folded before it is
+  // dropped, credited to the phase the page was last heard in. Written at
+  // most every RUN_WRITE_MS and always on stop — a crash loses seconds.
+  const run = opts.runs === false ? null : createRunFold({ session, build, intervalUs: samplingIntervalUs });
+  const runPath = join(dir, 'runs', `${session.replace(/[^\w.-]/g, '_')}.json`);
+  let pagePhase, runWrittenAt = -Infinity;
+  function foldChunk(profile) {
+    if (!run || !profile) return;
+    run.addProfile(profile, pagePhase, now());
+    writeRun(false);
+  }
+  function writeRun(force) {
+    if (!run || run.empty) return;
+    const t = now();
+    if (!force && t - runWrittenAt < RUN_WRITE_MS) return;
+    runWrittenAt = t;
+    try { mkdirSync(join(dir, 'runs'), { recursive: true }); writeFileSync(runPath, JSON.stringify(run.toJSON())); }
+    catch (e) { log(`run file not written: ${e?.message ?? e}`); }
+  }
 
   const clusters = new Map();   // key → {count, firstAt, lastAt, sample}
   let lastCreateStackHead = null;
@@ -151,9 +203,10 @@ export function createIncidentPipeline(opts) {
   }
   async function stop() {
     disarm();
-    if (!profiling) return;
+    if (!profiling) { writeRun(true); return; }
     profiling = false;
-    try { await send('Profiler.stop'); } catch { /* target gone */ }
+    try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
+    writeRun(true);
   }
   /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
    *  measures UNREAD time. */
@@ -163,6 +216,7 @@ export function createIncidentPipeline(opts) {
       const { profile } = await send('Profiler.stop');
       await send('Profiler.start');
       arm();
+      foldChunk(profile);
       return profile;
     } catch { return null; }
   }
@@ -192,12 +246,14 @@ export function createIncidentPipeline(opts) {
 
   async function handle(rec) {
     stamp(rec);
+    if (typeof rec.phase === 'string') pagePhase = rec.phase;
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
       appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
       return;
     }
     if (rec.type === 'profile') {
+      run?.addFrame(rec);
       writeFileSync(join(dir, 'profile.json'), JSON.stringify({ ...rec, regime, at: new Date().toISOString() }, null, 2));
       return;
     }
@@ -227,9 +283,19 @@ export function createIncidentPipeline(opts) {
       rec.topFrames = topFramesFromProfile(profile);
       rec.profileWindow = 'rolling-chunk';
       if (skippedSinceLast > 0) { rec.skippedSinceLast = skippedSinceLast; skippedSinceLast = 0; }
+      // Each frame's self time as a share of THIS frame (header: share). The
+      // chunk spans more than the frame, so a share is an upper bound on
+      // what that function could explain — which is the direction that
+      // matters for refusing to name it.
+      if (rec.frameMs > 0) for (const f of rec.topFrames) f.share = +(f.selfMs / rec.frameMs).toFixed(3);
+      const sampled = sampledBreakdown(profile);
+      if (sampled) rec.sampled = sampled;
       const guess = rec.classification?.[0]?.guess;
+      const lead = rec.topFrames[0];
+      const weak = guess !== 'shader-compile' && lead?.share !== undefined && lead.share < minShare;
+      if (weak) rec.unattributed = 'low-share';
       const top = guess === 'shader-compile' ? lastCreateStackHead
-        : rec.topFrames[0] ? `${rec.topFrames[0].fn}@${rec.topFrames[0].url}` : null;
+        : lead && !weak ? `${lead.fn}@${lead.url}` : null;
       let key = clusterKey(rec, top);
       // MERGE before minting (M-A1): if any existing cluster's identifying
       // frame appears anywhere in this hitch's top frames, this is the same
@@ -238,7 +304,7 @@ export function createIncidentPipeline(opts) {
       // freeze #1 named seededFreezeWork, freeze #2 arrived as its caller).
       // Inlining that erases the frame ENTIRELY still splits a cause in two;
       // stated in the spec as a standing limit, not papered over.
-      if (!clusters.has(key)) {
+      if (!clusters.has(key) && !weak) {
         const names = new Set((rec.topFrames ?? []).slice(0, 3).map((f) => `${f.fn}@${f.url}`));
         for (const existing of clusters.keys()) {
           const frame = existing.split('|')[1];

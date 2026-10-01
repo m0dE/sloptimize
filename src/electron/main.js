@@ -180,6 +180,8 @@ function createTracer(contentTracing, dir, log) {
  * @param {string} [opts.dir]
  * @param {boolean} [opts.trace]
  * @param {string} [opts.build]      the bundle's identity (e.g. app.getVersion()), stamped on every record
+ * @param {number} [opts.minShare]   the share of a frame a function needs to be named a hitch's cause (default 0.1)
+ * @param {boolean} [opts.slots]     false: no instance-slot watch, no __THREE_DEVTOOLS__ (default on)
  * @param {(...a:any[])=>void} [opts.log]
  */
 export async function attachInApp(opts = {}) {
@@ -194,7 +196,7 @@ export async function attachInApp(opts = {}) {
 
   const send = (method, params = {}) => dbg.sendCommand(method, params);
   const pipeline = createIncidentPipeline({
-    dir, log, send, regime, build: opts.build,
+    dir, log, send, regime, build: opts.build, attributeMinShare: opts.minShare,
     onNewCluster: tracer ? async (rec) => { const f = await tracer.cut(rec); if (f) rec.trace = f; } : undefined,
   });
 
@@ -212,7 +214,7 @@ export async function attachInApp(opts = {}) {
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Runtime.addBinding', { name: '__sloptimizeEmit' });
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript() });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: buildInjectScript({ slots: opts.slots }) });
   await pipeline.start();
   if (tracer) await tracer.start();
   // Injection applies to navigations: reload once so the page we attached

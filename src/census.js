@@ -6,6 +6,8 @@
 // runtime fact and are reported as `null` here — profile.json carries the
 // measured number (principle 4).
 
+import { changedSlots } from './instance-slots.js';
+
 const INSTANCING_MIN_COUNT = 20;      // N same-geometry+material meshes worth a hint
 const MATERIAL_DEDUP_MIN = 8;
 const OVERSIZED_TEXTURE_DIM = 4096;
@@ -32,10 +34,40 @@ function materialKey(m) {
   } catch { return m.uuid; }
 }
 
-function walkEntity(root) {
+// ── Instance slots drawn but not written ────────────────────────────────────
+// For an InstancedMesh every slot below .count draws, whether or not the game
+// wrote it this frame. A visibility cull that skipped writing off-screen
+// transforms while flush() still published count = high-water mark left ~95
+// ghost bodies standing at their last written positions: invisible to draw
+// counts, triangles, frame time and a code read, obvious on screen. The graphics
+// API cannot tell either — three.js uploads the whole attribute, stale slots
+// included. What can: the matrices themselves. Each census keeps a copy of
+// every InstancedMesh's drawn slots (a WeakMap, so a disposed mesh takes its
+// copy with it), and the next census counts the slots whose matrix CHANGED.
+// A mesh where some slots moved and others did not is either holding static
+// instances on purpose or drawing ghosts — the developer knows which; the
+// census only says the numbers. "Changed", not "written": a write of the same
+// matrix is invisible here, so a parked car reads as unchanged too. This is
+// the on-demand tier-1 view; a tier-0 attach watches continuously and sees
+// setMatrixAt writes as well (instance-slots.js).
+const lastSlots = new WeakMap();
+
+function slotChange(mesh, nowMs) {
+  const arr = mesh.instanceMatrix?.array;
+  const drawn = Math.max(0, Math.min(mesh.count ?? 0, arr ? Math.floor(arr.length / 16) : 0));
+  if (!arr || drawn === 0) return null;
+  const prev = lastSlots.get(mesh);
+  lastSlots.set(mesh, { copy: arr.slice(0, drawn * 16), at: nowMs });
+  if (!prev) return null;
+  const compared = Math.min(drawn, prev.copy.length / 16);
+  const changed = changedSlots(arr, prev.copy, compared).reduce((a, b) => a + b, 0);
+  return { drawn, compared, changed, sinceMs: nowMs - prev.at };
+}
+
+function walkEntity(root, nowMs = Date.now()) {
   const out = {
     meshes: 0, visibleMeshes: 0, instancedMeshes: 0, triangles: 0,
-    visibleTriangles: 0, castShadow: 0,
+    visibleTriangles: 0, castShadow: 0, slots: [],
     materials: new Map(), geometries: new Map(), pairs: new Map(),
     matParams: new Map(), textures: new Map(),
   };
@@ -62,6 +94,10 @@ function walkEntity(root) {
       out.triangles += tris;
       if (vis) out.visibleTriangles += tris;
       if (node.castShadow) out.castShadow++;
+      if (inst && vis) {
+        const sc = slotChange(node, nowMs);
+        if (sc) out.slots.push({ name: node.name || node.uuid, ...sc });
+      }
       const mats = Array.isArray(node.material) ? node.material : [node.material];
       for (const m of mats) {
         if (!m) continue;
@@ -104,6 +140,7 @@ function textureBytesEstimate(textures) {
  * @param {object} opts
  * @param {{id:string, root:object, persistent?:boolean}[]} opts.entities
  * @param {{geometries:number,textures:number}} [opts.previousTotals]
+ * @param {number} [opts.now]  ms; when this walk happened (instance-slot change is measured between walks)
  */
 export function buildCensus(opts) {
   const entities = [];
@@ -111,8 +148,9 @@ export function buildCensus(opts) {
   const totals = { calls: null, meshes: 0, triangles: 0, uniqueMaterials: 0, uniqueGeometries: 0, textureBytesEstimate: 0, geometries: 0, textures: 0 };
   const allMats = new Set(); const allGeos = new Set(); const allTex = new Set();
 
+  const nowMs = opts.now ?? Date.now();
   for (const ent of opts.entities ?? []) {
-    const w = walkEntity(ent.root);
+    const w = walkEntity(ent.root, nowMs);
     const sharedGroups = [...w.pairs.values()].filter((p) => p.count >= 2)
       .sort((a, b) => b.count - a.count).slice(0, 10);
     const row = {
@@ -130,6 +168,7 @@ export function buildCensus(opts) {
       visible: ent.root.visible !== false,
       persistent: ent.persistent ?? true,
     };
+    if (w.slots.length) row.instanceSlots = w.slots;
     entities.push(row);
     totals.meshes += w.meshes;
     totals.triangles += w.triangles;
@@ -162,6 +201,16 @@ export function buildCensus(opts) {
           detail: `${n} materials share identical parameters — one shared material batches them`,
         });
         break;
+      }
+    }
+    for (const sl of w.slots) {
+      // Moving (some slots changed) with slots that did not: the ghost shape.
+      // A mesh where nothing changed is a static mesh, and says nothing.
+      const still = sl.compared - sl.changed;
+      if (sl.changed > 0 && still > 0) {
+        hints.push({ kind: 'instanced-stale-slots', entity: ent.id,
+          detail: `${sl.name}: ${sl.drawn} slots drawn, ${sl.changed} of ${sl.compared} changed over the last ${(sl.sinceMs / 1000).toFixed(1)}s — ${still} unchanged: static instances, or ghosts (slots inside .count the code stopped writing)`,
+          estimate: { drawn: sl.drawn, changed: sl.changed, unchanged: still } });
       }
     }
     for (const t of w.textures.values()) {
