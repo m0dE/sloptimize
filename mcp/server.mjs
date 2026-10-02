@@ -37,8 +37,9 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { title: { type: 'string' }, issue: { type: 'string' }, solution: { type: 'string' }, commit: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } }, footprints: { type: 'array', items: { type: 'string' }, description: 'footprint ids this fix addresses' },
       before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
-  { name: 'compare_runs', description: 'A vs B (each a build, a session id, or <ISO>..<ISO>): every metric — frame median/p95/body, draw calls, hitches/h, each host loop section, each hot function\'s share — read per RUN and judged against its OWN run-to-run noise floor (significant / within noise / unproven at n=1), plus a warning when the slowdown is uniform with unchanged composition (the machine changed, not the code). Run each side at least twice.',
-    inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' }, phase: { type: 'string', description: 'comma list of page phases' } }, required: ['a', 'b'] } },
+  { name: 'compare_runs', description: 'A vs B (each a build, a session id, or <ISO>..<ISO>): every metric — frame median/p95/body, draw calls, hitches/h, each host loop section, each hot function\'s share — read per RUN and judged against its OWN run-to-run noise floor (significant / within noise / unproven at n=1), plus a warning when the slowdown is uniform with unchanged composition (the machine changed, not the code). Run each side at least twice. Sides measured under different conditions (display refresh, instrument, GPU, run mode, drawing size, phase mix…) are REFUSED: `refused: true` with `conditions.mismatches` naming what differs — re-measure rather than pass allowMismatch, unless the difference is the question.',
+    inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' }, phase: { type: 'string', description: 'comma list of page phases' },
+      allowMismatch: { type: 'boolean', description: 'read the deltas even when the conditions differ (they then include the difference)' } }, required: ['a', 'b'] } },
   { name: 'check_touched', description: 'Did the measured run EXECUTE the change under test? For each changed file (default: git diff of the working tree, else the last commit), whether any profiler sample of the attach run landed in it. Call before trusting any before/after: a clean A/B on a benchmark that never ran the new code path proves nothing. Bundled builds need `maps` to credit samples to sources.',
     inputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string', description: 'git rev to diff against' },
       build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
@@ -70,12 +71,22 @@ async function callTool(name, args = {}) {
     const budgets = readJson('budgets.json');
     if (!profile) return { error: 'no measurement to check' };
     if (!budgets) return { warning: 'no budgets declared (.sloptimize/budgets.json)', breached: [] };
+    // What the measurement was taken under; budgets.json's `perf.conditions`
+    // (what the numbers were set for) refuses a mismatch, as `check` does.
+    const C = await import('../src/conditions.js');
+    const { readRuns } = await import('../src/runs.js');
+    const conditions = C.runConditions([profile, ...readJsonl('perf.jsonl', Infinity).filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
+      profile.session ? readRuns(DIR()).find((r) => r.session === profile.session) : null);
+    const want = budgets['perf.conditions'];
+    const expect = want && typeof want === 'object' ? C.expectConditions(conditions, want) : null;
+    if (expect && !expect.comparable) return { refused: true, conditions, expected: want, mismatches: expect.mismatches };
+    delete budgets['perf.conditions'];
     const countersOnly = profile.regime !== 'hardware';
     const read = { 'perf.budget.draw_calls': profile.render?.calls, 'perf.budget.triangles': profile.render?.triangles,
       'perf.budget.frame_ms_p95': countersOnly ? undefined : profile.frame?.p95Ms, 'perf.budget.programs': profile.memory?.programs };
     const results = Object.entries(budgets).map(([k, b]) => ({ budget: k, value: read[k] ?? null, limit: b,
       verdict: read[k] === undefined ? 'unmeasured' : read[k] > b ? `over by ${(read[k] / b).toFixed(1)}x` : 'inside' }));
-    return { regime: profile.regime, results, breached: results.filter((r) => String(r.verdict).startsWith('over')).length };
+    return { regime: profile.regime, conditions, ...(expect?.unverified.length ? { unverified: expect.unverified } : {}), results, breached: results.filter((r) => String(r.verdict).startsWith('over')).length };
   }
   if (name === 'get_history') {
     const { buildHistory } = await import('../src/history.js');
@@ -115,10 +126,12 @@ async function callTool(name, args = {}) {
       if (args.maps?.length) argv.push('--map', args.maps.join(','));
     }
     if (args.phase) argv.push('--phase', args.phase);
+    if (name === 'compare_runs' && args.allowMismatch === true) argv.push('--allow-mismatch');
     try {
       return JSON.parse(execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'sloptimize.mjs'), ...argv, '--json', '--dir', DIR()], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     } catch (e) {
-      // touched exits 1 WITH its answer when a file got no samples.
+      // touched exits 1 WITH its answer when a file got no samples; compare
+      // exits 3 with its refusal.
       try { return JSON.parse(e.stdout); } catch { return { error: (e.stderr || e.stdout || e.message).toString().trim() }; }
     }
   }

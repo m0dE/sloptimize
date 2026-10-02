@@ -346,6 +346,26 @@ reading it: open the profiler for two seconds every ten, read it, close it
 by section without a keyboard, and `sloptimize fix` says which sections and
 counters a build moved — the before/after that used to need a paste.
 
+### …and says what it was measured under
+
+`compare` and `check` refuse to set two runs side by side when their
+conditions differ (SPEC §3.8) — and an in-app run that records none can
+only be checked on what its lines imply (instrument, regime, phases). Post
+one `conditions` line per session, and again if it changes:
+
+```js
+import { createRefreshTracker, browserDevice } from 'sloptimize';
+const refresh = createRefreshTracker();
+// every ~120 frames, with the frame ring's last intervals (rAF-to-rAF ms):
+if (refresh.observe(lastIntervals)) post('records', [{
+  type: 'conditions', at: new Date().toISOString(), session, build,
+  conditions: { v: 1, instrument: 'in-app', mode: 'timing', regime,
+    display: refresh.state(), gpu: rendererString, device: browserDevice() },
+}]);
+```
+
+Do not stamp it with a phase: a `--phase` read must not drop it.
+
 ### …and lets that profile decide the verdict
 
 Sections are a site; they do not change the guess. When the host has

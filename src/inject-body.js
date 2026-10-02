@@ -14,7 +14,7 @@
 // process registered. One JSON record per call; the node side owns files,
 // clustering, and the profiler.
 
-/* global classifyHitch, createSlotWatch, __sloptimizeEmit, __sloptimizeOpts */
+/* global classifyHitch, createSlotWatch, createRefreshTracker, browserDevice, __sloptimizeEmit, __sloptimizeOpts */
 
 const RING = 600;
 // The absolute floor for detection: a frame is a hitch above 2× the rolling
@@ -33,6 +33,12 @@ const frameMsRing = new Float64Array(RING);
 let head = 0, count = 0, frameNo = 0;
 let lastRaf = -1;
 let medianCache = 16.7, medianStale = 0;
+
+// The page's half of the run's conditions (conditions.js): the display's
+// refresh rate read off this ring (cadence.js), the device, and the GPU the
+// game's own context runs on. Emitted when any of them changes — rarely.
+const refresh = createRefreshTracker();
+let glSeen = null, adapterSeen = null, gpuName, conditionsSent = '';
 
 // Per-frame graphics-API counters, reset at each rAF boundary.
 const gpu = { draws: 0, triangles: 0, creates: 0, uploadKB: 0 };
@@ -90,6 +96,14 @@ try {
         }
       };
     }
+  }
+  if (typeof GPU !== 'undefined' && typeof GPU.prototype.requestAdapter === 'function') {
+    const ra = GPU.prototype.requestAdapter;
+    GPU.prototype.requestAdapter = function (...a) {
+      const r = ra.apply(this, a);
+      try { r.then((ad) => { if (ad && !adapterSeen) adapterSeen = ad; }, () => {}); } catch { /* not a promise */ }
+      return r;
+    };
   }
   if (typeof GPUQueue !== 'undefined') {
     const wb = GPUQueue.prototype.writeBuffer;
@@ -152,6 +166,7 @@ try {
     if (typeof link === 'function' && !link.__sloptimize) {
       p.linkProgram = function (...a) {
         gpu.creates++; sessionCreates++;
+        if (!glSeen) glSeen = this;
         const t0 = performance.now();
         try { return link.apply(this, a); }
         finally {
@@ -236,6 +251,50 @@ function pagePhase() {
   return typeof p === 'string' && p ? p.replace(/[|,=\s]+/g, '_').slice(0, 40) : undefined;
 }
 
+/** The renderer the game's own context reports, once it has one. Read off
+ *  the game's context, never a probe context of ours. */
+function readGpuName() {
+  try {
+    if (glSeen) {
+      const ext = glSeen.getExtension('WEBGL_debug_renderer_info');
+      const r = ext ? glSeen.getParameter(ext.UNMASKED_RENDERER_WEBGL) : glSeen.getParameter(glSeen.RENDERER);
+      if (typeof r === 'string' && r) return r.slice(0, 160);
+    }
+    const info = adapterSeen && adapterSeen.info;
+    if (info) {
+      const s = [info.vendor, info.architecture, info.device, info.description].filter((x) => typeof x === 'string' && x).join(' ');
+      if (s) return `WebGPU ${s}`.slice(0, 160);
+    }
+  } catch { /* a context lost or a browser that refuses */ }
+  return undefined;
+}
+
+/** The last `n` intervals of the ring, oldest first. */
+function lastIntervals(n) {
+  const k = Math.min(n, count), out = new Array(k);
+  for (let i = 0; i < k; i++) out[i] = frameMsRing[(head - k + i + RING) % RING];
+  return out;
+}
+
+/** Observe one window; emit `conditions` if the page's half changed. */
+function updateConditions() {
+  refresh.observe(lastIntervals(PROFILE_EVERY));
+  if (gpuName === undefined) gpuName = readGpuName();
+  const display = refresh.state();
+  const rec = { type: 'conditions', at: new Date().toISOString(), tier: 0 };
+  if (display) rec.display = display;
+  if (gpuName) rec.gpu = gpuName;
+  if (!rec.display && !rec.gpu) return;
+  // The device is read every window (a few property reads) so a resized
+  // window or a moved-to-another-screen dpr lands in the run's block.
+  try { rec.device = browserDevice(globalThis); } catch { /* no navigator */ }
+  const d = rec.device ?? {};
+  const sig = JSON.stringify([rec.display?.refreshHz, rec.display?.cadence, rec.display?.confirmed, rec.gpu, d.vw, d.vh, d.dpr]);
+  if (sig === conditionsSent) return;
+  conditionsSent = sig;
+  emit(rec);
+}
+
 /** The p-th percentile of the frame ring (rare: once per profile/beat). */
 function ringPct(p) {
   if (count === 0) return undefined;
@@ -297,6 +356,7 @@ function tick(ts) {
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0;
+    updateConditions();
   }
   if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
     let rows = [];

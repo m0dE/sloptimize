@@ -19,12 +19,21 @@ const SRC = dirname(fileURLToPath(import.meta.url));
 export function buildInjectScript(opts = {}) {
   const classify = readFileSync(join(SRC, 'classify.js'), 'utf8').replace(/^export /gm, '');
   const slots = readFileSync(join(SRC, 'instance-slots.js'), 'utf8').replace(/^export /gm, '');
+  const cadence = readFileSync(join(SRC, 'cadence.js'), 'utf8').replace(/^export /gm, '');
+  const device = readFileSync(join(SRC, 'device.js'), 'utf8').replace(/^export /gm, '');
   const body = readFileSync(join(SRC, 'inject-body.js'), 'utf8');
   const page = { minHitchMs: Number(opts.minHitchMs) > 0 ? Number(opts.minHitchMs) : undefined, slots: opts.slots === false ? false : undefined };
-  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${slots}\n${body}\n})();`;
+  return `(() => {\nconst __sloptimizeOpts = ${JSON.stringify(page)};\n${classify}\n${slots}\n${cadence}\n${device}\n${body}\n})();`;
 }
 
 export { clusterKey, topFramesFromProfile } from './incident-pipeline.mjs';
+
+/** The recorder settings a run's conditions carry (conditions.js): the
+ *  hitch floor decides which frames count, the slot watch costs a little. */
+export function pageKnobs({ headless, minHitchMs, slots, host, browser } = {}) {
+  return { ...(host ? { host } : {}), ...(typeof headless === 'boolean' ? { headless } : {}), ...(typeof browser === 'string' && browser ? { browser } : {}),
+    recorder: { minHitchMs: Math.max(25, Number(minHitchMs) > 0 ? Number(minHitchMs) : 0), slots: slots !== false } };
+}
 
 /** A port with nothing on it is its own failure, said as one: back-to-back
  *  Electron runs collide on a fixed debugging port, and Chromium that could
@@ -98,6 +107,10 @@ export async function attach(opts = {}) {
   }
 
   const wsUrl = opts.wsUrl ?? await waitForTarget(port, opts.waitMs ?? (child ? 15_000 : 0));
+  // The browser's version, for the run's conditions — over HTTP, off the
+  // CDP sequence; an explicit wsUrl has no endpoint to ask.
+  let browser;
+  if (!opts.wsUrl) { try { browser = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json())?.Browser; } catch { /* unknown */ } }
   const ws = new WS(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
@@ -121,7 +134,8 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare });
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare,
+    conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser }) });
   const onRecord = pipeline.onRecord;
 
   ws.onmessage = (ev) => {

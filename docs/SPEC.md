@@ -441,6 +441,68 @@ ingests many clients' records dedupes on `footprint.id` from day one; the
 fold is the same code. The service is specified in the sloptimize-cloud repo
 (`docs/superpowers/specs/2026-09-02-sloptimize-cloud-design.md`).
 
+### 3.8 Run conditions — what a run was measured under, and the refusal
+
+Every false performance conclusion this tool has been party to was a
+comparability failure: an in-app frame body (26.37 ms) set beside an
+attached run's rAF interval (34.7 ms) read as "+27% attach overhead" — it
+was the second vsync on a 60 Hz display; a dev build sharing the GPU read as
+a +46% regression. So a run carries a **conditions block**, and every verb
+that sets two measurements side by side diffs the blocks first
+(`src/conditions.js`, one table for all of them).
+
+```json
+{ "type": "conditions", "at": "…", "session": "vmH2bFxdZhz8", "tier": 0,
+  "conditions": {
+    "v": 1, "instrument": "attach", "mode": "timing", "regime": "hardware",
+    "sampler": { "intervalUs": 10000 }, "headless": false,
+    "recorder": { "minHitchMs": 25, "slots": true }, "browser": "Chrome/131.0.6778.86",
+    "display": { "refreshHz": 60, "periodMs": 16.667, "from": "raf-cadence", "confirmed": true },
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 …)",
+    "device": { "platform": "Windows", "cores": 16, "vw": 1600, "vh": 900, "dpr": 1, "…": "…" } } }
+```
+
+Attach writes the block into `runs/<session>.json` from the start, and a
+`conditions` ledger line when the page reports its half and on every change
+after (never phase-stamped: a `--phase` read must not drop it). The page's
+half: the **display refresh rate**, read off rAF intervals — timestamps are
+vsync-aligned, so the lowest common rate that explains ≥90% of a 120-frame
+window is the display's (`src/cadence.js`); a rate stands once two windows
+agree, and only rises on evidence (a steady 33.3 ms game reads 30 Hz until
+one frame lands on the single period). A variable-refresh display has no
+fixed period and says `refreshHz: null, cadence: "variable"`. The **GPU** is
+the renderer string of the game's own context (never a probe context), and
+it settles an `unknown` regime: a software rasterizer's name is `software`,
+anything else `hardware`. The **device** is `browserDevice()`, re-read each
+window so a resized window lands in the block (the block holds the last
+state; a mid-run resize is not itemised).
+
+A tier-1 host may write the same line itself; `refreshFromIntervals` and
+`createRefreshTracker` are exported for its frame ring. A run with no line
+still has what its records imply: `instrument` from its tier, `regime` from
+its profile lines, `phases` from what its records carry.
+
+**Material** — the comparison is refused: instrument (attach vs in-app),
+run mode (`timing` vs `coverage`), regime, display refresh, GPU (driver
+build numbers ignored), platform, CPU cores, drawing size (device pixels,
+beyond ±10%), headless, sampler interval, drive script, and the phase mix
+(skipped when `--phase` scoped both sides alike). **Minor** — said, not
+refused: browser version, hitch floor, instance-slot watch. A material
+field one side never recorded is **unverified**: listed, not refused —
+every ledger written before the block existed would otherwise be orphaned. A side whose
+own runs disagree is refused as mixed.
+
+`compare` exits **3** on a refusal (SPEC §6.3 gave 3 to "incomparable") and
+names each difference with why it matters; `--allow-mismatch` reads the
+deltas anyway under a banner. `check` refuses with 3 when `budgets.json`
+declares what its numbers were set for and the measurement differs:
+`"perf.conditions": { "refreshHz": 60, "regime": "hardware", "pixels":
+"1600x900" }` (keys are the table's: `instrument mode regime refreshHz gpu
+platform cores pixels headless samplerUs drive phases`). `report` prints
+the session's conditions, and when the median interval spans more than one
+period, the vsync note: which steps the interval is made of, and that an
+in-app frame timer measures the work, not the interval.
+
 ---
 
 ### 3.9 Asking the tab — the agent's channel to a running game
@@ -754,8 +816,9 @@ sloptimize check                # reads profile.json (or runs a bench with --ben
   exit 1
 ```
 
-Exit `0` when all budgets pass, `1` on any breach, `4` when no measurement
-exists to check against (never a silent pass). `--counters-only` restricts to
+Exit `0` when all budgets pass, `1` on any breach, `3` when budgets.json's
+`perf.conditions` do not match what the measurement was taken under (§3.8),
+`4` when no measurement exists to check against (never a silent pass). `--counters-only` restricts to
 the exact grade for CI on GPU-less machines. In a project with no
 `perf.budget.*` tunables, `check` reports "no budgets declared" and exits 0
 with a warning — budgets are opt-in, but their absence is said out loud.

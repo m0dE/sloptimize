@@ -6,6 +6,7 @@ export { createMotionMonitor } from './motion.js';
 export { createErrorMonitor } from './errors.js';
 export { createCloudSink, UNCAPPED_TYPES, PROFILE_EVERY_MS } from './cloud-sink.js';
 export { browserDevice } from './device.js';
+export { refreshFromIntervals, createRefreshTracker } from './cadence.js';
 export { createExitTrail, classifyExit, EXIT_VERDICTS } from './exit-trail.js';
 export { footprintOf, footprintKey, describeFootprint, canonicalContext, contextOfKey, FOOTPRINT_VERSION } from './footprint.js';
 export { buildHistory, summarizeWindow, buildFix, latestBuilds, buildIssues, agoText, diffProfiles } from './history.js';

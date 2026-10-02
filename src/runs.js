@@ -44,6 +44,7 @@ function emptyBucket() {
 export function createRunFold(meta) {
   const phases = new Map();
   let fromMs = Infinity, toMs = -Infinity;
+  let conditions = null;
   const bucket = (phase) => {
     const k = typeof phase === 'string' && phase ? phase : '?';
     return phases.get(k) ?? phases.set(k, emptyBucket()).get(k);
@@ -115,6 +116,12 @@ export function createRunFold(meta) {
     if (meta.build) out.build = meta.build;
     if (meta.intervalUs) out.intervalUs = meta.intervalUs;
     if (Number.isFinite(fromMs)) { out.from = new Date(fromMs).toISOString(); out.to = new Date(toMs).toISOString(); }
+    // What the run was measured under (conditions.js); `phases` is what it
+    // actually carried, read off the buckets at write time.
+    if (conditions) {
+      const ph = [...phases.keys()].filter((k) => k !== '?').sort();
+      out.conditions = { ...conditions, ...(ph.length ? { phases: ph } : {}) };
+    }
     out.phases = {};
     for (const [k, b] of phases) {
       const p = { samples: b.samples, idle: b.idle, program: b.program, gc: b.gc };
@@ -131,7 +138,10 @@ export function createRunFold(meta) {
     return out;
   }
 
-  return { addProfile, addFrame, toJSON, get empty() { return phases.size === 0; } };
+  /** The run's conditions block (conditions.js), replaced whole. */
+  function setConditions(c) { conditions = c && typeof c === 'object' ? { ...c } : null; }
+
+  return { addProfile, addFrame, setConditions, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */

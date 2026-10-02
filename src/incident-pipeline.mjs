@@ -110,6 +110,8 @@ export const ATTRIBUTE_COOLDOWN_MS = 1000;
 export const ATTRIBUTE_MIN_SHARE = 0.1;
 export const PROFILE_WINDOW_MS = 10_000;
 const RUN_WRITE_MS = 5000;
+/** Renderer strings of software rasterizers (SPEC §6.4's regime rule). */
+export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render/i;
 
 /**
  * @param {object} opts
@@ -128,6 +130,10 @@ const RUN_WRITE_MS = 5000;
  * @param {number} [opts.attributeMinShare]   default 0.1 — the top frame's self time / frameMs
  * @param {number} [opts.windowMs]            default 10 000; 0 disables the roll
  * @param {boolean} [opts.runs]               default true: fold every chunk into runs/<session>.json (runs.js)
+ * @param {object} [opts.conditions]          what the caller knows the run is measured under (conditions.js):
+ *   `headless`, `browser`, `recorder: {minHitchMs, slots}`, `host` — merged over instrument/mode/regime/sampler.
+ *   The block rides the run file from the start; the ledger gets a `conditions` line when the page
+ *   reports its half (display, device, GPU) and on every change after.
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -135,7 +141,7 @@ export function createIncidentPipeline(opts) {
   const dir = opts.dir ?? '.sloptimize';
   const log = opts.log ?? ((...a) => console.log('[attach]', ...a));
   const send = opts.send;
-  const regime = opts.regime ?? 'unknown';
+  let regime = opts.regime ?? 'unknown';
   // Every line this run writes says which run and which build it was: the
   // page cannot know either, and `history` needs both to hold several runs
   // of one build apart (a hitch count from one run is one noisy sample).
@@ -160,6 +166,18 @@ export function createIncidentPipeline(opts) {
   // dropped, credited to the phase the page was last heard in. Written at
   // most every RUN_WRITE_MS and always on stop — a crash loses seconds.
   const run = opts.runs === false ? null : createRunFold({ session, build, intervalUs: samplingIntervalUs });
+  // What this run is measured UNDER (conditions.js): the instrument and its
+  // settings from here, the display/device/GPU from the page's `conditions`
+  // records. Kept in the run file and written to the ledger on every change,
+  // so compare and check can refuse two runs that do not compare.
+  const conditions = { v: 1, instrument: 'attach', mode: 'timing', sampler: { intervalUs: samplingIntervalUs }, ...(opts.conditions ?? {}) };
+  if (regime !== 'unknown') conditions.regime = regime;
+  run?.setConditions(conditions);
+  function writeConditions() {
+    run?.setConditions(conditions);
+    const rec = { type: 'conditions', at: new Date(now()).toISOString(), tier: 0, conditions };
+    appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp(rec)) + '\n');
+  }
   const runPath = join(dir, 'runs', `${session.replace(/[^\w.-]/g, '_')}.json`);
   let pagePhase, runWrittenAt = -Infinity;
   function foldChunk(profile) {
@@ -246,6 +264,19 @@ export function createIncidentPipeline(opts) {
 
   async function handle(rec) {
     stamp(rec);
+    if (rec.type === 'conditions') {
+      // The page's half — display cadence, device, GPU — merged into the
+      // run's block and written whole. Not phase-stamped: a run's conditions
+      // are the run's, and a --phase filter must not drop them.
+      for (const k of ['display', 'device', 'gpu']) if (rec[k] !== undefined) conditions[k] = rec[k];
+      if (regime === 'unknown' && typeof rec.gpu === 'string' && rec.gpu) {
+        regime = SOFTWARE_GPU.test(rec.gpu) ? 'software' : 'hardware';
+        conditions.regime = regime;
+      }
+      writeConditions();
+      writeRun(true);
+      return;
+    }
     if (typeof rec.phase === 'string') pagePhase = rec.phase;
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
@@ -331,5 +362,5 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }
 
-  return { onRecord, clusters, start, stop, regime, session, build };
+  return { onRecord, clusters, start, stop, get regime() { return regime; }, conditions, session, build };
 }

@@ -126,8 +126,9 @@ Tier-0 timings are **rAF intervals with the recorder attached**: vsync-quantized
 (a 26 ms frame body presents every 33.3 ms on a 60 Hz display) and paying for
 the recorder and the sampler. Compare them with other attached runs only —
 never with the app's own frame timer or with an unattached run. `report`
-says so under every tier-0 profile, and `compare` warns when its two sides
-were measured by different tiers. Draws are counted at the
+says so under every tier-0 profile, with the display's refresh rate (read
+off the rAF cadence) and which vsync steps the median is made of; `compare`
+refuses two sides measured by different tiers. Draws are counted at the
 WebGL/WebGPU API the way `renderer.info` counts them — instanced and
 multi-draw calls included — as a mean over the sample window.
 
@@ -169,6 +170,15 @@ on a side is `unproven`. A frame delta can be noise while one section's
 it. When the frame moved ≥10% but the composition (section or function
 shares) did not, and the draw calls are equal, `compare` flags it as the
 machine, not the code.
+
+Before any of that, `compare` checks that the two sides were measured under
+the same **conditions** — every run records its display refresh rate, GPU,
+drawing size, instrument (attached or in-app), run mode, sampler interval
+and phase mix (SPEC §3.8). Two sides that differ on any of them are
+refused, exit 3, with the difference named — a 60 Hz run against a 144 Hz
+run is a delta of displays, not of code. `--allow-mismatch` reads them
+anyway under a banner, for when the difference is the question. A run
+recorded before conditions existed is listed as unverified, not refused.
 
 Attach also sees a three.js page's scenes, through three's own devtools
 hook (`__THREE_DEVTOOLS__`: every `Scene` three constructs announces itself
@@ -409,7 +419,15 @@ never goes in a client bundle.
 ```
 
 ```bash
-npx sloptimize check              # exit 0 inside · 1 breached · 4 unmeasured
+npx sloptimize check              # exit 0 inside · 1 breached · 3 other conditions · 4 unmeasured
+```
+
+A budget met at 144 Hz says nothing about 60 Hz. Say what the numbers were
+set for, and `check` refuses (exit 3) a measurement taken under anything
+else:
+
+```json
+{ "perf.budget.frame_ms_p95": 16.7, "perf.conditions": { "refreshHz": 60, "regime": "hardware" } }
 ```
 
 That exit code is what lets an agent self-iterate in a loop that terminates.
@@ -423,7 +441,8 @@ sloptimize census        per-entity costs + closed-vocabulary hints
 sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
 sloptimize compare A B   A/B by run: each metric vs its own noise floor
-                         (significant / within noise / unproven), host-load flag
+                         (significant / within noise / unproven), host-load flag;
+                         refused (exit 3) across conditions — --allow-mismatch
 sloptimize touched       did the run execute the changed files? (exit 1 if not)
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows

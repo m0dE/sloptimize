@@ -15,7 +15,7 @@
 // in, so this file runs (and is tested) on bare Node with fakes.
 import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildInjectScript } from '../attach.mjs';
+import { buildInjectScript, pageKnobs } from '../attach.mjs';
 import { createIncidentPipeline } from '../incident-pipeline.mjs';
 
 const LEDGER_TAIL_BYTES = 2 * 1024 * 1024;
@@ -197,6 +197,8 @@ export async function attachInApp(opts = {}) {
   const send = (method, params = {}) => dbg.sendCommand(method, params);
   const pipeline = createIncidentPipeline({
     dir, log, send, regime, build: opts.build, attributeMinShare: opts.minShare,
+    conditions: pageKnobs({ headless: false, slots: opts.slots, host: 'electron',
+      browser: process.versions?.chrome ? `Chrome/${process.versions.chrome}${process.versions.electron ? ` Electron/${process.versions.electron}` : ''}` : undefined }),
     onNewCluster: tracer ? async (rec) => { const f = await tracer.cut(rec); if (f) rec.trace = f; } : undefined,
   });
 
