@@ -3,7 +3,8 @@
 Agreed 2026-10-02 with dmitriy (ticket 1cfda321), from friction hit on a
 city-builder's perf work. Every item is a game-agnostic primitive the game
 feeds with its own names — phases, counters, clock, drive script. Order is
-build order. Item 0 shipped with this document.
+build order. All eight shipped on branch ticket-1cfda321 (PR #9), one
+commit each; the SPEC sections named below are the reference.
 
 ## 0. Run provenance + refusal across conditions — SHIPPED (SPEC §3.8)
 
@@ -18,7 +19,7 @@ vsync note. Unrecorded = unverified, never refused.
 Later items extend the one field table in `src/conditions.js`: the drive
 script's hash (6), the counter denominator (2), coverage mode (3).
 
-## 1. The gate — per-phase budgets, regression exit code, refusal on too few runs
+## 1. The gate — per-phase budgets, regression exit code, refusal on too few runs — SHIPPED (SPEC §7.1)
 
 - `check --session|--build <id>` judges a whole RUN per phase, not the
   2-second `profile.json` snapshot.
@@ -40,7 +41,7 @@ script's hash (6), the counter denominator (2), coverage mode (3).
 - **`attach --runs N` ships here** (pulled forward from 6): the gate needs
   repetitions from one command.
 
-## 2. Game counters, with a GAME-SUPPLIED denominator
+## 2. Game counters, with a GAME-SUPPLIED denominator — SHIPPED (SPEC §3.11)
 
 - `window.__sloptimizeCount(name, n)` (tier 0) and tier 1's `counts`.
 - **Rates against the game's clock when it supplies one**:
@@ -55,7 +56,7 @@ script's hash (6), the counter denominator (2), coverage mode (3).
 - `report` shows rates; `compare` judges them with the existing noise
   floor; budgets can be directional (`perf.rate.<name>: { min | max }`).
 
-## 3. Coverage — function-level, as its own run mode
+## 3. Coverage — function-level, as its own run mode — SHIPPED (SPEC §3.12)
 
 - **Function-level, not module-level.** The miss it exists for:
   `TrafficLight.js` loaded, its manager was constructed and ticked over an
@@ -73,7 +74,7 @@ script's hash (6), the counter denominator (2), coverage mode (3).
   reported from a timing run as if complete. Best-effort coverage is NOT a
   substitute: it can report a called function as uncalled.
 
-## 4. Fixed-interval detection on recurring footprints
+## 4. Fixed-interval detection on recurring footprints — SHIPPED (SPEC §3.7)
 
 - `issues` / `history`: "recurs every 15.0 s ± 0.2 (6 occurrences)" from
   the occurrence timestamps the ledger already holds. ≥4 occurrences; skip
@@ -81,13 +82,13 @@ script's hash (6), the counter denominator (2), coverage mode (3).
 - Target: autosave, GC bursts, streaming ticks, sync, analytics flushes. A
   fixed interval says timer, not user action.
 
-## 6. `attach --drive <script>`
+## 6. `attach --drive <script>` — SHIPPED (SPEC §3.13)
 
 - A game-supplied script on the recording's timeline (`at(s, fn)`,
   `phase(name)`); the game exposes its own camera/input API.
 - The script's hash joins conditions; two scripts never compare.
 
-## 7. GPU-bound verdict
+## 7. GPU-bound verdict — MERGED (SPEC §3.3)
 
 - Rebase and merge `gpu-bound-verdict` (game's own GPU time per frame).
 - Host contention is a different question: `compare` detects it across two
@@ -96,7 +97,7 @@ script's hash (6), the counter denominator (2), coverage mode (3).
   scope separately; `report` must not promise a warning it can only
   sometimes produce.
 
-## 5. Memory trend for long sessions
+## 5. Memory trend for long sessions — SHIPPED (SPEC §3.14)
 
 - **GPU resource counts first**: `renderer.info.memory` geometries /
   textures / programs on the heartbeat — a dispose missed on a rebuild grows
@@ -106,7 +107,11 @@ script's hash (6), the counter denominator (2), coverage mode (3).
   connection attach already holds (the page cannot force GC without
   `--expose-gc`); `performance.memory` is coarse without
   `--enable-precise-memory-info`, so the trend says which source it used.
-- `ask heap` for a snapshot on demand, when the trend warrants it.
+- Shipped as `attach --heap-snapshots` (start ~30 s in, end at stop) rather
+  than `ask heap`: `ask` is the tier-1 channel, and a snapshot needs the CDP
+  connection only attach holds.
+- Not shipped: within-one-run host-contention detection (item 7's second
+  half) — scoped out, as agreed; `report` promises nothing it cannot produce.
 
 ## Theirs, not ours
 
