@@ -7,7 +7,7 @@
 // the .sloptimize/ files. attach.mjs drives it over a raw WebSocket;
 // sloptimize/electron drives it over webContents.debugger. Same records,
 // same files, same cluster identity either way.
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold } from './runs.js';
@@ -137,6 +137,10 @@ export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render
  * @param {boolean} [opts.coverage]          a COVERAGE run (SPEC §3.12): V8 precise coverage, function
  *   granularity with call counts, instead of the sampler; written to coverage/<session>.json at stop.
  *   The run's mode is `coverage` and no verb reads its timings.
+ * @param {{gc?:boolean, snapshots?:boolean}} [opts.heap]  long-session memory (SPEC §3.14). Every
+ *   heartbeat carries the JS heap (Runtime.getHeapUsage, cheap); `gc` forces a collection first so the
+ *   reading is the post-GC floor, `snapshots` writes heap/<session>-start|end.heapsnapshot. Both pause
+ *   the page, so both are conditions of the run.
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -176,6 +180,8 @@ export function createIncidentPipeline(opts) {
   const coverage = opts.coverage === true;
   const conditions = { v: 1, instrument: 'attach', mode: coverage ? 'coverage' : 'timing', ...(coverage ? {} : { sampler: { intervalUs: samplingIntervalUs } }), ...(opts.conditions ?? {}) };
   if (regime !== 'unknown') conditions.regime = regime;
+  const heapOpts = opts.heap ?? {};
+  if (heapOpts.gc || heapOpts.snapshots) conditions.soak = { ...(heapOpts.gc ? { forcedGc: true } : {}), ...(heapOpts.snapshots ? { heapSnapshots: true } : {}) };
   run?.setConditions(conditions);
   function writeConditions() {
     run?.setConditions(conditions);
@@ -223,6 +229,11 @@ export function createIncidentPipeline(opts) {
   const scriptCtx = new Map();   // scriptId → executionContextId
   let mainFrame = null, docCtx = null;
   function onEvent(method, params) {
+    if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
+      appendFileSync(snapshot.path, params.chunk);
+      snapshot.bytes += params.chunk.length;
+      return;
+    }
     if (!coverage || !params) return;
     if (method === 'Runtime.executionContextCreated') {
       const c = params.context;
@@ -272,7 +283,42 @@ export function createIncidentPipeline(opts) {
     try { await send('Profiler.stopPreciseCoverage'); } catch { /* target gone */ }
   }
 
+  // ── Memory (SPEC §3.14) ──────────────────────────────────────────────────
+  /** The page's JS heap onto a heartbeat: post-GC when the run forces one. */
+  async function readHeap(rec) {
+    try {
+      if (heapOpts.gc) await send('HeapProfiler.collectGarbage');
+      const u = await send('Runtime.getHeapUsage');
+      if (typeof u?.usedSize === 'number') {
+        rec.heap = { usedMB: +(u.usedSize / 1048576).toFixed(2), ...(typeof u.totalSize === 'number' ? { totalMB: +(u.totalSize / 1048576).toFixed(2) } : {}),
+          source: heapOpts.gc ? 'post-gc' : 'live' };
+      }
+    } catch { /* the target cannot say */ }
+  }
+  // A snapshot streams in chunks as events; one at a time.
+  let snapshot = null;   // { path, bytes }
+  async function takeSnapshot(label) {
+    if (!heapOpts.snapshots || snapshot) return;
+    const path = join(dir, 'heap', `${session.replace(/[^\w.-]/g, '_')}-${label}.heapsnapshot`);
+    try {
+      mkdirSync(join(dir, 'heap'), { recursive: true });
+      writeFileSync(path, '');
+      snapshot = { path, bytes: 0 };
+      await send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
+      log(`heap snapshot (${label}): ${(statSync(path).size / 1048576).toFixed(1)} MB → ${path}`);
+      appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp({ type: 'heap-snapshot', at: new Date(now()).toISOString(), label, file: path })) + '\n');
+    } catch (e) { log(`heap snapshot (${label}) not taken: ${e?.message ?? e}`); }
+    finally { snapshot = null; }
+  }
+  let snapTimer = null;
+
   async function start() {
+    if (heapOpts.snapshots) {
+      try { await send('HeapProfiler.enable'); } catch { /* none */ }
+      // The start snapshot once the reloaded page has settled; the end one at stop.
+      snapTimer = setT(() => { snapTimer = null; chain = chain.then(() => takeSnapshot('start')).catch(() => {}); }, opts.snapshotAfterMs ?? 30_000);
+      snapTimer?.unref?.();
+    }
     if (coverage) { await startCoverage(); return; }
     await send('Profiler.enable');
     await send('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
@@ -282,6 +328,8 @@ export function createIncidentPipeline(opts) {
   }
   async function stop() {
     disarm();
+    if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
+    if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));
     if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
     if (!profiling) { writeRun(true); return; }
     profiling = false;
@@ -426,6 +474,7 @@ export function createIncidentPipeline(opts) {
       writeClusters();
       return;
     }
+    if (rec.type === 'heartbeat') await readHeap(rec);
     appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }

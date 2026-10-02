@@ -168,6 +168,13 @@ npx sloptimize attach --launch http://localhost:5173 --drive bench/orbit.mjs --r
 # bench/orbit.mjs: export default async function drive({ phase, at, eval, key, drag, until }) { … }
 ```
 
+A long session leaks where frame metrics cannot see: the heartbeat carries
+live GPU objects (created − deleted − collected, at the graphics API),
+three.js's `renderer.info.memory`, and the JS heap, and `report` reads them
+as trends (`▲ GPU buffers (live): 1200 → 1927 (+1500/h …) — GROWING: a
+dispose missed on a rebuild?`). `attach --heap-gc` reads the heap post-GC;
+`--heap-snapshots` writes a start and an end snapshot for DevTools.
+
 What did the run NEVER call? A coverage run counts every function's calls
 exactly — its own run, since coverage slows the page:
 

@@ -155,6 +155,7 @@ export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch
  * @param {number} [opts.minShare]   the share of a frame a function needs to be named its cause (default 0.1)
  * @param {boolean} [opts.slots]     false: no instance-slot watch, no __THREE_DEVTOOLS__ (default on)
  * @param {string|Function} [opts.drive] a drive script (SPEC §3.13): run with `runDrive()`
+ * @param {{gc?:boolean, snapshots?:boolean}} [opts.heap] soak instruments (SPEC §3.14) — both pause the page
  * @param {boolean} [opts.coverage] a coverage run (SPEC §3.12): precise function coverage, no sampler
  * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
  *   runs of one build are then one build with n runs in `history`, not n builds
@@ -215,7 +216,7 @@ export async function attach(opts = {}) {
   // the old one, which still answers `document.readyState === 'complete'`.
   let settleArmed;
   const armed = new Promise((r) => { settleArmed = r; });
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true,
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser, drive: drive?.meta }) });
   const onRecord = pipeline.onRecord;
 

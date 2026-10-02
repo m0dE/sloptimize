@@ -40,6 +40,29 @@ let medianCache = 16.7, medianStale = 0;
 const refresh = createRefreshTracker();
 let glSeen = null, adapterSeen = null, gpuName, conditionsSent = '';
 
+// Live GPU objects (SPEC §3.14): created − deleted − collected, per kind. A
+// dispose a rebuild misses grows a kind monotonically and is invisible to
+// every frame metric; on the heartbeat, a trend says so. Collected objects
+// are counted out through a FinalizationRegistry, so a wrapper the page let
+// go of is not a leak.
+const live = { buffers: 0, textures: 0, programs: 0, shaders: 0, framebuffers: 0, renderbuffers: 0, vertexArrays: 0 };
+const liveSet = new WeakSet();
+let liveSeen = false;
+const gone = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry((kind) => { live[kind]--; }) : null;
+function born(kind, obj) {
+  if (!obj || typeof obj !== 'object' || liveSet.has(obj)) return;
+  liveSet.add(obj); live[kind]++; liveSeen = true;
+  try { gone?.register(obj, kind, obj); } catch { /* not registrable */ }
+}
+function died(kind, obj) {
+  if (!obj || !liveSet.has(obj)) return;
+  liveSet.delete(obj); live[kind]--;
+  try { gone?.unregister(obj); } catch { /* fine */ }
+}
+// three.js renderers, through the devtools hook (below): their own
+// renderer.info.memory is the engine's count of the same leak.
+const renderers = [];
+
 // Per-frame graphics-API counters, reset at each rAF boundary.
 const gpu = { draws: 0, triangles: 0, creates: 0, uploadKB: 0 };
 let sessionCreates = 0;
@@ -129,6 +152,16 @@ try {
       return r;
     };
   }
+  // Live WebGPU objects: destroy() counts out, as collection does.
+  if (typeof GPUDevice !== 'undefined') {
+    for (const [fn, kind, Cls] of [['createBuffer', 'buffers', globalThis.GPUBuffer], ['createTexture', 'textures', globalThis.GPUTexture]]) {
+      const orig = GPUDevice.prototype[fn];
+      if (typeof orig !== 'function') continue;
+      GPUDevice.prototype[fn] = function (...a) { const o = orig.apply(this, a); born(kind, o); return o; };
+      const d = Cls?.prototype?.destroy;
+      if (typeof d === 'function') Cls.prototype.destroy = function (...a) { died(kind, this); return d.apply(this, a); };
+    }
+  }
   // WebGL counters — same shape, older API. EVERY draw entry point three.js
   // uses, not just the two plain ones: an InstancedMesh draws through
   // drawElementsInstanced, a BatchedMesh through WEBGL_multi_draw, and a
@@ -159,6 +192,13 @@ try {
     wrap(p, 'drawArraysInstanced', (m, first, n, inst) => drew(m, n, inst));
     wrap(p, 'drawElementsInstanced', (m, n, type, off, inst) => drew(m, n, inst));
     wrap(p, 'drawRangeElements', (m, start, end, n) => drew(m, n));
+    // Live object counts: create* hands the object out, delete* takes it back.
+    for (const [noun, kind] of [['Buffer', 'buffers'], ['Texture', 'textures'], ['Program', 'programs'], ['Shader', 'shaders'],
+      ['Framebuffer', 'framebuffers'], ['Renderbuffer', 'renderbuffers'], ['VertexArray', 'vertexArrays']]) {
+      const mk = p[`create${noun}`], rm = p[`delete${noun}`];
+      if (typeof mk === 'function' && !mk.__sloptimize) { p[`create${noun}`] = function () { const o = mk.apply(this, arguments); born(kind, o); return o; }; p[`create${noun}`].__sloptimize = true; }
+      if (typeof rm === 'function' && !rm.__sloptimize) { p[`delete${noun}`] = function (o) { died(kind, o); return rm.apply(this, arguments); }; p[`delete${noun}`].__sloptimize = true; }
+    }
     // Program links: the WebGL half of "who compiled this?" — the same
     // creation ledger the WebGPU pipeline wraps keep, so a WebGL compile
     // stall classifies as shader-compile and names its call site.
@@ -228,7 +268,10 @@ if (SLOTS_ON) try {
     hook = new EventTarget();
     globalThis.__THREE_DEVTOOLS__ = hook;
   }
-  hook.addEventListener('observe', (e) => { try { slotWatch.observe(e.detail); } catch { /* not ours to break */ } });
+  hook.addEventListener('observe', (e) => {
+    try { if (e.detail?.isWebGLRenderer && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
+    try { slotWatch.observe(e.detail); } catch { /* not ours to break */ }
+  });
 } catch { /* no EventTarget: no scenes, nothing else changes */ }
 
 // ── Long tasks: the JS half of attribution the profiler completes ───────────
@@ -422,6 +465,13 @@ try {
     // `programs` here is creations since the page loaded (links + pipelines);
     // tier 1's is the engine's live count. Both only grow when a compile ran.
     const rec = { type: 'heartbeat', at: new Date().toISOString(), tier: 0, programs: sessionCreates };
+    if (liveSeen) rec.gpuLive = { ...live };
+    // The engine's own count, if three.js handed us its renderer.
+    for (const ref of renderers) {
+      const r = ref.deref?.();
+      const m = r?.info?.memory;
+      if (m) { rec.three = { geometries: m.geometries, textures: m.textures, programs: Array.isArray(r.info.programs) ? r.info.programs.length : undefined }; break; }
+    }
     if (beat.frames > 0) {
       const med = ringPct(0.5), p95 = ringPct(0.95);
       rec.medianFrameMs = med === undefined ? undefined : +med.toFixed(2);

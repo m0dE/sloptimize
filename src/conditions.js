@@ -54,6 +54,8 @@ export const CONDITION_FIELDS = [
     why: 'the sampling profiler\'s own cost scales with its rate' },
   { key: 'drive', label: 'drive script', material: true, get: (c) => (c.instrument || c.drive ? str(c.drive?.hash) ?? str(c.drive) ?? 'none' : undefined),
     why: 'a drive script decides what the run does; two scripts are two workloads' },
+  { key: 'soak', label: 'soak instruments', material: true, get: (c) => (c.instrument ? [c.soak?.forcedGc ? 'forced GC each minute' : '', c.soak?.heapSnapshots ? 'heap snapshots' : ''].filter(Boolean).join(' + ') || 'none' : undefined),
+    why: 'a forced collection every minute and a heap snapshot each pause the page' },
   { key: 'counterClock', label: 'counter denominator', material: true, get: (c) => str(c.counters?.denominator),
     why: 'a rate over wall time and a rate over the game\'s clock are different quantities — a faster build covers more game time per wall second' },
   { key: 'phases', label: 'phases', material: true, phased: true, get: (c) => (Array.isArray(c.phases) && c.phases.length ? [...c.phases].sort().join(',') : undefined),
@@ -191,6 +193,8 @@ export function describeConditions(c = {}) {
   if (c.headless === true) parts.push('headless');
   const d = pick('drive');
   if (d && d !== 'none') parts.push(`drive ${d}`);
+  const soak = pick('soak');
+  if (soak && soak !== 'none') parts.push(soak);
   return parts.join(' · ') || 'conditions unrecorded';
 }
 

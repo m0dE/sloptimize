@@ -693,6 +693,34 @@ script decides the workload, so its content hash (`sha256:…`, the name is
 not identity) joins the run's conditions and runs of two scripts — or one
 script against none — never compare (§3.8). MCP: `attach_start {drive}`.
 
+### 3.14 Long sessions — live GPU objects and the heap, as trends
+
+Players run long sessions, and a slow leak surfaces in reviews rather than
+reports. For a three.js game the leak is usually not the JS heap: merged
+static geometry rebuilt on every map edit, with a dispose that misses,
+grows the GPU's live buffers monotonically and is invisible to every frame
+metric. So the tier-0 heartbeat carries `gpuLive` — live objects per kind
+(buffers, textures, programs, shaders, framebuffers, renderbuffers, vertex
+arrays; WebGPU buffers and textures), counted at the graphics API as
+created − deleted − collected (a `FinalizationRegistry` counts out wrappers
+the page let go of) — and `three: {geometries, textures, programs}` from
+`renderer.info` when three's devtools hook hands the renderer over (not
+under `--no-slots`). The pipeline adds `heap: {usedMB, totalMB, source}`
+from `Runtime.getHeapUsage` to every heartbeat.
+
+A live heap reading is a sawtooth, so its trend is fit to the floor (the
+minimum of each three readings) and says so; `attach --heap-gc` forces a
+collection before each minute's reading (`source: "post-gc"` — the page
+cannot force one itself without `--expose-gc`, but the CDP connection can).
+`attach --heap-snapshots` writes `heap/<session>-start.heapsnapshot` (~30 s
+in) and `-end` at stop, for DevTools' Comparison view. Both pause the page,
+so both are conditions of the run (`soak`) and such a run never compares
+with an ordinary one. `report` prints each series' trend once a session has
+5 minutes and 5 beats: first → last, per hour, R², the share of rising
+steps, and `GROWING` when the fit explains the series (R² ≥ 0.6), seven in
+ten steps rise, and the rise is at least a tenth of the start (and 2 MB /
+5 objects).
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)
