@@ -1,0 +1,8 @@
+<!doctype html>
+<!-- coverage e2e: a subsystem that LOADS and sits idle (its manager ticks
+     over an empty map every frame; TrafficLight.prototype.update is never
+     called) — module granularity reads it as executed. -->
+<html><body><canvas id="c" width="64" height="64"></canvas>
+<script src="traffic.js"></script>
+<script src="main.js"></script>
+</body></html>

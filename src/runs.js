@@ -35,7 +35,63 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [] };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, tally: emptyTally() };
+}
+
+// ── Game counters (SPEC §3.11): totals over the game's OWN clock ────────────
+// A counter is only a throughput once it is divided by time, and the time
+// must be the game's: a build that renders 20% faster covers 20% more of the
+// simulated world per wall second, so deliveries per wall second rise with
+// no throughput gained — a frame win counted twice. Per FRAME is wrong the
+// other way. So a window carries its counter totals (`tally`), the game
+// clock's advance if the game supplied one (`clock: {name, seconds}`), and
+// its visible wall seconds; rates divide by the clock when there is one and
+// by wall time only when there is none, and say which. The clock-normalised
+// totals are kept apart from the wall ones: a window without the clock must
+// not inflate a clock rate.
+
+/** An empty counter accumulator. */
+export function emptyTally() { return { wall: new Map(), wallSec: 0, clock: null }; }
+
+/** Fold one window (`{tally, clock, window:{seconds}}`) — or a folded
+ *  phase from a run file (`{tally, wallSec, clock:{name, seconds, tally}}`)
+ *  — into an accumulator. A window whose clock went backwards (a new game,
+ *  a reload) is dropped whole: its counts have no honest denominator. */
+export function foldTally(acc, rec) {
+  if (!rec || !rec.tally || typeof rec.tally !== 'object') return acc;
+  const add = (m, t) => { for (const [n, v] of Object.entries(t ?? {})) if (typeof v === 'number' && Number.isFinite(v)) m.set(n, (m.get(n) ?? 0) + v); };
+  if (rec.clock?.reset) return acc;
+  const folded = typeof rec.wallSec === 'number';
+  const wallSec = folded ? rec.wallSec : rec.window?.seconds;
+  if (typeof wallSec === 'number' && wallSec > 0) { add(acc.wall, rec.tally); acc.wallSec += wallSec; }
+  const c = rec.clock;
+  if (c && typeof c.name === 'string' && c.name && typeof c.seconds === 'number' && c.seconds >= 0) {
+    if (acc.clock && acc.clock.name !== c.name) acc.clock.mixed = true;
+    acc.clock ??= { name: c.name, seconds: 0, tally: new Map() };
+    if (c.mixed) acc.clock.mixed = true;   // a folded phase that already saw two clocks
+    acc.clock.seconds += c.seconds;
+    add(acc.clock.tally, folded ? c.tally : rec.tally);
+  }
+  return acc;
+}
+
+/** An accumulator as a run file stores it (null when nothing was counted). */
+export function tallyJSON(acc) {
+  if (!acc.wall.size && !acc.clock) return null;
+  const o = (m) => Object.fromEntries([...m].map(([k, v]) => [k, +v.toFixed(4)]));
+  return { tally: o(acc.wall), wallSec: +acc.wallSec.toFixed(3),
+    ...(acc.clock ? { clock: { name: acc.clock.name, seconds: +acc.clock.seconds.toFixed(3), tally: o(acc.clock.tally), ...(acc.clock.mixed ? { mixed: true } : {}) } } : {}) };
+}
+
+/** Rates per second of the game clock when there is one, else of wall time.
+ *  @returns {{denominator:string, per:string, values:Record<string,number>} | null} */
+export function ratesOf(acc) {
+  if (acc.clock && acc.clock.seconds > 0 && !acc.clock.mixed) {
+    return { denominator: `clock:${acc.clock.name}`, per: `${acc.clock.name}-s`, values: Object.fromEntries([...acc.clock.tally].map(([k, v]) => [k, +(v / acc.clock.seconds).toFixed(4)])) };
+  }
+  if (acc.clock?.mixed) return null;   // two clocks in one reading: no honest denominator
+  if (acc.wallSec > 0 && acc.wall.size) return { denominator: 'wall', per: 's', values: Object.fromEntries([...acc.wall].map(([k, v]) => [k, +(v / acc.wallSec).toFixed(4)])) };
+  return null;
 }
 
 /**
@@ -44,6 +100,7 @@ function emptyBucket() {
 export function createRunFold(meta) {
   const phases = new Map();
   let fromMs = Infinity, toMs = -Infinity;
+  let conditions = null;
   const bucket = (phase) => {
     const k = typeof phase === 'string' && phase ? phase : '?';
     return phases.get(k) ?? phases.set(k, emptyBucket()).get(k);
@@ -107,6 +164,14 @@ export function createRunFold(meta) {
     if (typeof rec.frame?.medianMs === 'number') b.medians.push(rec.frame.medianMs);
     if (typeof rec.frame?.p95Ms === 'number') b.p95s.push(rec.frame.p95Ms);
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
+    // Frames over fixed bars and the visible seconds they were counted in —
+    // summed, so a gate can read frames over 100 ms per minute of the phase.
+    foldTally(b.tally, rec);
+    if (rec.over && typeof rec.window?.seconds === 'number') {
+      b.seconds += rec.window.seconds;
+      b.over ??= {};
+      for (const [bar, n] of Object.entries(rec.over)) if (typeof n === 'number') b.over[bar] = (b.over[bar] ?? 0) + n;
+    }
     seen(Date.parse(rec.at));
   }
 
@@ -115,6 +180,12 @@ export function createRunFold(meta) {
     if (meta.build) out.build = meta.build;
     if (meta.intervalUs) out.intervalUs = meta.intervalUs;
     if (Number.isFinite(fromMs)) { out.from = new Date(fromMs).toISOString(); out.to = new Date(toMs).toISOString(); }
+    // What the run was measured under (conditions.js); `phases` is what it
+    // actually carried, read off the buckets at write time.
+    if (conditions) {
+      const ph = [...phases.keys()].filter((k) => k !== '?').sort();
+      out.conditions = { ...conditions, ...(ph.length ? { phases: ph } : {}) };
+    }
     out.phases = {};
     for (const [k, b] of phases) {
       const p = { samples: b.samples, idle: b.idle, program: b.program, gc: b.gc };
@@ -123,6 +194,9 @@ export function createRunFold(meta) {
         if (b.p95s.length) p.frame.p95Ms = median(b.p95s);
         if (b.calls.length) p.frame.calls = median(b.calls);
       }
+      if (b.over) { p.seconds = +b.seconds.toFixed(3); p.over = b.over; }
+      const t = tallyJSON(b.tally);
+      if (t) p.counters = t;
       // Heaviest first by inclusive samples; one array per function keeps a
       // long run's file small: [fn, url, line, col, self, total].
       p.fns = [...b.fns.values()].sort((x, y) => y.total - x.total).map((r) => [r.fn, r.url, r.line, r.col, r.self, r.total]);
@@ -131,7 +205,10 @@ export function createRunFold(meta) {
     return out;
   }
 
-  return { addProfile, addFrame, toJSON, get empty() { return phases.size === 0; } };
+  /** The run's conditions block (conditions.js), replaced whole. */
+  function setConditions(c) { conditions = c && typeof c === 'object' ? { ...c } : null; }
+
+  return { addProfile, addFrame, setConditions, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */
@@ -153,13 +230,14 @@ export function readRuns(dir) {
  * (medians do not sum).
  */
 export function runBucket(runs, phases = null) {
-  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), frame: undefined };
+  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), frame: undefined, tally: emptyTally() };
   let frameFrom = -1;
   const all = (Array.isArray(runs) ? runs : [runs]).flatMap((run) => Object.entries(run?.phases ?? {}));
   for (const [k, p] of all) {
     if (phases && !phases.has(k)) continue;
     out.samples += p.samples ?? 0; out.idle += p.idle ?? 0; out.program += p.program ?? 0; out.gc += p.gc ?? 0;
     if (p.frame && (p.samples ?? 0) > frameFrom) { out.frame = p.frame; frameFrom = p.samples ?? 0; }
+    if (p.counters) foldTally(out.tally, p.counters);
     for (const [fn, url, line, col, self, total] of p.fns ?? []) {
       const key = `${url}\t${line}\t${col}\t${fn}`;
       const r = out.fns.get(key) ?? out.fns.set(key, { fn, url, line, col, self: 0, total: 0 }).get(key);
