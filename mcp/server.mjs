@@ -15,6 +15,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
 const PKG_VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version;
@@ -25,8 +26,8 @@ let attachSession = null;
 const TOOLS = [
   { name: 'get_report', description: 'Current profile, recent incidents (classified, clustered), and census hints from the project’s .sloptimize/ directory.',
     inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'max incident records (default 20)' } } } },
-  { name: 'check_budgets', description: 'Check the measured profile against .sloptimize/budgets.json. Returns per-budget verdicts; "fast enough" as data.',
-    inputSchema: { type: 'object', properties: {} } },
+  { name: 'check_budgets', description: 'Check the measurement against .sloptimize/budgets.json. Returns per-budget verdicts; "fast enough" as data. Per-phase budgets (perf.budget.<phase>.<metric>, e.g. load.worst_ms, steady.p95_ms, steady.frames_over_100ms_per_min) and session/build judge a WHOLE run; a build\'s value is the median of its runs. `insufficient` means it could not judge (too few runs, a budget unmeasured) — never read that as a pass. `refused` means the run was measured under other conditions than budgets.json\'s perf.conditions, or is a coverage run.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' }, build: { type: 'string' }, minRuns: { type: 'number' } } } },
   { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
     inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
   { name: 'get_issues', description: 'The issue catalogue (SPEC §3.7): every incident type on the ledger grouped by FOOTPRINT — the identity of a cause (type, phase, verdict, site, the game’s situation), never its time — with occurrences, first/last seen, builds, worst, the last verdict, and the fixes applied to it. Read this before proposing a fix: an issue with a fix already recorded is not new.',
@@ -39,7 +40,9 @@ const TOOLS = [
       before: { type: 'string' }, after: { type: 'string' } }, required: ['title'] } },
   { name: 'compare_runs', description: 'A vs B (each a build, a session id, or <ISO>..<ISO>): every metric — frame median/p95/body, draw calls, hitches/h, each host loop section, each hot function\'s share — read per RUN and judged against its OWN run-to-run noise floor (significant / within noise / unproven at n=1), plus a warning when the slowdown is uniform with unchanged composition (the machine changed, not the code). Run each side at least twice. Sides measured under different conditions (display refresh, instrument, GPU, run mode, drawing size, phase mix…) are REFUSED: `refused: true` with `conditions.mismatches` naming what differs — re-measure rather than pass allowMismatch, unless the difference is the question.',
     inputSchema: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' }, phase: { type: 'string', description: 'comma list of page phases' },
-      allowMismatch: { type: 'boolean', description: 'read the deltas even when the conditions differ (they then include the difference)' } }, required: ['a', 'b'] } },
+      allowMismatch: { type: 'boolean', description: 'read the deltas even when the conditions differ (they then include the difference)' },
+      failOnRegression: { type: 'boolean', description: 'the gate: `gate.verdict` is regressed (a significant move the worse way), pass, insufficient (fewer than minRuns a side — not a pass) or machine (uniform change, unchanged composition)' },
+      minRuns: { type: 'number', description: 'runs a side the gate needs (default 3)' } }, required: ['a', 'b'] } },
   { name: 'check_touched', description: 'Did the measured run EXECUTE the change under test? For each changed file (default: git diff of the working tree, else the last commit), whether any profiler sample of the attach run landed in it. Call before trusting any before/after: a clean A/B on a benchmark that never ran the new code path proves nothing. Bundled builds need `maps` to credit samples to sources.',
     inputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string', description: 'git rev to diff against' },
       build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
@@ -60,6 +63,17 @@ function readJsonl(name, limit) {
   } catch { return []; }
 }
 
+/** A CLI verb's --json answer. A non-zero exit still carries its answer
+ *  (touched: a file got no samples; compare/check: a refusal, a breach, a
+ *  regression, cannot-judge) — only an unparseable one is an error. */
+function cliJson(argv) {
+  try {
+    return JSON.parse(execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'sloptimize.mjs'), ...argv, '--json', '--dir', DIR()], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  } catch (e) {
+    try { return { ...JSON.parse(e.stdout), exitCode: e.status }; } catch { return { error: (e.stderr || e.stdout || e.message).toString().trim() }; }
+  }
+}
+
 async function callTool(name, args = {}) {
   if (name === 'get_report') {
     return { profile: readJson('profile.json'), incidents: readJsonl('perf.jsonl', args.limit ?? 20),
@@ -67,26 +81,12 @@ async function callTool(name, args = {}) {
       note: existsSync(DIR()) ? undefined : 'no .sloptimize/ in this project — run the game with the tier-1 feed, or attach_start' };
   }
   if (name === 'check_budgets') {
-    const profile = readJson('profile.json');
-    const budgets = readJson('budgets.json');
-    if (!profile) return { error: 'no measurement to check' };
-    if (!budgets) return { warning: 'no budgets declared (.sloptimize/budgets.json)', breached: [] };
-    // What the measurement was taken under; budgets.json's `perf.conditions`
-    // (what the numbers were set for) refuses a mismatch, as `check` does.
-    const C = await import('../src/conditions.js');
-    const { readRuns } = await import('../src/runs.js');
-    const conditions = C.runConditions([profile, ...readJsonl('perf.jsonl', Infinity).filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
-      profile.session ? readRuns(DIR()).find((r) => r.session === profile.session) : null);
-    const want = budgets['perf.conditions'];
-    const expect = want && typeof want === 'object' ? C.expectConditions(conditions, want) : null;
-    if (expect && !expect.comparable) return { refused: true, conditions, expected: want, mismatches: expect.mismatches };
-    delete budgets['perf.conditions'];
-    const countersOnly = profile.regime !== 'hardware';
-    const read = { 'perf.budget.draw_calls': profile.render?.calls, 'perf.budget.triangles': profile.render?.triangles,
-      'perf.budget.frame_ms_p95': countersOnly ? undefined : profile.frame?.p95Ms, 'perf.budget.programs': profile.memory?.programs };
-    const results = Object.entries(budgets).map(([k, b]) => ({ budget: k, value: read[k] ?? null, limit: b,
-      verdict: read[k] === undefined ? 'unmeasured' : read[k] > b ? `over by ${(read[k] / b).toFixed(1)}x` : 'inside' }));
-    return { regime: profile.regime, conditions, ...(expect?.unverified.length ? { unverified: expect.unverified } : {}), results, breached: results.filter((r) => String(r.verdict).startsWith('over')).length };
+    // The CLI's own --json: one implementation of the snapshot, run mode,
+    // per-phase budgets, the conditions refusal and the cannot-judge answer.
+    const argv = ['check'];
+    if (args.session) argv.push('--session', String(args.session)); else if (args.build) argv.push('--build', String(args.build));
+    if (args.minRuns) argv.push('--min-runs', String(args.minRuns));
+    return cliJson(argv);
   }
   if (name === 'get_history') {
     const { buildHistory } = await import('../src/history.js');
@@ -117,7 +117,6 @@ async function callTool(name, args = {}) {
   }
   if (name === 'compare_runs' || name === 'check_touched') {
     // The CLI's own --json: one implementation of both verbs.
-    const { execFileSync } = await import('node:child_process');
     const argv = name === 'compare_runs' ? ['compare', String(args.a), String(args.b)] : ['touched'];
     if (name === 'check_touched') {
       if (args.changed?.length) argv.push('--changed', args.changed.join(','));
@@ -127,13 +126,9 @@ async function callTool(name, args = {}) {
     }
     if (args.phase) argv.push('--phase', args.phase);
     if (name === 'compare_runs' && args.allowMismatch === true) argv.push('--allow-mismatch');
-    try {
-      return JSON.parse(execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'sloptimize.mjs'), ...argv, '--json', '--dir', DIR()], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-    } catch (e) {
-      // touched exits 1 WITH its answer when a file got no samples; compare
-      // exits 3 with its refusal.
-      try { return JSON.parse(e.stdout); } catch { return { error: (e.stderr || e.stdout || e.message).toString().trim() }; }
-    }
+    if (name === 'compare_runs' && args.failOnRegression === true) argv.push('--fail-on-regression');
+    if (name === 'compare_runs' && args.minRuns) argv.push('--min-runs', String(args.minRuns));
+    return cliJson(argv);
   }
   if (name === 'attach_start') {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };

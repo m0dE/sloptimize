@@ -140,6 +140,17 @@ export function compareConditions(aList, bList, { phaseScoped = false, labels = 
 }
 
 /**
+ * One set of runs that should be one measurement (a build's runs): the
+ * material fields its runs disagree on.
+ * @returns {{comparable:boolean, mismatches:object[], unverified:object[]}}
+ */
+export function mixedConditions(list, { label = 'runs', phaseScoped = false } = {}) {
+  const r = compareConditions(list, [], { phaseScoped, labels: [label, '-'] });
+  const mismatches = r.mismatches.filter((m) => m.side === label && m.material);
+  return { comparable: mismatches.length === 0, mismatches, unverified: [] };
+}
+
+/**
  * A run's conditions against what a budgets file says it was set for
  * (`perf.conditions` in budgets.json: `{ "refreshHz": 60, "regime":
  * "hardware" }`, keyed by CONDITION_FIELDS key). An expected field the run

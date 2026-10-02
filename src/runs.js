@@ -35,7 +35,7 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [] };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null };
 }
 
 /**
@@ -108,6 +108,13 @@ export function createRunFold(meta) {
     if (typeof rec.frame?.medianMs === 'number') b.medians.push(rec.frame.medianMs);
     if (typeof rec.frame?.p95Ms === 'number') b.p95s.push(rec.frame.p95Ms);
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
+    // Frames over fixed bars and the visible seconds they were counted in —
+    // summed, so a gate can read frames over 100 ms per minute of the phase.
+    if (rec.over && typeof rec.window?.seconds === 'number') {
+      b.seconds += rec.window.seconds;
+      b.over ??= {};
+      for (const [bar, n] of Object.entries(rec.over)) if (typeof n === 'number') b.over[bar] = (b.over[bar] ?? 0) + n;
+    }
     seen(Date.parse(rec.at));
   }
 
@@ -130,6 +137,7 @@ export function createRunFold(meta) {
         if (b.p95s.length) p.frame.p95Ms = median(b.p95s);
         if (b.calls.length) p.frame.calls = median(b.calls);
       }
+      if (b.over) { p.seconds = +b.seconds.toFixed(3); p.over = b.over; }
       // Heaviest first by inclusive samples; one array per function keeps a
       // long run's file small: [fn, url, line, col, self, total].
       p.fns = [...b.fns.values()].sort((x, y) => y.total - x.total).map((r) => [r.fn, r.url, r.line, r.col, r.self, r.total]);

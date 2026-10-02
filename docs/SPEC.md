@@ -823,6 +823,52 @@ the exact grade for CI on GPU-less machines. In a project with no
 `perf.budget.*` tunables, `check` reports "no budgets declared" and exits 0
 with a warning — budgets are opt-in, but their absence is said out loud.
 
+### 7.1 The gate — per-phase budgets over whole runs, and "cannot judge"
+
+A snapshot of the last 120 frames cannot see a load-phase stall, and a
+global p95 dilutes a steady-state regression; both of one field week's real
+findings were phase ceilings. So a budget may name its phase —
+`perf.budget.<phase>.<metric>`, `*` for every phase the run carried — and
+`check --session <id>` / `--build <id>` (or any phased budget, which then
+judges profile.json's session) reads EVERY record of the run in that phase:
+
+| metric | read as | ceiling |
+|---|---|---|
+| `median_ms`, `p95_ms` | median of the phase's window medians / p95s | `n` or `{max}` |
+| `worst_ms` | longest hitch; a fixed bar passed unrecorded makes it "at least" | |
+| `frames_over_<N>ms_per_min` | frames over a FIXED bar (50/100/200/500/1000 ms, counted in the page per window) per minute of visible phase time | |
+| `draw_calls`, `triangles`, `programs` | median / median / max | |
+| `section.<name>` | the host's loop section, median ms per frame (§3.2b) | |
+| `rate.<name>` | a counter's rate (§3.11) — `{min}` or `{max}`, never a bare number | |
+| `hitches_per_h` | RELATIVE hitches per hour — only beside a `median_ms`/`p95_ms` budget for the phase | |
+
+Hitch detection is relative (a frame over twice the rolling median), so a
+build uniformly 20% slower lifts its own bar and reports FEWER hitches; a
+relative hitch budget alone would pass while the game got worse — refused
+as a bad budgets.json (exit 2). `frames_over_<N>ms_per_min` counts against
+the absolute bar, and every row says which rule produced it.
+
+A build is several runs: each metric is read per run, the build's value is
+the median, the range is printed. `--min-runs N` declares how many it needs;
+fewer, or a budget nothing measured (`--allow-unmeasured` passes those),
+is **exit 5 — cannot judge**, never a pass: a gate that passes because it
+could not measure converts "unknown" into "fine" on every CI run. A
+coverage-mode run (§3.8) is refused as a timing measurement (exit 3), as
+are runs of one build measured under different conditions.
+
+`compare <base> <new> --fail-on-regression` is the relative gate: exit 1
+when any directional metric moved significantly the worse way (frame ms,
+draw calls, triangles, hitches/h, sections, frames over a bar; a rate
+falling, unless its budget is `{max}`; function shares are composition,
+never a regression); exit 5 with fewer than `--min-runs` (default 3) runs a
+side; exit 3 when the change is uniform with unchanged composition — the
+machine, not the code. `attach --runs N --duration <s>` records the N runs
+of one build in one command.
+
+Exit codes, `check`: 0 pass · 1 breach · 2 bad budgets.json · 3 incomparable
+· 4 no measurement · 5 cannot judge. `compare --fail-on-regression`: 0 pass ·
+1 regressed · 3 incomparable · 4 unmeasured · 5 too few runs.
+
 ---
 
 ## 8. Agent integration — the whole point

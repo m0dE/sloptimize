@@ -422,6 +422,26 @@ never goes in a client bundle.
 npx sloptimize check              # exit 0 inside · 1 breached · 3 other conditions · 4 unmeasured
 ```
 
+Budgets can name a phase and are then judged over a whole run — a build's
+runs, the median of them — which is what a gate after every build runs:
+
+```json
+{ "perf.budget.load.worst_ms": 500,
+  "perf.budget.steady.p95_ms": 40,
+  "perf.budget.*.frames_over_100ms_per_min": 2 }
+```
+
+```bash
+npx sloptimize attach --launch http://localhost:5173 --build $SHA --runs 3 --duration 60
+npx sloptimize check --build $SHA --min-runs 3     # 0 pass · 1 breach · 5 cannot judge (too few runs, unmeasured)
+npx sloptimize compare $BASE $SHA --fail-on-regression   # 1 regressed · 5 fewer than 3 runs a side · 3 the machine changed
+```
+
+Hitch budgets count frames over a FIXED bar (`frames_over_<N>ms_per_min`):
+detection is relative to the rolling median, so a uniformly slower build
+reports fewer hitches, and a relative hitch budget alone is refused. Too few
+runs is exit 5, never a pass (SPEC §7.1).
+
 A budget met at 144 Hz says nothing about 60 Hz. Say what the numbers were
 set for, and `check` refuses (exit 3) a measurement taken under anything
 else:

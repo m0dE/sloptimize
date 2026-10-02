@@ -308,7 +308,12 @@ const PROFILE_EVERY = 120;
 // The slot watch, offset half a window from the profile so the two never
 // share a frame.
 const SLOTS_EVERY = 120, SLOTS_AT = 60;
-const win = { frames: 0, draws: 0, tris: 0 };
+const win = { frames: 0, draws: 0, tris: 0, ms: 0, over: new Array(16).fill(0) };
+// Frames over FIXED bars, per window: the absolute count a hitch budget needs.
+// Detection is relative (2× the rolling median), so a build that is uniformly
+// slower clears its own bar less often and reports FEWER hitches; a frame over
+// 100 ms is over 100 ms whatever the median did (SPEC §7: frames_over_<N>ms).
+const OVER_BARS = [50, 100, 200, 500, 1000];
 const beat = { frames: 0, draws: 0, tris: 0 };
 const BEAT_MS = 60_000;
 
@@ -326,7 +331,8 @@ function tick(ts) {
   const draws = gpu.draws, tris = gpu.triangles, creates = gpu.creates, upKB = gpu.uploadKB;
   const lt = longTaskMs;
   gpu.draws = 0; gpu.triangles = 0; gpu.creates = 0; gpu.uploadKB = 0; longTaskMs = 0;
-  win.frames++; win.draws += draws; win.tris += tris;
+  win.frames++; win.draws += draws; win.tris += tris; win.ms += frameMs;
+  for (let i = 0; i < OVER_BARS.length; i++) if (frameMs > OVER_BARS[i]) win.over[i]++;
   beat.frames++; beat.draws += draws; beat.tris += tris;
 
   const median = rollingMedian();
@@ -351,11 +357,15 @@ function tick(ts) {
   }
   if (frameNo % PROFILE_EVERY === 0) {
     const p95 = ringPct(0.95);
+    const over = {};
+    for (let i = 0; i < OVER_BARS.length; i++) over[OVER_BARS[i]] = win.over[i];
     emit({ type: 'profile', at: new Date().toISOString(),
       frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2) },
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
+      // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
+      window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       tier: 0 });
-    win.frames = 0; win.draws = 0; win.tris = 0;
+    win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.over.fill(0);
     updateConditions();
   }
   if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {

@@ -169,7 +169,14 @@ export async function attach(opts = {}) {
     close: async () => {
       if (open) await pipeline.stop();
       try { ws.close(); } catch { /* done */ }
-      if (child) child.kill();
+      // A launched browser is gone before close() returns: the next run of
+      // `--runs N` launches on the same port and must not find this one.
+      if (child && child.exitCode === null) {
+        const exited = new Promise((r) => child.once('exit', r));
+        child.kill();
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }
     },
     closed,
     clusters: pipeline.clusters,
