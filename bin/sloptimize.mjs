@@ -246,9 +246,11 @@ if (cmd === 'issues') {
   const only = get('--fp');
   for (const i of issues) {
     if (only && i.id !== only) continue;
-    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}`);
+    const rc = i.recurs ? `  ⟳ every ${i.recurs.periodSec.toFixed(1)}s ±${i.recurs.jitterSec}` : '';
+    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}${rc}`);
     if (only || issues.length <= 8) {
       console.log(`      key ${i.key}`);
+      if (i.recurs) console.log(`      ⟳ recurs every ${i.recurs.periodSec.toFixed(1)} s ± ${i.recurs.jitterSec} (${i.recurs.occurrences} occurrences${i.recurs.missed ? `, ${i.recurs.missed} missed` : ''}${i.recurs.sessions > 1 ? ` across ${i.recurs.sessions} sessions` : ''}) — a timer, not a player action: look for setInterval / an autosave / a periodic flush`);
       if (i.sample) console.log(`      last verdict: ${i.sample.guess} — ${i.sample.evidence}`);
       for (const f of i.fixes) console.log(`      ✔ ${f.at.slice(0, 10)} ${f.status ?? 'recorded'} ${f.title}${f.commit ? ` (${f.commit})` : ''}${f.pr?.url ? ` ${f.pr.url}` : ''}`);
       if (i.fixes.length === 0) console.log(`      no fix recorded — sloptimize fix propose --footprints ${i.id} --title "…"`);

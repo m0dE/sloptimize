@@ -436,6 +436,18 @@ A tier-0 page may also stamp its phase — `window.__sloptimizePhase =
 'steady'` — so a run with distinct workloads is keyed and filtered
 (`sloptimize issues --phase steady`) one phase at a time.
 
+**Recurrence.** A footprint that recurs on a timer carries `recurs:
+{periodSec, jitterSec, occurrences, gaps, missed, sessions}` — three ~600 ms
+frames at a 15 s interval is an autosave's signature, and "recurs every
+15.0 s ± 0.2" says timer, not player action, which is most of the
+diagnosis. Gaps are read only within one session and one page boot (an
+`armed` record restarts every timer); a gap of two or three periods is a
+missed occurrence (one under the detection bar), and the longest period that
+explains ≥80% of the gaps with a spread under 10% of it wins. Four
+occurrences at least: three are two gaps, which any two events have.
+`issues` and the panel's Issues tab say it. A backgrounded tab's throttled
+timers are not modelled.
+
 Cloud path: the footprint is computed by the writer, so a service that
 ingests many clients' records dedupes on `footprint.id` from day one; the
 fold is the same code. The service is specified in the sloptimize-cloud repo
