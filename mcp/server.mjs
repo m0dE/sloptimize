@@ -50,7 +50,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { url: { type: 'string' }, headless: { type: 'boolean' }, port: { type: 'number' },
       build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' },
       minShare: { type: 'number', description: 'share of a frame (0–1) a function needs to be named a hitch\'s cause (default 0.1)' },
-      slots: { type: 'boolean', description: 'false: skip the InstancedMesh stale-slot watch and leave __THREE_DEVTOOLS__ undefined (default true)' } }, required: ['url'] } },
+      slots: { type: 'boolean', description: 'false: skip the InstancedMesh stale-slot watch and leave __THREE_DEVTOOLS__ undefined (default true)' },
+      coverage: { type: 'boolean', description: 'a COVERAGE run: exact per-function call counts instead of the sampler (read with check_coverage). Its timings are not timings — never a compare/check side.' } }, required: ['url'] } },
+  { name: 'check_coverage', description: 'What a coverage run (attach_start coverage:true) never CALLED: modules that loaded but whose functions never ran (an idle subsystem — bench content missing, e.g. TrafficLight.update with 0 calls while its manager ticked an empty map), repo files that never loaded, and with changed/since every changed FUNCTION and whether it was called. Call before trusting a benchmark of a subsystem.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' }, build: { type: 'string' }, changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string' },
+      maps: { type: 'array', items: { type: 'string' } }, all: { type: 'boolean', description: 'include dependencies' } } } },
   { name: 'attach_stop', description: 'Stop the running attach session and report its cluster summary.',
     inputSchema: { type: 'object', properties: {} } },
 ];
@@ -130,11 +134,19 @@ async function callTool(name, args = {}) {
     if (name === 'compare_runs' && args.minRuns) argv.push('--min-runs', String(args.minRuns));
     return cliJson(argv);
   }
+  if (name === 'check_coverage') {
+    const argv = ['coverage'];
+    if (args.session) argv.push('--session', String(args.session)); else if (args.build) argv.push('--build', String(args.build));
+    if (args.changed?.length) argv.push('--changed', args.changed.join(',')); else if (args.since) argv.push('--since', String(args.since));
+    if (args.maps?.length) argv.push('--map', args.maps.join(','));
+    if (args.all) argv.push('--all');
+    return cliJson(argv);
+  }
   if (name === 'attach_start') {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots });
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots, coverage: args.coverage === true });
     return { ok: true, session: attachSession.session, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {

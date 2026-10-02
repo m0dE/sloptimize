@@ -206,7 +206,7 @@ export async function attachInApp(opts = {}) {
   const onMessage = (_event, method, params) => {
     if (method === 'Runtime.bindingCalled' && params?.name === '__sloptimizeEmit') {
       try { void pipeline.onRecord(JSON.parse(params.payload)); } catch { /* one bad record */ }
-    }
+    } else pipeline.onEvent(method, params);
   };
   const onDetach = () => { detached = true; };
   dbg.attach('1.3');

@@ -159,6 +159,17 @@ npx sloptimize touched [--changed src/a.ts,src/b.ts | --since main] [--map dist/
 npx sloptimize compare before-build after-build [--phase steady]
 ```
 
+What did the run NEVER call? A coverage run counts every function's calls
+exactly — its own run, since coverage slows the page:
+
+```bash
+npx sloptimize attach --coverage --launch http://localhost:5173 --duration 60
+npx sloptimize coverage                     # loaded-but-idle modules, never-loaded files
+#   ◌ src/entities/TrafficLight.ts  14.2 KB  2/9 called — IDLE: loaded and sat (bench content missing?)
+#       never called: update:41, setPhase:88, …
+npx sloptimize coverage --since main        # every changed FUNCTION, called or not (exit 1 if not)
+```
+
 `touched` exits 1 when a changed code file received no samples: a clean
 A/B on a scene that never ran the new code path is a rubber stamp, not a
 measurement. `compare` reads every metric per run — frame median/p95/body,

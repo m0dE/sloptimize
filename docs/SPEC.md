@@ -600,6 +600,39 @@ they are per wall second; `compare` reads one row per rate (`rate delivered
 `--fail-on-regression` unless the rate's budget is `{max}`; `check` judges
 `perf.budget.<phase>.rate.<name>: {min}` or `{max}` (§7.1).
 
+### 3.12 Coverage runs — what the run never CALLED
+
+`touched` asks whether a changed file ran, from samples. A field team's
+worst miss was the inverse: a whole subsystem never ran because the bench
+city contained none of it — and module granularity would have missed it as
+well. `TrafficLight.js` LOADED: the class was defined, its manager was
+constructed, and the manager's `tick()` ran every frame over an empty map.
+The module reads as executed; `TrafficLight.prototype.update` had **0
+calls**. The unit is the function.
+
+`attach --coverage` is its own run mode: V8 precise coverage, function
+granularity with call counts (`Profiler.startPreciseCoverage({callCount:
+true, detailed: false})`), started before the attach's reload, with no
+sampler. Precise coverage is not free (it keeps feedback vectors alive), so
+the run's conditions say `mode: "coverage"` and compare and check refuse it
+as a timing side (§3.8, §7.1); best-effort coverage is not a substitute — it
+can report a called function as uncalled. The page's old document's scripts
+(same URLs, a few frames of counts before the reload) are told apart by
+execution context. At stop, `coverage/<session>.json` holds every function
+of every script of the measured document: name, source line/column, end
+line, call count, size.
+
+`sloptimize coverage [--session|--build] [--map …]` reports, largest modules
+first: modules that **loaded and sat idle** (functions never called; ≥ half
+uncalled is marked IDLE — bench content missing?), modules loaded with
+nothing run, and repo files that **never loaded** (beside the loaded code;
+tests, tooling, declarations and dependencies excluded — a dead import, a
+stripped feature, or a feature the run never reached). `--changed` /
+`--since <rev>` is the exact `touched`: git's changed line ranges mapped to
+the innermost function each line sits in, with its call count — exit 1 when
+any changed function was never called or a changed file never loaded. A
+build's runs are summed. A bundle needs its map.
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)

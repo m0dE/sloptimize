@@ -134,6 +134,9 @@ export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render
  *   `headless`, `browser`, `recorder: {minHitchMs, slots}`, `host` — merged over instrument/mode/regime/sampler.
  *   The block rides the run file from the start; the ledger gets a `conditions` line when the page
  *   reports its half (display, device, GPU) and on every change after.
+ * @param {boolean} [opts.coverage]          a COVERAGE run (SPEC §3.12): V8 precise coverage, function
+ *   granularity with call counts, instead of the sampler; written to coverage/<session>.json at stop.
+ *   The run's mode is `coverage` and no verb reads its timings.
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -170,7 +173,8 @@ export function createIncidentPipeline(opts) {
   // settings from here, the display/device/GPU from the page's `conditions`
   // records. Kept in the run file and written to the ledger on every change,
   // so compare and check can refuse two runs that do not compare.
-  const conditions = { v: 1, instrument: 'attach', mode: 'timing', sampler: { intervalUs: samplingIntervalUs }, ...(opts.conditions ?? {}) };
+  const coverage = opts.coverage === true;
+  const conditions = { v: 1, instrument: 'attach', mode: coverage ? 'coverage' : 'timing', ...(coverage ? {} : { sampler: { intervalUs: samplingIntervalUs } }), ...(opts.conditions ?? {}) };
   if (regime !== 'unknown') conditions.regime = regime;
   run?.setConditions(conditions);
   function writeConditions() {
@@ -200,6 +204,7 @@ export function createIncidentPipeline(opts) {
   let lastRotateAt = -Infinity;  // page time of the last attributing rotation
   let skippedSinceLast = 0;      // hitches the gate left unattributed since then
   let windowTimer = null;
+  let coverageTaken = false;
 
   function arm() {
     disarm();
@@ -212,7 +217,63 @@ export function createIncidentPipeline(opts) {
     windowTimer = null;
   }
 
+  // Coverage mode: which scripts belong to the document being measured. The
+  // attach reloads the page after start(), and the old document's scripts —
+  // same URLs, a few frames of counts — must not be read as the new one's.
+  const scriptCtx = new Map();   // scriptId → executionContextId
+  let mainFrame = null, docCtx = null;
+  function onEvent(method, params) {
+    if (!coverage || !params) return;
+    if (method === 'Runtime.executionContextCreated') {
+      const c = params.context;
+      if (c?.auxData?.isDefault && (mainFrame === null || c.auxData.frameId === mainFrame)) docCtx = c.id;
+    } else if (method === 'Debugger.scriptParsed' && params.scriptId) {
+      scriptCtx.set(params.scriptId, params.executionContextId);
+    }
+  }
+  async function startCoverage() {
+    try { mainFrame = (await send('Page.getFrameTree'))?.frameTree?.frame?.id ?? null; } catch { /* no Page domain */ }
+    await send('Debugger.enable');
+    // An enabled debugger would stop on a `debugger;` statement: never here.
+    await send('Debugger.setSkipAllPauses', { skip: true });
+    await send('Profiler.enable');
+    await send('Profiler.startPreciseCoverage', { callCount: true, detailed: false });
+  }
+  /** Coverage at stop: per script of the measured document, every function
+   *  with its source position (1-based line, 0-based column — what a source
+   *  map reads), end line, call count and size. */
+  async function writeCoverage() {
+    let result;
+    try { ({ result } = await send('Profiler.takePreciseCoverage') ?? {}); } catch (e) { log(`coverage not taken: ${e?.message ?? e}`); return; }
+    const scripts = [];
+    for (const sc of result ?? []) {
+      if (!sc.url || /^(chrome|devtools|chrome-extension|node|extensions)::?/.test(sc.url)) continue;
+      if (docCtx !== null && scriptCtx.has(sc.scriptId) && scriptCtx.get(sc.scriptId) !== docCtx) continue;
+      let src = '';
+      try { src = (await send('Debugger.getScriptSource', { scriptId: sc.scriptId }))?.scriptSource ?? ''; } catch { /* gone */ }
+      const starts = [0];
+      for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) starts.push(i + 1);
+      const pos = (off) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (starts[m] <= off) lo = m; else hi = m - 1; } return [lo + 1, off - starts[lo]]; };
+      const fns = [];
+      for (const f of sc.functions ?? []) {
+        const r = f.ranges?.[0];
+        if (!r) continue;
+        const [line, col] = pos(r.startOffset), [endLine] = pos(Math.max(r.startOffset, r.endOffset - 1));
+        fns.push([f.functionName || '', line, col, endLine, r.count, r.endOffset - r.startOffset]);
+      }
+      scripts.push({ url: sc.url, size: src.length || Math.max(0, ...fns.map((x) => x[5])), fns });
+    }
+    try {
+      mkdirSync(join(dir, 'coverage'), { recursive: true });
+      writeFileSync(join(dir, 'coverage', `${session.replace(/[^\w.-]/g, '_')}.json`),
+        JSON.stringify({ type: 'coverage', v: 1, session, ...(build ? { build } : {}), at: new Date(now()).toISOString(), granularity: 'function', scripts }));
+      log(`coverage: ${scripts.length} script(s), ${scripts.reduce((n, x) => n + x.fns.length, 0)} functions → coverage/${session}.json`);
+    } catch (e) { log(`coverage not written: ${e?.message ?? e}`); }
+    try { await send('Profiler.stopPreciseCoverage'); } catch { /* target gone */ }
+  }
+
   async function start() {
+    if (coverage) { await startCoverage(); return; }
     await send('Profiler.enable');
     await send('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
     await send('Profiler.start');
@@ -221,6 +282,7 @@ export function createIncidentPipeline(opts) {
   }
   async function stop() {
     disarm();
+    if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
     if (!profiling) { writeRun(true); return; }
     profiling = false;
     try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
@@ -368,5 +430,5 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }
 
-  return { onRecord, clusters, start, stop, get regime() { return regime; }, conditions, session, build };
+  return { onRecord, onEvent, clusters, start, stop, get regime() { return regime; }, conditions, session, build };
 }

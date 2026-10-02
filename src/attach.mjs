@@ -81,6 +81,7 @@ export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch
  * @param {number} [opts.minHitchMs] absolute detection floor in the page (default 25)
  * @param {number} [opts.minShare]   the share of a frame a function needs to be named its cause (default 0.1)
  * @param {boolean} [opts.slots]     false: no instance-slot watch, no __THREE_DEVTOOLS__ (default on)
+ * @param {boolean} [opts.coverage] a coverage run (SPEC §3.12): precise function coverage, no sampler
  * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
  *   runs of one build are then one build with n runs in `history`, not n builds
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
@@ -134,7 +135,7 @@ export async function attach(opts = {}) {
   };
   ws.onerror = () => { /* onclose follows */ };
 
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare,
+  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser }) });
   const onRecord = pipeline.onRecord;
 
@@ -148,7 +149,7 @@ export async function attach(opts = {}) {
     }
     if (msg.method === 'Runtime.bindingCalled' && msg.params.name === '__sloptimizeEmit') {
       try { void onRecord(JSON.parse(msg.params.payload)); } catch { /* one bad record */ }
-    }
+    } else if (msg.method) pipeline.onEvent(msg.method, msg.params);
   };
 
   await send('Runtime.enable');

@@ -633,6 +633,85 @@ if (cmd === 'compare') {
   process.exit(gateExit);
 }
 
+if (cmd === 'coverage') {
+  // What the run never CALLED (SPEC §3.12), from a coverage run's exact call
+  // counts: modules that loaded and sat idle (bench content missing), files
+  // that never loaded, and — with --changed/--since — every changed function
+  // that was never called. Never from a timing run: samples cannot say what
+  // did not run, only bound it.
+  const { readdirSync: rd, readFileSync: rf, statSync } = await import('node:fs');
+  const Cv = await import('../src/coverage.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : undefined; };
+  const cdir = join(DIR, 'coverage');
+  let files = [];
+  try { files = rd(cdir).filter((f) => f.endsWith('.json')).map((f) => { try { return JSON.parse(rf(join(cdir, f), 'utf8')); } catch { return null; } }).filter((x) => x?.type === 'coverage'); } catch { /* none */ }
+  if (!files.length) { out({ error: 'no coverage run' }, `no coverage run under ${DIR} — record one with \`sloptimize attach --coverage --launch <url> --duration <s>\` (its own run: coverage slows the page, so it never shares a run with timings)`); process.exit(4); }
+  if (get('--build')) files = files.filter((f) => f.build === get('--build'));
+  else if (get('--session')) files = files.filter((f) => f.session === get('--session'));
+  else files = [files.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1)];
+  if (!files.length) { out({ error: 'no coverage run matches' }, `no coverage run for ${get('--build') ? `build ${get('--build')}` : `session ${get('--session')}`}`); process.exit(4); }
+  const maps = [];
+  if (get('--map')) {
+    const { loadSourceMap } = await import('../src/node/sourcemap.js');
+    const { basename } = await import('node:path');
+    for (const m of get('--map').split(',')) {
+      try { maps.push({ file: basename(m).replace(/\.map$/, ''), sm: loadSourceMap(m) }); } catch (e) { console.error(`sloptimize coverage: --map ${m}: ${e.message}`); process.exit(2); }
+    }
+  }
+  const mods = Cv.byModule(Cv.foldCoverage(files), { maps });
+  const repo = get('--repo') ?? process.cwd();
+  const { execFileSync } = await import('node:child_process');
+  const git = (...a) => { try { return execFileSync('git', a, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 << 20 }); } catch { return null; } };
+  const listed = git('ls-files', '-co', '--exclude-standard');
+  const repoFiles = (listed ?? '').split('\n').filter(Boolean).map((f) => { try { return { file: f, size: statSync(join(repo, f)).size }; } catch { return null; } }).filter(Boolean);
+  const a = Cv.analyzeCoverage(mods, { repoFiles, includeDeps: args.includes('--all') });
+  const head = `coverage: ${files.length === 1 ? `run ${files[0].session}` : `${files.length} runs`}${files[0].build ? ` (build ${files[0].build})` : ''} · ${mods.size} module(s) loaded · function granularity, exact call counts`;
+  const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
+  const top = Number(get('--top') ?? 15);
+  // --changed / --since: the exact `touched` — per changed FUNCTION.
+  let changed = null;
+  if (args.includes('--changed') || args.includes('--since')) {
+    let diff;
+    if (get('--since')) diff = git('diff', '-U0', get('--since'));
+    else {
+      const names = get('--changed').split(',').map((x) => x.trim()).filter(Boolean);
+      diff = git('diff', '-U0', 'HEAD', '--', ...names);
+      if (!diff) diff = git('diff', '-U0', 'HEAD~1', 'HEAD', '--', ...names);
+      // A named file with no diff at all: every line of it is "the change".
+      for (const n of names) if (!diff?.includes(`+++ b/${n}`)) diff = `${diff ?? ''}\n+++ b/${n}\n@@ -0,0 +1,1000000 @@`;
+    }
+    if (diff === null) { console.error('sloptimize coverage: not a git repo — run from the repo, or --repo <dir>'); process.exit(2); }
+    changed = Cv.changedFunctions(mods, Cv.changedRanges(diff));
+  }
+  const missed = changed ? changed.filter((f) => f.code && (!f.loaded || f.uncalled > 0)) : [];
+  if (json) { out({ runs: files.map((f) => ({ session: f.session, build: f.build })), modules: mods.size, ...a, ...(changed ? { changed } : {}) }); process.exit(missed.length ? 1 : 0); }
+  console.log(head);
+  if (changed) {
+    console.log('  changed code, function by function:');
+    for (const f of changed) {
+      if (!f.code) { console.log(`  · ${f.file} — not JS`); continue; }
+      if (!f.loaded) { console.log(`  ✗ ${f.file} — never loaded by this run`); continue; }
+      const parts = f.fns.map((x) => `${x.count > 0 ? '✔' : '✗'} ${x.name}:${x.line} (${x.count} call${x.count === 1 ? '' : 's'})`);
+      console.log(`  ${f.uncalled ? '✗' : '✔'} ${f.file}${f.moduleLevel ? ` — module-level code ${f.ran ? 'ran' : 'did not run'}` : ''}${parts.length ? `\n      ${parts.join('\n      ')}` : ''}`);
+    }
+    if (missed.length) console.log(`${missed.length} changed file(s) with code this run never executed — a before/after from it says nothing about that code.`);
+  }
+  console.log(`  loaded, but functions never called — largest modules first (${a.idle.length}):`);
+  for (const m of a.idle.slice(0, top)) {
+    const names = m.uncalled.slice(0, 6).map((f) => `${f.name}:${f.line}`).join(', ');
+    console.log(`  ${m.idle ? '◌' : '·'} ${m.file.padEnd(48)} ${kb(m.size).padStart(9)}  ${m.called}/${m.total} called${m.idle ? ' — IDLE: loaded and sat (bench content missing?)' : ''}\n      never called: ${names}${m.uncalled.length > 6 ? `, … (${m.uncalled.length})` : ''}`);
+  }
+  if (a.silent.length) console.log(`  loaded, nothing in it ever ran (${a.silent.length}): ${a.silent.slice(0, 8).map((m) => m.file).join(', ')}`);
+  if (!listed) console.log('  never loaded: (not a git repo — run from the repo or pass --repo <dir> to list the files this run never loaded)');
+  else if (!a.matched) console.log(`  never loaded: no loaded module matched a file of the repo — a bundle? pass --map <bundle>.js.map`);
+  else {
+    console.log(`  never loaded — repo files beside the loaded code, largest first (${a.never.length}):`);
+    for (const f of a.never.slice(0, top)) console.log(`  ✗ ${f.file.padEnd(48)} ${kb(f.size).padStart(9)}`);
+    if (a.never.length) console.log('    (a dead import, a stripped feature, tooling — or a feature this run never reached)');
+  }
+  process.exit(missed.length ? 1 : 0);
+}
+
 if (cmd === 'touched') {
   // Did the run execute the change under test? For each changed file: did
   // any profiler sample land in it (src/runs.js touchedFiles). A clean A/B
@@ -784,7 +863,9 @@ if (cmd === 'attach') {
     waitMs: get('--wait') !== undefined ? waitSeconds(get('--wait')) * 1000 : undefined,
     minShare: get('--min-share') !== undefined ? share(get('--min-share')) : undefined,
     slots: !args.includes('--no-slots'),
+    coverage: args.includes('--coverage'),
   };
+  if (opts.coverage) console.log('[attach] coverage run: exact call counts, no sampler — its timings are not timings, and no verb will read them as such');
   let session = null, closing = false;
   // Any signal a wrapper sends stops the sampler in the page before we go;
   // and the target going away ends the session — an attach without a target
@@ -828,5 +909,5 @@ if (cmd === 'attach') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--runs N --duration <s>]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--runs N --duration <s>] [--coverage]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
