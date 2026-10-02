@@ -285,6 +285,12 @@ export function createIncidentPipeline(opts) {
     }
     if (rec.type === 'profile') {
       run?.addFrame(rec);
+      // Which denominator the run's counters are read over (SPEC §3.11): the
+      // game's clock or wall time — two runs on different ones do not compare.
+      if (rec.tally) {
+        const clock = rec.clock?.name ? `clock:${rec.clock.name}` : 'wall';
+        if (conditions.counters?.denominator !== clock) { conditions.counters = { denominator: clock }; writeConditions(); }
+      }
       writeFileSync(join(dir, 'profile.json'), JSON.stringify({ ...rec, regime, at: new Date().toISOString() }, null, 2));
       return;
     }

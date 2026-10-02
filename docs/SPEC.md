@@ -563,6 +563,43 @@ less. `describeRecord(rec)` / `lineOf(rec)` are the pure half — the same
 line for a console or a host overlay — and bookkeeping records (`profile`,
 `heartbeat`, `armed`, `warm`, `answer`) are never lines.
 
+### 3.11 Game counters — throughput over the game's own clock
+
+Frame time is half a verdict. A field team shipped a frame-time win that
+cost throughput, and only their own `deliveredPerSimMinute` caught it. Any
+game has one: deliveries, requests served, entities processed, projectiles
+simulated. Two page globals, defined by attach before any page script (a
+tier-1 host puts the same fields on its `profile` lines):
+
+```js
+window.__sloptimizeCount('delivered', n);        // what the game did (default n = 1)
+window.__sloptimizeClock('sim', simMs, 1000);    // how much GAME time passed: value, units per second
+```
+
+Every profile window carries `tally` (totals in the window — every name seen
+so far, zero included: a counter that stopped is the finding), `clock:
+{name, seconds}` (the game clock's advance) and `window.seconds` (visible
+wall time). Rates divide by the **game clock** when one was supplied, and by
+wall time only when not. Wall time over-credits a faster build: rendering
+20% faster covers 20% more simulated world per wall second, so a fixed-
+timestep game's deliveries per wall second rise with no throughput gained —
+the frame win counted twice (the field team shipped this bug in their own
+harness, then fixed it to "per minute of sim time"). Per frame is wrong the
+other way. Pause, bullet time, a sim-speed control and a variable tick all
+need the clock; a networked game's "entities synced per second" may want
+wall time — the game decides by supplying a clock or not.
+
+Clock-normalised totals are kept apart from wall ones (a window before the
+game set its clock never enters a clock rate); a window whose clock went
+backwards (a new game, a reload) is dropped whole; a run that reported two
+clocks has no rate. The denominator joins the run's conditions
+(`counters.denominator`: `clock:sim` or `wall`) and compare refuses a wall
+side against a clock side (§3.8). `report` prints the rates and warns when
+they are per wall second; `compare` reads one row per rate (`rate delivered
+/sim-s`) against its noise floor — a significant FALL is a regression under
+`--fail-on-regression` unless the rate's budget is `{max}`; `check` judges
+`perf.budget.<phase>.rate.<name>: {min}` or `{max}` (§7.1).
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)

@@ -337,8 +337,17 @@ post('records', [{
   sections: p.sectionsMsPerFrame,      // mean ms per frame, biggest first
   counts: p.countsPerFrame,            // mean per frame
   gauges: Object.fromEntries(Object.entries(p.gauges).map(([k, g]) => [k, g.value])),
+  // Optional, read by the gate and compare (SPEC §3.11, §7.1):
+  tally: { delivered: 12 },            // TOTALS in this window — the game's own throughput
+  clock: { name: 'sim', seconds: 4.0 },// game time this window covered: rates divide by it
+  over: { 50: 3, 100: 0, 200: 0, 500: 0, 1000: 0 },   // frames over fixed bars (ms) this window
 }]);
 ```
+
+`window.seconds` is the denominator for `over` and, with no `clock`, for
+`tally` — report visible time only. Supply `clock` whenever the game's time
+can run at a different speed from wall time (a sim multiplier, pause, a
+frame rate that changes how much world a second covers).
 
 Sample rather than accumulate if the instrument costs anything with nobody
 reading it: open the profiler for two seconds every ten, read it, close it

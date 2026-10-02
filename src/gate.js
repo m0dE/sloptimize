@@ -26,6 +26,8 @@
 //
 // Pure: the CLI hands records and run files in.
 
+import { emptyTally, foldTally, ratesOf } from './runs.js';
+
 const median = (v) => {
   if (!v.length) return undefined;
   const s = [...v].sort((a, b) => a - b), m = s.length >> 1;
@@ -99,7 +101,7 @@ export function runPhaseMetrics(records = [], run = null) {
   const ph = new Map();
   const at = (k) => {
     const key = typeof k === 'string' && k ? k : '?';
-    return ph.get(key) ?? ph.set(key, { medians: [], p95s: [], calls: [], tris: [], programs: [], hitches: 0, worst: undefined, seconds: 0, over: null, sections: new Map(), tally: new Map(), clockSec: 0, wallSec: 0, clock: undefined, times: [] }).get(key);
+    return ph.get(key) ?? ph.set(key, { medians: [], p95s: [], calls: [], tris: [], programs: [], hitches: 0, worst: undefined, seconds: 0, over: null, sections: new Map(), tally: emptyTally(), times: [] }).get(key);
   };
   const addOver = (b, over, seconds) => {
     if (!over || !(seconds > 0)) return;
@@ -130,7 +132,7 @@ export function runPhaseMetrics(records = [], run = null) {
       if (typeof r.render?.calls === 'number') b.calls.push(r.render.calls);
       for (const [k, v] of Object.entries(r.sections ?? {})) if (typeof v === 'number') (b.sections.get(k) ?? b.sections.set(k, []).get(k)).push(v);
       addOver(b, r.over, r.window?.seconds);
-      addTally(b, r);
+      foldTally(b.tally, r);
     }
   }
   // The run file: every 120-frame window of the run, folded (runs.js).
@@ -143,7 +145,7 @@ export function runPhaseMetrics(records = [], run = null) {
       if (typeof p.frame.calls === 'number') b.calls.push(p.frame.calls);
     }
     if (p.over && p.seconds > 0) addOver(b, p.over, p.seconds);
-    if (p.tally) addTally(b, { tally: p.tally, clock: p.clock, window: { seconds: p.wallSec } }, true);
+    if (p.counters) foldTally(b.tally, p.counters);
   }
   const out = new Map();
   for (const [k, b] of ph) {
@@ -170,28 +172,11 @@ export function runPhaseMetrics(records = [], run = null) {
     const secs = b.seconds > 0 ? b.seconds : span;
     if (secs > 0) { m.phaseSeconds = r2(secs); m.hitches_per_h = r2(b.hitches / (secs / 3600)); }
     if (b.sections.size) m.sections = Object.fromEntries([...b.sections].map(([n, v]) => [n, r2(median(v))]));
-    if (b.tally.size) {
-      const clock = b.clock;
-      const denom = clock ? b.clockSec : b.wallSec;
-      if (denom > 0) m.rates = { per: clock ? `${clock}-second` : 'wall-second', denominator: clock ? `clock:${clock}` : 'wall', ...Object.fromEntries([...b.tally].map(([n, v]) => [n, +(v / denom).toFixed(4)])) };
-    }
+    const rates = ratesOf(b.tally);
+    if (rates) m.rates = rates;
     out.set(k, m);
   }
   return out;
-}
-
-/** A window's counter totals over its own clock (item 2: game-supplied
- *  denominator), else over its visible wall seconds. */
-function addTally(b, r, folded = false) {
-  if (!r.tally || typeof r.tally !== 'object') return;
-  for (const [n, v] of Object.entries(r.tally)) if (typeof v === 'number') b.tally.set(n, (b.tally.get(n) ?? 0) + v);
-  if (folded) {
-    if (r.clock?.name) { b.clock = r.clock.name; b.clockSec += r.clock.seconds ?? 0; }
-    b.wallSec += r.window?.seconds ?? 0;
-    return;
-  }
-  if (r.clock && typeof r.clock.name === 'string' && typeof r.clock.seconds === 'number') { b.clock = r.clock.name; b.clockSec += r.clock.seconds; }
-  if (typeof r.window?.seconds === 'number') b.wallSec += r.window.seconds;
 }
 
 /** The value one budget row reads from one phase's metrics. */
@@ -208,7 +193,7 @@ function readRow(row, m) {
     return undefined;
   }
   if (row.metric === 'section') return m.sections?.[row.name];
-  if (row.metric === 'rate') return m.rates?.[row.name];
+  if (row.metric === 'rate') return m.rates?.values[row.name];
   return m[row.metric];
 }
 
@@ -251,6 +236,10 @@ export function judgeBudgets(rows, runs) {
       const res = { budget: label, phase, metric: row.metric, ...(row.max !== undefined ? { max: row.max } : {}), ...(row.min !== undefined ? { min: row.min } : {}) };
       if (row.metric === 'hitches_per_h') res.rule = 'relative (frame > 2× rolling median)';
       if (row.metric === 'frames_over') res.rule = `absolute (frame > ${row.bar} ms)`;
+      if (row.metric === 'rate') {
+        const r = runs.map((x) => (phase === null ? undefined : x.get(phase)?.rates)).find(Boolean);
+        if (r) res.rule = `per ${r.per} (${r.denominator === 'wall' ? 'wall time — no game clock' : `the game's ${r.denominator.slice(6)} clock`})`;
+      }
       if (row.metric === 'worst_ms') {
         const ms = runs.map((r) => (phase === null ? undefined : r.get(phase))).filter(Boolean);
         if (ms.some((m) => m.worstAtLeast)) res.note = 'at least: a frame passed a fixed bar without being recorded as a hitch';

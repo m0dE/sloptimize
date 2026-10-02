@@ -31,7 +31,7 @@
 // resolveSide; a test hands a fixture.
 
 import { stableFile } from './footprint.js';
-import { runBucket } from './runs.js';
+import { runBucket, emptyTally, foldTally, ratesOf } from './runs.js';
 import { runConditions, compareConditions } from './conditions.js';
 
 function median(vals) {
@@ -86,6 +86,12 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
     const sum = meds.reduce((a, [, v]) => a + Math.max(v, 0), 0);
     if (sum > 0) sectionShares = new Map(meds.map(([k, v]) => [k, Math.max(v, 0) / sum]));
   }
+  // The game's counters as rates over its own clock (SPEC §3.11), one row
+  // each: a tier-0 run's from its run file, a tier-1 host's from its lines.
+  const tally = bucket?.tally ?? emptyTally();
+  for (const r of records) if (r.type === 'profile' && r.tally && !(run && r.tier === 0)) foldTally(tally, r);
+  const rates = ratesOf(tally);
+  if (rates) for (const [k, v] of Object.entries(rates.values)) put(`rate ${k} /${rates.per}`, v);
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;
   if (bucket && js > 0) {

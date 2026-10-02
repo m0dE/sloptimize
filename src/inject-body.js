@@ -295,6 +295,42 @@ function updateConditions() {
   emit(rec);
 }
 
+// ── Game counters (SPEC §3.11): the game's own throughput, and its clock ───
+// `window.__sloptimizeCount('delivered', n)` counts what the game DID;
+// `window.__sloptimizeClock('sim', simMs, 1000)` says how much game time
+// passed (value, units per second). A rate over the game's clock is the only
+// honest throughput: a faster build covers more game time per wall second.
+// Totals per window ride the profile record; every name seen so far reports,
+// zero included — a counter that stopped is the finding, not a gap.
+const tally = new Map();
+let clockName, clockScale = 1, clockStart, clockLast, clockReset = false;
+globalThis.__sloptimizeCount = function (name, n = 1) {
+  if (typeof name !== 'string' || !name) return;
+  const v = Number(n);
+  if (!Number.isFinite(v)) return;
+  const k = name.slice(0, 40);
+  tally.set(k, (tally.get(k) ?? 0) + v);
+};
+globalThis.__sloptimizeClock = function (name, t, perSecond = 1) {
+  const v = Number(t), per = Number(perSecond);
+  if (typeof name !== 'string' || !name || !Number.isFinite(v) || !(per > 0)) return;
+  if (name !== clockName) { clockName = name.slice(0, 40); clockScale = per; clockStart = v; clockLast = v; return; }
+  if (v < clockLast) clockReset = true;   // a new game, a reload: this window has no honest denominator
+  clockLast = v;
+};
+
+/** This window's counters (and clock advance), resetting both. */
+function takeCounters() {
+  if (!tally.size && clockName === undefined) return undefined;
+  const out = { tally: Object.fromEntries(tally) };
+  for (const k of tally.keys()) tally.set(k, 0);
+  if (clockName !== undefined && clockStart !== undefined) {
+    out.clock = { name: clockName, seconds: +((clockLast - clockStart) / clockScale).toFixed(4), ...(clockReset ? { reset: true } : {}) };
+    clockStart = clockLast; clockReset = false;
+  }
+  return out;
+}
+
 /** The p-th percentile of the frame ring (rare: once per profile/beat). */
 function ringPct(p) {
   if (count === 0) return undefined;
@@ -364,6 +400,7 @@ function tick(ts) {
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
+      ...(takeCounters() ?? {}),
       tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.over.fill(0);
     updateConditions();

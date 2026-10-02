@@ -54,6 +54,8 @@ export const CONDITION_FIELDS = [
     why: 'the sampling profiler\'s own cost scales with its rate' },
   { key: 'drive', label: 'drive script', material: true, get: (c) => (c.instrument || c.drive ? str(c.drive?.hash) ?? str(c.drive) ?? 'none' : undefined),
     why: 'a drive script decides what the run does; two scripts are two workloads' },
+  { key: 'counterClock', label: 'counter denominator', material: true, get: (c) => str(c.counters?.denominator),
+    why: 'a rate over wall time and a rate over the game\'s clock are different quantities — a faster build covers more game time per wall second' },
   { key: 'phases', label: 'phases', material: true, phased: true, get: (c) => (Array.isArray(c.phases) && c.phases.length ? [...c.phases].sort().join(',') : undefined),
     why: 'two phase mixes are two workloads — name one with --phase' },
   { key: 'browser', label: 'browser', material: false, get: (c) => str(c.browser) },
@@ -98,6 +100,9 @@ export function runConditions(records = [], run = null) {
   const phases = new Set();
   for (const r of records) if (typeof r?.phase === 'string' && r.phase && r.type !== 'conditions') phases.add(r.phase);
   for (const k of Object.keys(run?.phases ?? {})) if (k !== '?') phases.add(k);
+  // A tier-1 host's counters say their denominator by carrying a clock or not.
+  const counted = records.filter((r) => r?.type === 'profile' && r.tally);
+  if (counted.length) c.counters = { denominator: counted.some((r) => r.clock?.name) ? `clock:${counted.find((r) => r.clock?.name).clock.name}` : 'wall' };
   Object.assign(c, run?.conditions ?? {});
   const line = [...records].reverse().find((r) => r?.type === 'conditions' && r.conditions && typeof r.conditions === 'object');
   if (line) Object.assign(c, line.conditions);

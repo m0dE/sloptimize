@@ -171,6 +171,18 @@ it. When the frame moved ≥10% but the composition (section or function
 shares) did not, and the draw calls are equal, `compare` flags it as the
 machine, not the code.
 
+Frame time is half a verdict: a game can also report its own throughput,
+over its own clock, from the page —
+
+```js
+window.__sloptimizeCount('delivered', n);       // what the game did
+window.__sloptimizeClock('sim', simMs, 1000);   // how much game time passed
+```
+
+— and `report`, `compare` and `check` read it as a rate per game-second.
+Per wall second, a build that renders faster covers more game time and
+flatters itself; `report` says so when no clock was given (SPEC §3.11).
+
 Before any of that, `compare` checks that the two sides were measured under
 the same **conditions** — every run records its display refresh rate, GPU,
 drawing size, instrument (attached or in-app), run mode, sampler interval

@@ -109,6 +109,20 @@ if (cmd === 'report') {
   if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements');
   const vsync = C.vsyncNote(conds, profile.frame?.medianMs);
   if (vsync) console.log(`  ${vsync}`);
+  // The game's own throughput (SPEC §3.11), over its own clock when it gave one.
+  if (profile.session) {
+    const R = await import('../src/runs.js');
+    const file = R.readRuns(DIR).find((r) => r.session === profile.session);
+    const acc = file ? R.runBucket(file).tally : R.emptyTally();
+    for (const r of readJsonl('perf.jsonl', Infinity)) if (r.session === profile.session && r.type === 'profile' && r.tally && !(file && r.tier === 0)) R.foldTally(acc, r);
+    const rates = R.ratesOf(acc);
+    if (rates) {
+      const vals = Object.entries(rates.values).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${k} ${v}/${rates.per}`).join(' · ');
+      console.log(rates.denominator === 'wall'
+        ? `  rates (per wall second — no game clock: a build that renders faster covers more game time per second and flatters itself; window.__sloptimizeClock('sim', simMs, 1000) fixes it): ${vals}`
+        : `  rates (per second of the game's ${rates.denominator.slice(6)} clock): ${vals}`);
+    } else if (acc.clock?.mixed) console.log('  rates: the run reported two different game clocks — no honest denominator');
+  }
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
   // anyone at the keyboard. Twelve sections and the counters that moved
