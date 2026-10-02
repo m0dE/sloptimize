@@ -218,7 +218,7 @@ const RUN_GAP_MS = 5 * 60_000;
 export function resolveSide(spec, records, runFiles, phases = null, conditionLines = []) {
   const runs = [];
   for (const el of String(spec).split(',').map((x) => x.trim()).filter(Boolean)) {
-    let recs, files, window = false;
+    let recs, files, window = false, byBuild = false;
     if (el.includes('..')) {
       const [a, b] = el.split('..').map((x) => Date.parse(x));
       if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return { error: `bad window "${el}" — want <ISO>..<ISO>` };
@@ -226,7 +226,7 @@ export function resolveSide(spec, records, runFiles, phases = null, conditionLin
       files = runFiles.filter((r) => Date.parse(r.from) <= b && Date.parse(r.to) >= a);
       window = true;
     } else {
-      const byBuild = records.some((r) => r.build === el) || runFiles.some((r) => r.build === el);
+      byBuild = records.some((r) => r.build === el) || runFiles.some((r) => r.build === el);
       const pick = (r) => (byBuild ? r.build === el : r.session === el);
       recs = records.filter(pick); files = runFiles.filter(pick);
     }
@@ -249,6 +249,9 @@ export function resolveSide(spec, records, runFiles, phases = null, conditionLin
       const lines = named ? conditionLines.filter((c) => c.session === session)
         : conditionLines.filter((c) => !c.session && Date.parse(c.at) <= endMs).slice(-1);
       const m = runMetrics(session, list, files.find((f) => f.session === session), phases, lines);
+      // A coverage run recorded under the build's id is not one of its timing
+      // runs; named by its own session it is kept — and then refused.
+      if ((byBuild || window) && m.conditions?.mode === 'coverage') continue;
       if (Object.keys(m.metrics).length || m.fnShares) runs.push(m);
     }
   }

@@ -68,6 +68,7 @@ export function foldTally(acc, rec) {
   if (c && typeof c.name === 'string' && c.name && typeof c.seconds === 'number' && c.seconds >= 0) {
     if (acc.clock && acc.clock.name !== c.name) acc.clock.mixed = true;
     acc.clock ??= { name: c.name, seconds: 0, tally: new Map() };
+    if (c.mixed) acc.clock.mixed = true;   // a folded phase that already saw two clocks
     acc.clock.seconds += c.seconds;
     add(acc.clock.tally, folded ? c.tally : rec.tally);
   }

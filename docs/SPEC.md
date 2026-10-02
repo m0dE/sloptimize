@@ -993,7 +993,7 @@ judges profile.json's session) reads EVERY record of the run in that phase:
 | metric | read as | ceiling |
 |---|---|---|
 | `median_ms`, `p95_ms` | median of the phase's window medians / p95s | `n` or `{max}` |
-| `worst_ms` | longest hitch; a fixed bar passed unrecorded makes it "at least" | |
+| `worst_ms` | an interval: the longest hitch when every frame over the highest bar passed was recorded, else between that bar and the next — breach on the lower bound, pass on the upper, "cannot tell" between | |
 | `frames_over_<N>ms_per_min` | frames over a FIXED bar (50/100/200/500/1000 ms, counted in the page per window) per minute of visible phase time | |
 | `draw_calls`, `triangles`, `programs` | median / median / max | |
 | `section.<name>` | the host's loop section, median ms per frame (§3.2b) | |
@@ -1019,8 +1019,14 @@ when any directional metric moved significantly the worse way (frame ms,
 draw calls, triangles, hitches/h, sections, frames over a bar; a rate
 falling, unless its budget is `{max}`; function shares are composition,
 never a regression); exit 5 with fewer than `--min-runs` (default 3) runs a
-side; exit 3 when the change is uniform with unchanged composition — the
-machine, not the code. `attach --runs N --duration <s>` records the N runs
+side; exit 3 when every timing regression is part of a uniform SLOWDOWN
+with unchanged composition and equal draw calls — the machine, not the code
+(a draw-call, triangle or rate regression beside it still exits 1; a
+uniform speedup never fails). A coverage run recorded under the build's id
+is left out of the build's runs (named by `--session`, it is refused).
+An unknown `perf.*` key in budgets.json is exit 2 (a typo is not "no
+budget"); a file with no `perf.budget.*` row passes with the no-budgets
+warning, as an absent file does. `attach --runs N --duration <s>` records the N runs
 of one build in one command.
 
 Exit codes, `check`: 0 pass · 1 breach · 2 bad budgets.json · 3 incomparable

@@ -277,6 +277,10 @@ if (cmd === 'check') {
   const { readRuns } = await import('../src/runs.js');
   const parsed = G.parseBudgets(budgets);
   if (parsed.errors.length) { out({ error: 'bad budgets.json', errors: parsed.errors }, ['budgets.json:', ...parsed.errors.map((e) => `  ✗ ${e}`)].join('\n')); process.exit(2); }
+  if (!parsed.rows.length) {
+    out({ warning: 'no budgets declared', breached: [] }, 'no perf.budget.* in budgets.json — nothing to check; passing with a warning');
+    process.exit(0);
+  }
   const want = budgets['perf.conditions'];
   const refuse = (conds, cmp, why) => {
     out({ refused: true, conditions: conds, ...(want ? { expected: want } : {}), mismatches: cmp.mismatches },
@@ -301,11 +305,21 @@ if (cmd === 'check') {
       process.exit(4);
     }
     const minRuns = Number(flag('--min-runs') ?? 1);
-    const runs = sessions.map((s) => {
+    if (!(Number.isInteger(minRuns) && minRuns >= 1)) { console.error('sloptimize check: --min-runs takes a count ≥ 1'); process.exit(2); }
+    let runs = sessions.map((s) => {
       const recs = records.filter((r) => r.session === s);
       const file = runFiles.find((r) => r.session === s) ?? null;
       return { session: s, conditions: C.runConditions(recs, file), metrics: G.runPhaseMetrics(recs, file) };
     });
+    // A coverage run recorded under the build's id is not one of its timing
+    // runs; named by --session it is judged — and refused below.
+    if (buildArg) {
+      const cov = runs.filter((r) => (r.conditions.mode ?? 'timing') === 'coverage');
+      runs = runs.filter((r) => !cov.includes(r));
+      sessions = runs.map((r) => r.session);
+      if (cov.length && !json) console.log(`(${cov.length} coverage run(s) of build ${buildArg} left out: ${cov.map((r) => r.session).join(', ')})`);
+      if (!runs.length) { out({ error: 'no timing run' }, `build ${buildArg} has only coverage runs — no timings to judge`); process.exit(4); }
+    }
     const conds = runs.map((r) => r.conditions);
     // A coverage run's timings are its instrumentation's; runs that disagree
     // are not one build; and budgets set for other conditions do not apply.
@@ -342,26 +356,28 @@ if (cmd === 'check') {
   if (expect && !expect.comparable) refuse(conds, expect, 'budgets.json\'s perf.conditions do not match what this measurement was taken under');
   const countersOnly = args.includes('--counters-only') || profile.regime === 'software';
   const results = [];
+  // The snapshot's reading per (global) metric; parsed rows carry {max}/{min}.
   const read = {
-    'perf.budget.draw_calls': profile.render?.calls,
-    'perf.budget.triangles': profile.render?.triangles,
-    'perf.budget.frame_ms_p95': countersOnly ? undefined : profile.frame?.p95Ms,
-    'perf.budget.programs': profile.memory?.programs,
+    draw_calls: profile.render?.calls,
+    triangles: profile.render?.triangles,
+    p95_ms: countersOnly ? undefined : profile.frame?.p95Ms,
+    programs: profile.memory?.programs,
   };
   let breached = 0, measured = 0, skipped = 0;
-  for (const [k, budget] of Object.entries(budgets)) {
-    if (!k.startsWith('perf.budget.')) continue;
-    const v = read[k];
+  for (const row of parsed.rows) {
+    const v = read[row.metric];
+    const limit = row.max !== undefined && row.min === undefined ? row.max : { ...(row.max !== undefined ? { max: row.max } : {}), ...(row.min !== undefined ? { min: row.min } : {}) };
+    const shown = typeof limit === 'number' ? limit : Object.entries(limit).map(([k, x]) => `${k} ${x}`).join(' ');
     if (v === undefined) {
-      const isSkip = countersOnly && k.includes('ms');
+      const isSkip = countersOnly && row.metric.endsWith('_ms');
       if (isSkip) skipped++;
-      results.push({ budget: k, value: null, limit: budget, verdict: isSkip ? 'skipped (counters-only)' : 'unmeasured' });
+      results.push({ budget: row.key, value: null, limit, shown, verdict: isSkip ? 'skipped (counters-only)' : 'unmeasured' });
       continue;
     }
     measured++;
-    const over = v > budget;
-    if (over) breached++;
-    results.push({ budget: k, value: v, limit: budget, verdict: over ? `over by ${(v / budget).toFixed(1)}x` : 'inside' });
+    const over = row.max !== undefined && v > row.max, under = row.min !== undefined && v < row.min;
+    if (over || under) breached++;
+    results.push({ budget: row.key, value: v, limit, shown, verdict: over ? `over by ${(v / row.max).toFixed(1)}x` : under ? `under by ${(row.min / v).toFixed(1)}x` : 'inside' });
   }
   // Nothing measured is NOT "inside". A profile written at the gate, or
   // before a frame was drawn, has empty `frame`/`render` objects, and every
@@ -375,7 +391,7 @@ if (cmd === 'check') {
   out({ checked: results.length, breached, measured, results, conditions: conds, ...(expect?.unverified.length ? { unverified: expect.unverified } : {}) },
     `measured under: ${C.describeConditions(conds)}\n`
     + (expect?.unverified.length ? `  ? perf.conditions unverified — not recorded by this run: ${expect.unverified.map((u) => u.label).join(', ')}\n` : '')
-    + results.map((r) => `  ${r.budget.padEnd(28)} ${String(r.value).padStart(10)} / ${r.limit}   ${r.verdict}`).join('\n')
+    + results.map((r) => `  ${r.budget.padEnd(28)} ${String(r.value).padStart(10)} / ${r.shown}   ${r.verdict}`).join('\n')
     + `\nbudgets: ${results.length} checked, ${breached} breached`
     + (nothing ? ' — nothing measured: the profile has no frames in it (was it written at the gate?)' : ''));
   process.exit(nothing ? 4 : (breached > 0 ? 1 : 0));
@@ -616,7 +632,6 @@ if (cmd === 'compare') {
     for (const [k, v] of Object.entries(budgets)) { const m = /^perf\.budget\.[^.]+\.rate\.(.+)$/.exec(k); if (m && v && typeof v === 'object') rateDir[m[1]] = typeof v.max === 'number' ? 'max' : 'min'; }
     const { regressionGate } = await import('../src/gate.js');
     g = regressionGate(c, { minRuns, rateDir });
-    if (g.verdict !== 'insufficient' && c.hostSuspect) g = { ...g, verdict: 'machine', why: 'uniform change with unchanged composition — the machine changed, not the code; re-measure on a quiet machine' };
   }
   const gateExit = !g ? 0 : g.verdict === 'regressed' ? 1 : g.verdict === 'machine' ? 3 : g.verdict === 'insufficient' ? 5 : 0;
   if (json) { out(refused ? { refused: true, conditions: c.conditions, a: c.a, b: c.b } : { ...c, ...(g ? { gate: g } : {}) }); process.exit(refused ? 3 : gateExit); }

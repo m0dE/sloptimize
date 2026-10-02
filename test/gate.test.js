@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,10 +62,17 @@ test('runPhaseMetrics: worst frame from the hitches, frames over fixed bars per 
   assert.equal(m.get('load').median_ms, 30);
   assert.equal(m.get('steady').p95_ms, 20);
   assert.equal(m.get('steady').seconds, 10);
-  // A frame passed 100 ms in steady with no hitch recorded (relative bar):
-  // the worst frame is at least 100, and says so.
-  assert.equal(m.get('steady').worst_ms, 100);
-  assert.equal(m.get('steady').worstAtLeast, true);
+  // Frames passed 100 ms in steady with no hitch recorded (relative bar):
+  // the worst frame lies between 100 and the next bar, 200 — an interval.
+  assert.deepEqual(m.get('steady').worst, { lo: 100, hi: 200 });
+  assert.equal(m.get('steady').worst_ms, undefined);
+  // The load phase's frame over 500 ms was recorded (640): exact.
+  assert.deepEqual(m.get('load').worst, { lo: 640, hi: 640 });
+  const w = judgeBudgets(parseBudgets({ 'perf.budget.steady.worst_ms': 150 }).rows, [m]).results[0];
+  assert.equal(w.value, null, 'a ceiling inside the interval cannot be judged either way');
+  assert.match(w.verdict, /cannot tell: the worst frame is between 100 and 200 ms/);
+  assert.equal(judgeBudgets(parseBudgets({ 'perf.budget.steady.worst_ms': 90 }).rows, [m]).results[0].breached, true, 'the lower bound alone proves a breach');
+  assert.equal(judgeBudgets(parseBudgets({ 'perf.budget.steady.worst_ms': 250 }).rows, [m]).results[0].verdict, 'inside', 'the upper bound alone proves a pass');
   const j = judgeBudgets(parseBudgets({ 'perf.budget.steady.frames_over_100ms_per_min': 2, 'perf.budget.load.worst_ms': 500 }).rows, [m]);
   assert.deepEqual(j.results.map((r) => [r.budget, r.value, r.verdict]), [
     ['perf.budget.steady.frames_over_100ms_per_min', 30, 'over by 15.0x'], ['perf.budget.load.worst_ms', 640, 'over by 1.3x']]);
@@ -188,4 +195,50 @@ test('compare --fail-on-regression: exit 1 on a significant regression, 0 when n
   assert.equal(few.status, 5, few.stdout);
   assert.match(few.stdout, /gate: cannot pass — 2 run\(s\) on A, 2 on B — the gate needs 3 a side/);
   assert.equal(cmp(abDir(2, 1.25), '--min-runs', '2').status, 1);
+});
+
+test('review fixes, snapshot mode: {max}/{min} budgets are judged (not compared as objects); a typo is exit 2; no budget rows is the no-budgets warning', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-gate-snap-'));
+  writeFileSync(join(dir, 'profile.json'), JSON.stringify({ type: 'profile', regime: 'hardware', frame: { p95Ms: 20 }, render: { calls: 900 } }));
+  writeFileSync(join(dir, 'budgets.json'), JSON.stringify({ 'perf.budget.draw_calls': { max: 300 } }));
+  const r = run(dir);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /perf\.budget\.draw_calls\s+900 \/ 300\s+over by 3\.0x/);
+  writeFileSync(join(dir, 'budgets.json'), JSON.stringify({ 'perf.budgets.draw_calls': 300 }));
+  assert.equal(run(dir).status, 2);
+  writeFileSync(join(dir, 'budgets.json'), JSON.stringify({ 'perf.conditions': { refreshHz: 60 } }));
+  const none = run(dir);
+  assert.equal(none.status, 0);
+  assert.match(none.stdout, /no perf\.budget\.\* in budgets\.json/);
+});
+
+test('review fixes: a coverage session under the build id is not one of its timing runs — check and compare leave it out', () => {
+  const dir = gateDir();
+  writeFileSync(join(dir, 'perf.jsonl'), readFileSync(join(dir, 'perf.jsonl'), 'utf8')
+    + JSON.stringify({ type: 'conditions', session: 'COV', build: 'b7', at: '2026-10-02T02:00:00Z', conditions: { instrument: 'attach', mode: 'coverage' } }) + '\n'
+    + JSON.stringify({ type: 'heartbeat', session: 'COV', build: 'b7', at: '2026-10-02T02:01:00Z', medianFrameMs: 90, p95Ms: 120, tier: 0 }) + '\n');
+  writeFileSync(join(dir, 'budgets.json'), JSON.stringify({ 'perf.budget.steady.p95_ms': 25 }));
+  const r = run(dir, '--build', 'b7');
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /1 coverage run\(s\) of build b7 left out: COV/);
+  assert.equal(run(dir, '--session', 'COV').status, 3, 'named by its session, it is refused');
+});
+
+test('review fixes: the machine verdict is a uniform SLOWDOWN only, and a rate that fell beside it still regresses', async () => {
+  const { compareSides } = await import('../src/compare.js');
+  const side = (label, frame, calls, rate = 2) => ({ label, runs: [0, 1, 2].map((i) => ({ session: `${label}${i}`, tier: 0, conditions: { instrument: 'attach' },
+    metrics: { 'frame median ms': frame + i * 0.01, 'draw calls': calls, 'rate delivered /sim-s': rate + i * 0.001 }, fnShares: new Map([['f@a.js', 0.5], ['g@b.js', 0.5]]) })) });
+  const faster = regressionGate(compareSides(side('A', 20, 300), side('B', 16, 300)));
+  assert.equal(faster.verdict, 'pass');
+  assert.ok(compareSides(side('A', 20, 300), side('B', 16, 300)).hostSuspect, 'a uniform speedup is still flagged, but never fails the gate');
+  // A uniform 25% slowdown, composition still: the machine (exit 3)...
+  const slower = compareSides(side('A', 20, 300), side('B', 25, 300));
+  assert.equal(regressionGate(slower).verdict, 'machine');
+  // ...but a throughput that fell beside it is not the machine's doing: a
+  // slower machine runs fewer frames, not less game per game-second.
+  const less = regressionGate(compareSides(side('A', 20, 300), side('B', 25, 300, 1.5)));
+  assert.equal(less.verdict, 'regressed');
+  assert.deepEqual(less.regressions.map((r) => r.metric), ['rate delivered /sim-s']);
+  // Draw calls that moved mean the code moved: not the machine at all.
+  assert.deepEqual(regressionGate(compareSides(side('A', 20, 300), side('B', 25, 360))).regressions.map((r) => r.metric), ['frame median ms', 'draw calls']);
 });
