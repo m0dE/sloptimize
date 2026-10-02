@@ -645,6 +645,35 @@ the innermost function each line sits in, with its call count — exit 1 when
 any changed function was never called or a changed file never loaded. A
 build's runs are summed. A bundle needs its map.
 
+### 3.13 Drive scripts — what the run DOES
+
+A harness that holds the camera still cannot test what only a moving camera
+shows: one field game's ghost instances (drawn at stale positions) survived
+every automated check and only a person saw them. Every game's camera and
+input are its own, so the script is the game's — a module run on the
+recording's timeline:
+
+```js
+// drive.mjs
+export default async function drive({ phase, at, eval: run, until, key, move, click, drag, wait, cdp, log }) {
+  await until('window.game?.ready');
+  await phase('orbit');
+  await run('game.camera.orbit({ seconds: 20 })');
+  await at(20, () => phase('steady'));
+  await key('w', { holdMs: 2000 });
+  await at(60);
+}
+```
+
+`attach --drive drive.mjs` starts it once the reloaded document has armed
+and loaded (never against the old one); the run ends when the script does,
+`--duration` is then its time limit (a drive cut short in one of `--runs N`
+stops the set — a partial run is not one of N equal runs), and a throw ends
+the run with exit 1. `drive` ledger records mark start, end and error. The
+script decides the workload, so its content hash (`sha256:…`, the name is
+not identity) joins the run's conditions and runs of two scripts — or one
+script against none — never compare (§3.8). MCP: `attach_start {drive}`.
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)

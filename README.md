@@ -159,6 +159,15 @@ npx sloptimize touched [--changed src/a.ts,src/b.ts | --since main] [--map dist/
 npx sloptimize compare before-build after-build [--phase steady]
 ```
 
+A fixed camera cannot see what only a moving one shows. A drive script — the
+game's own, run on the recording's timeline — scripts the camera and input,
+and its hash keeps runs of different scripts apart:
+
+```bash
+npx sloptimize attach --launch http://localhost:5173 --drive bench/orbit.mjs --runs 3 --build $SHA
+# bench/orbit.mjs: export default async function drive({ phase, at, eval, key, drag, until }) { … }
+```
+
 What did the run NEVER call? A coverage run counts every function's calls
 exactly — its own run, since coverage slows the page:
 

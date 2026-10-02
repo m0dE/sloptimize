@@ -854,7 +854,8 @@ if (cmd === 'attach') {
   const runsN = get('--runs') !== undefined ? Number(get('--runs')) : 1;
   if (!(Number.isInteger(runsN) && runsN >= 1)) { console.error(`sloptimize attach: --runs takes a count ≥ 1 (got "${get('--runs')}")`); process.exit(2); }
   const duration = get('--duration') !== undefined ? waitSeconds(get('--duration'), '--duration') : undefined;
-  if (runsN > 1 && !duration) { console.error('sloptimize attach: --runs needs --duration <s> to end each run'); process.exit(2); }
+  const drivePath = get('--drive');
+  if (runsN > 1 && !duration && !drivePath) { console.error('sloptimize attach: --runs needs --duration <s> or --drive <script> to end each run'); process.exit(2); }
   const opts = {
     launch: get('--launch'),
     port: get('--port') ? Number(get('--port')) : undefined,
@@ -866,6 +867,7 @@ if (cmd === 'attach') {
     minShare: get('--min-share') !== undefined ? share(get('--min-share')) : undefined,
     slots: !args.includes('--no-slots'),
     coverage: args.includes('--coverage'),
+    drive: drivePath,
   };
   if (opts.coverage) console.log('[attach] coverage run: exact call counts, no sampler — its timings are not timings, and no verb will read them as such');
   let session = null, closing = false;
@@ -894,10 +896,18 @@ if (cmd === 'attach') {
       process.exit(4);
     }
     const tag = runsN > 1 ? ` (run ${i + 1}/${runsN})` : '';
-    console.log(`[attach] recording — session ${session.session}${session.build ? `, build ${session.build}` : ''}${tag} — ${duration ? `${duration}s` : 'Ctrl+C to stop'}`);
+    console.log(`[attach] recording — session ${session.session}${session.build ? `, build ${session.build}` : ''}${tag} — ${drivePath ? `drive ${session.drive.name} (${session.drive.hash})${duration ? `, at most ${duration}s` : ''}` : duration ? `${duration}s` : 'Ctrl+C to stop'}`);
     const timer = duration ? new Promise((r) => setTimeout(() => r('time'), duration * 1000)) : new Promise(() => {});
-    const why = await Promise.race([session.closed, timer]);
-    if (why !== 'time') {
+    // A drive ends the run when it ends; --duration is then its time limit.
+    const driven = drivePath ? session.runDrive().then(() => 'driven', (e) => ({ driveError: e })) : new Promise(() => {});
+    const why = await Promise.race([session.closed, timer, driven]);
+    if (why?.driveError) await bye(`drive script failed in run ${i + 1}: ${why.driveError?.message ?? why.driveError}`, 1);
+    if (why === 'time' && drivePath) {
+      // A drive cut short is a different workload from one that finished.
+      if (runsN === 1) console.log(`[attach] the drive did not finish within ${duration}s — the run covers part of the script`);
+      else await bye(`the drive did not finish within ${duration}s in run ${i + 1}/${runsN} — a run cut short is not one of N equal runs; ${done.length} complete: ${done.join(', ') || 'none'}`, 4);
+    }
+    if (why !== 'time' && why !== 'driven') {
       if (runsN === 1) await bye(`target gone (${why.code ?? 'socket closed'})`);
       // A run cut short is not one of N equal runs: stop, and say which ones stand.
       await bye(`target gone during run ${i + 1}/${runsN} — ${done.length} complete run(s): ${done.join(', ') || 'none'}`, 4);
@@ -911,5 +921,5 @@ if (cmd === 'attach') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--runs N --duration <s>] [--coverage]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

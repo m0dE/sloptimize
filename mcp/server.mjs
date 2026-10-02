@@ -22,6 +22,7 @@ const PKG_VERSION = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.me
 
 const DIR = () => join(process.cwd(), '.sloptimize');
 let attachSession = null;
+let driveState = null;   // { status: 'running'|'done'|'failed', error? } of the session's drive script
 
 const TOOLS = [
   { name: 'get_report', description: 'Current profile, recent incidents (classified, clustered), and census hints from the project’s .sloptimize/ directory.',
@@ -51,6 +52,7 @@ const TOOLS = [
       build: { type: 'string', description: 'the bundle identity to stamp on every record — runs of one build then compare as one build with n runs' },
       minShare: { type: 'number', description: 'share of a frame (0–1) a function needs to be named a hitch\'s cause (default 0.1)' },
       slots: { type: 'boolean', description: 'false: skip the InstancedMesh stale-slot watch and leave __THREE_DEVTOOLS__ undefined (default true)' },
+      drive: { type: 'string', description: 'path to a drive script (export default async function drive(api)) run on the recording\'s timeline: api.phase, at, eval, until, key, move, click, drag, wait, cdp. Its hash is a condition: runs of two scripts never compare. attach_stop reports how it ended.' },
       coverage: { type: 'boolean', description: 'a COVERAGE run: exact per-function call counts instead of the sampler (read with check_coverage). Its timings are not timings — never a compare/check side.' } }, required: ['url'] } },
   { name: 'check_coverage', description: 'What a coverage run (attach_start coverage:true) never CALLED: modules that loaded but whose functions never ran (an idle subsystem — bench content missing, e.g. TrafficLight.update with 0 calls while its manager ticked an empty map), repo files that never loaded, and with changed/since every changed FUNCTION and whether it was called. Call before trusting a benchmark of a subsystem.',
     inputSchema: { type: 'object', properties: { session: { type: 'string' }, build: { type: 'string' }, changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string' },
@@ -146,7 +148,12 @@ async function callTool(name, args = {}) {
     if (attachSession) return { error: 'an attach session is already running — attach_stop first' };
     const { attach } = await import('../src/attach.mjs');
     attachSession = await attach({ launch: args.url, headless: args.headless ?? true,
-      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots, coverage: args.coverage === true });
+      port: args.port ?? 9222, dir: DIR(), log: () => {}, build: args.build, minShare: args.minShare, slots: args.slots, coverage: args.coverage === true, drive: args.drive });
+    driveState = null;
+    if (args.drive) {
+      driveState = { status: 'running' };
+      attachSession.runDrive().then(() => { driveState = { status: 'done' }; }, (e) => { driveState = { status: 'failed', error: String(e?.message ?? e) }; });
+    }
     return { ok: true, session: attachSession.session, note: 'recording into .sloptimize/ — read with get_report; new causes cluster in clusters.json' };
   }
   if (name === 'attach_stop') {
@@ -154,7 +161,7 @@ async function callTool(name, args = {}) {
     const clusters = [...attachSession.clusters.entries()].map(([k, v]) => ({ key: k, count: v.count }));
     await attachSession.close();
     attachSession = null;
-    return { ok: true, clusters };
+    return { ok: true, clusters, ...(driveState ? { drive: driveState } : {}) };
   }
   throw new Error(`unknown tool ${name}`);
 }

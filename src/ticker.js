@@ -17,7 +17,7 @@ const C = {
   bg: 'rgba(8,12,20,0.88)', ink: '#cfe6f5', mute: '#6f9db0', warn: '#ffb454', bad: '#ff6b6b', accent: '#3ce0ff', good: '#5fd68b',
 };
 /** Records that are bookkeeping, not incidents — never a line. */
-const QUIET = new Set(['profile', 'heartbeat', 'arm-probe', 'armed', 'warm', 'answer', 'fix', 'census', 'conditions']);
+const QUIET = new Set(['profile', 'heartbeat', 'arm-probe', 'armed', 'warm', 'answer', 'fix', 'census', 'conditions', 'drive']);
 
 const ms = (n) => (typeof n === 'number' ? `${n.toFixed(n >= 100 ? 0 : 1)}ms` : '');
 const first = (rec) => (Array.isArray(rec.classification) ? rec.classification[0] : undefined);
