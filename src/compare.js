@@ -22,11 +22,17 @@
 // once reported as a +46% regression) scales everything and leaves the
 // shares where they were. Uniform change + unchanged composition is flagged.
 //
+// And before any of that: were the two sides measured under the same
+// conditions at all (conditions.js)? A different display, instrument, GPU or
+// run mode is not a delta to judge — `conditions.comparable` is false and the
+// CLI refuses (exit 3) unless told --allow-mismatch.
+//
 // Pure: the CLI reads perf.jsonl + runs/*.json and hands them to
 // resolveSide; a test hands a fixture.
 
 import { stableFile } from './footprint.js';
-import { runBucket } from './runs.js';
+import { runBucket, emptyTally, foldTally, ratesOf } from './runs.js';
+import { runConditions, compareConditions } from './conditions.js';
 
 function median(vals) {
   if (vals.length === 0) return undefined;
@@ -50,7 +56,7 @@ const FN_ROWS = 15;
  * attach wrote one.
  * @returns {{session:string, tier?:number, metrics:Record<string,number>, fnShares?:Map<string,number>, sectionShares?:Map<string,number>}}
  */
-export function runMetrics(session, records, run, phases = null) {
+export function runMetrics(session, records, run, phases = null, conditionLines = []) {
   const beats = records.filter((r) => r.type === 'heartbeat');
   const profiles = records.filter((r) => r.type === 'profile' && (r.sections || r.counts));
   const hitches = records.filter((r) => r.type === 'hitch' && typeof r.frameMs === 'number');
@@ -80,6 +86,12 @@ export function runMetrics(session, records, run, phases = null) {
     const sum = meds.reduce((a, [, v]) => a + Math.max(v, 0), 0);
     if (sum > 0) sectionShares = new Map(meds.map(([k, v]) => [k, Math.max(v, 0) / sum]));
   }
+  // The game's counters as rates over its own clock (SPEC §3.11), one row
+  // each: a tier-0 run's from its run file, a tier-1 host's from its lines.
+  const tally = bucket?.tally ?? emptyTally();
+  for (const r of records) if (r.type === 'profile' && r.tally && !(run && r.tier === 0)) foldTally(tally, r);
+  const rates = ratesOf(tally);
+  if (rates) for (const [k, v] of Object.entries(rates.values)) put(`rate ${k} /${rates.per}`, v);
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;
   if (bucket && js > 0) {
@@ -93,7 +105,8 @@ export function runMetrics(session, records, run, phases = null) {
     }
   }
   const tier = records.some((r) => r.tier === 0) || run ? 0 : records.some((r) => r.type === 'heartbeat' || r.type === 'profile') ? 1 : undefined;
-  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}) };
+  const conditions = runConditions([...records, ...conditionLines], run);
+  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, conditions, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}) };
 }
 
 function spread(vals) {
@@ -131,7 +144,7 @@ function row(metric, av, bv) {
  * @param {{label:string, runs:ReturnType<typeof runMetrics>[]}} A
  * @param {{label:string, runs:ReturnType<typeof runMetrics>[]}} B
  */
-export function compareSides(A, B) {
+export function compareSides(A, B, { phaseScoped = false } = {}) {
   const names = [];
   for (const r of [...A.runs, ...B.runs]) for (const k of Object.keys(r.metrics)) if (!names.includes(k)) names.push(k);
   const rows = [];
@@ -144,6 +157,10 @@ export function compareSides(A, B) {
   // the per-function compare the diff script was written for.
   const fa = A.runs.filter((r) => r.fnShares), fb = B.runs.filter((r) => r.fnShares);
   const out = { a: { label: A.label, runs: A.runs.map((r) => r.session) }, b: { label: B.label, runs: B.runs.map((r) => r.session) }, rows, warnings: [] };
+  // A run built by hand (a test, an old caller) still says its instrument.
+  const condOf = (r) => r.conditions ?? (r.tier === 0 ? { instrument: 'attach' } : r.tier === 1 ? { instrument: 'in-app' } : {});
+  const ca = A.runs.map(condOf), cb = B.runs.map(condOf);
+  out.conditions = { a: ca, b: cb, ...compareConditions(ca, cb, { phaseScoped }) };
   if (fa.length && fb.length) {
     const ma = meanShares(fa.map((r) => r.fnShares)), mb = meanShares(fb.map((r) => r.fnShares));
     const keys = [...new Set([...ma.keys(), ...mb.keys()])]
@@ -194,12 +211,14 @@ const RUN_GAP_MS = 5 * 60_000;
  * back-to-back sessionless runs are named one by one). Runs are sessions;
  * records with no session are cut into runs at RUN_GAP_MS silences, except
  * inside one window element, which is one run by construction.
+ * `conditionLines` are the ledger's `conditions` records, unfiltered by phase
+ * (a --phase read must not drop what the run was measured under).
  * @returns {{label:string, runs:object[]} | {error:string}}
  */
-export function resolveSide(spec, records, runFiles, phases = null) {
+export function resolveSide(spec, records, runFiles, phases = null, conditionLines = []) {
   const runs = [];
   for (const el of String(spec).split(',').map((x) => x.trim()).filter(Boolean)) {
-    let recs, files, window = false;
+    let recs, files, window = false, byBuild = false;
     if (el.includes('..')) {
       const [a, b] = el.split('..').map((x) => Date.parse(x));
       if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return { error: `bad window "${el}" — want <ISO>..<ISO>` };
@@ -207,7 +226,7 @@ export function resolveSide(spec, records, runFiles, phases = null) {
       files = runFiles.filter((r) => Date.parse(r.from) <= b && Date.parse(r.to) >= a);
       window = true;
     } else {
-      const byBuild = records.some((r) => r.build === el) || runFiles.some((r) => r.build === el);
+      byBuild = records.some((r) => r.build === el) || runFiles.some((r) => r.build === el);
       const pick = (r) => (byBuild ? r.build === el : r.session === el);
       recs = records.filter(pick); files = runFiles.filter(pick);
     }
@@ -223,7 +242,16 @@ export function resolveSide(spec, records, runFiles, phases = null) {
     }
     flush();
     for (const [session, list] of groups) {
-      const m = runMetrics(session, list, files.find((f) => f.session === session), phases);
+      // A session's own lines; a sessionless run takes the last sessionless
+      // line written before its own last record.
+      const endMs = Math.max(...list.map((r) => Date.parse(r.at)).filter(Number.isFinite), -Infinity);
+      const named = list.some((r) => r.session === session) || files.some((f) => f.session === session);
+      const lines = named ? conditionLines.filter((c) => c.session === session)
+        : conditionLines.filter((c) => !c.session && Date.parse(c.at) <= endMs).slice(-1);
+      const m = runMetrics(session, list, files.find((f) => f.session === session), phases, lines);
+      // A coverage run recorded under the build's id is not one of its timing
+      // runs; named by its own session it is kept — and then refused.
+      if ((byBuild || window) && m.conditions?.mode === 'coverage') continue;
       if (Object.keys(m.metrics).length || m.fnShares) runs.push(m);
     }
   }

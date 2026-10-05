@@ -7,7 +7,7 @@
 // the .sloptimize/ files. attach.mjs drives it over a raw WebSocket;
 // sloptimize/electron drives it over webContents.debugger. Same records,
 // same files, same cluster identity either way.
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold } from './runs.js';
@@ -110,6 +110,8 @@ export const ATTRIBUTE_COOLDOWN_MS = 1000;
 export const ATTRIBUTE_MIN_SHARE = 0.1;
 export const PROFILE_WINDOW_MS = 10_000;
 const RUN_WRITE_MS = 5000;
+/** Renderer strings of software rasterizers (SPEC §6.4's regime rule). */
+export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render/i;
 
 /**
  * @param {object} opts
@@ -128,6 +130,17 @@ const RUN_WRITE_MS = 5000;
  * @param {number} [opts.attributeMinShare]   default 0.1 — the top frame's self time / frameMs
  * @param {number} [opts.windowMs]            default 10 000; 0 disables the roll
  * @param {boolean} [opts.runs]               default true: fold every chunk into runs/<session>.json (runs.js)
+ * @param {object} [opts.conditions]          what the caller knows the run is measured under (conditions.js):
+ *   `headless`, `browser`, `recorder: {minHitchMs, slots}`, `host` — merged over instrument/mode/regime/sampler.
+ *   The block rides the run file from the start; the ledger gets a `conditions` line when the page
+ *   reports its half (display, device, GPU) and on every change after.
+ * @param {boolean} [opts.coverage]          a COVERAGE run (SPEC §3.12): V8 precise coverage, function
+ *   granularity with call counts, instead of the sampler; written to coverage/<session>.json at stop.
+ *   The run's mode is `coverage` and no verb reads its timings.
+ * @param {{gc?:boolean, snapshots?:boolean}} [opts.heap]  long-session memory (SPEC §3.14). Every
+ *   heartbeat carries the JS heap (Runtime.getHeapUsage, cheap); `gc` forces a collection first so the
+ *   reading is the post-GC floor, `snapshots` writes heap/<session>-start|end.heapsnapshot. Both pause
+ *   the page, so both are conditions of the run.
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -135,7 +148,7 @@ export function createIncidentPipeline(opts) {
   const dir = opts.dir ?? '.sloptimize';
   const log = opts.log ?? ((...a) => console.log('[attach]', ...a));
   const send = opts.send;
-  const regime = opts.regime ?? 'unknown';
+  let regime = opts.regime ?? 'unknown';
   // Every line this run writes says which run and which build it was: the
   // page cannot know either, and `history` needs both to hold several runs
   // of one build apart (a hitch count from one run is one noisy sample).
@@ -160,6 +173,21 @@ export function createIncidentPipeline(opts) {
   // dropped, credited to the phase the page was last heard in. Written at
   // most every RUN_WRITE_MS and always on stop — a crash loses seconds.
   const run = opts.runs === false ? null : createRunFold({ session, build, intervalUs: samplingIntervalUs });
+  // What this run is measured UNDER (conditions.js): the instrument and its
+  // settings from here, the display/device/GPU from the page's `conditions`
+  // records. Kept in the run file and written to the ledger on every change,
+  // so compare and check can refuse two runs that do not compare.
+  const coverage = opts.coverage === true;
+  const conditions = { v: 1, instrument: 'attach', mode: coverage ? 'coverage' : 'timing', ...(coverage ? {} : { sampler: { intervalUs: samplingIntervalUs } }), ...(opts.conditions ?? {}) };
+  if (regime !== 'unknown') conditions.regime = regime;
+  const heapOpts = opts.heap ?? {};
+  if (heapOpts.gc || heapOpts.snapshots) conditions.soak = { ...(heapOpts.gc ? { forcedGc: true } : {}), ...(heapOpts.snapshots ? { heapSnapshots: true } : {}) };
+  run?.setConditions(conditions);
+  function writeConditions() {
+    run?.setConditions(conditions);
+    const rec = { type: 'conditions', at: new Date(now()).toISOString(), tier: 0, conditions };
+    appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp(rec)) + '\n');
+  }
   const runPath = join(dir, 'runs', `${session.replace(/[^\w.-]/g, '_')}.json`);
   let pagePhase, runWrittenAt = -Infinity;
   function foldChunk(profile) {
@@ -182,6 +210,7 @@ export function createIncidentPipeline(opts) {
   let lastRotateAt = -Infinity;  // page time of the last attributing rotation
   let skippedSinceLast = 0;      // hitches the gate left unattributed since then
   let windowTimer = null;
+  let coverageTaken = false;
 
   function arm() {
     disarm();
@@ -194,15 +223,119 @@ export function createIncidentPipeline(opts) {
     windowTimer = null;
   }
 
+  // Coverage mode: which scripts belong to the document being measured. The
+  // attach reloads the page after start(), and the old document's scripts —
+  // same URLs, a few frames of counts — must not be read as the new one's.
+  const scriptCtx = new Map();   // scriptId → executionContextId
+  let mainFrame = null, docCtx = null;
+  function onEvent(method, params) {
+    if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
+      appendFileSync(snapshot.path, params.chunk);
+      snapshot.bytes += params.chunk.length;
+      return;
+    }
+    if (!coverage || !params) return;
+    if (method === 'Runtime.executionContextCreated') {
+      const c = params.context;
+      if (c?.auxData?.isDefault && (mainFrame === null || c.auxData.frameId === mainFrame)) docCtx = c.id;
+    } else if (method === 'Debugger.scriptParsed' && params.scriptId) {
+      scriptCtx.set(params.scriptId, params.executionContextId);
+    }
+  }
+  async function startCoverage() {
+    try { mainFrame = (await send('Page.getFrameTree'))?.frameTree?.frame?.id ?? null; } catch { /* no Page domain */ }
+    await send('Debugger.enable');
+    // An enabled debugger would stop on a `debugger;` statement: never here.
+    await send('Debugger.setSkipAllPauses', { skip: true });
+    await send('Profiler.enable');
+    await send('Profiler.startPreciseCoverage', { callCount: true, detailed: false });
+  }
+  /** Coverage at stop: per script of the measured document, every function
+   *  with its source position (1-based line, 0-based column — what a source
+   *  map reads), end line, call count and size. */
+  async function writeCoverage() {
+    let result;
+    try { ({ result } = await send('Profiler.takePreciseCoverage') ?? {}); } catch (e) { log(`coverage not taken: ${e?.message ?? e}`); return; }
+    const scripts = [];
+    for (const sc of result ?? []) {
+      if (!sc.url || /^(chrome|devtools|chrome-extension|node|extensions)::?/.test(sc.url)) continue;
+      if (docCtx !== null && scriptCtx.has(sc.scriptId) && scriptCtx.get(sc.scriptId) !== docCtx) continue;
+      let src = '';
+      try { src = (await send('Debugger.getScriptSource', { scriptId: sc.scriptId }))?.scriptSource ?? ''; } catch { /* gone */ }
+      const starts = [0];
+      for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) starts.push(i + 1);
+      const pos = (off) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (starts[m] <= off) lo = m; else hi = m - 1; } return [lo + 1, off - starts[lo]]; };
+      const fns = [];
+      for (const f of sc.functions ?? []) {
+        const r = f.ranges?.[0];
+        if (!r) continue;
+        const [line, col] = pos(r.startOffset), [endLine, endCol] = pos(Math.max(r.startOffset, r.endOffset - 1));
+        // [name, line, col, endLine, count, size, endCol]: the end column lets a
+        // source map place the function's LAST position, not its end line's first.
+        fns.push([f.functionName || '', line, col, endLine, r.count, r.endOffset - r.startOffset, endCol]);
+      }
+      scripts.push({ url: sc.url, size: src.length || Math.max(0, ...fns.map((x) => x[5])), fns });
+    }
+    try {
+      mkdirSync(join(dir, 'coverage'), { recursive: true });
+      writeFileSync(join(dir, 'coverage', `${session.replace(/[^\w.-]/g, '_')}.json`),
+        JSON.stringify({ type: 'coverage', v: 1, session, ...(build ? { build } : {}), at: new Date(now()).toISOString(), granularity: 'function', scripts }));
+      log(`coverage: ${scripts.length} script(s), ${scripts.reduce((n, x) => n + x.fns.length, 0)} functions → coverage/${session}.json`);
+    } catch (e) { log(`coverage not written: ${e?.message ?? e}`); }
+    try { await send('Profiler.stopPreciseCoverage'); } catch { /* target gone */ }
+  }
+
+  // ── Memory (SPEC §3.14) ──────────────────────────────────────────────────
+  /** The page's JS heap onto a heartbeat: post-GC when the run forces one. */
+  async function readHeap(rec) {
+    try {
+      if (heapOpts.gc) await send('HeapProfiler.collectGarbage');
+      const u = await send('Runtime.getHeapUsage');
+      if (typeof u?.usedSize === 'number') {
+        rec.heap = { usedMB: +(u.usedSize / 1048576).toFixed(2), ...(typeof u.totalSize === 'number' ? { totalMB: +(u.totalSize / 1048576).toFixed(2) } : {}),
+          source: heapOpts.gc ? 'post-gc' : 'live' };
+      }
+    } catch { /* the target cannot say */ }
+  }
+  // A snapshot streams in chunks as events; one at a time.
+  let snapshot = null;   // { path, bytes }
+  async function takeSnapshot(label) {
+    if (!heapOpts.snapshots || snapshot) return;
+    const path = join(dir, 'heap', `${session.replace(/[^\w.-]/g, '_')}-${label}.heapsnapshot`);
+    try {
+      mkdirSync(join(dir, 'heap'), { recursive: true });
+      writeFileSync(path, '');
+      snapshot = { path, bytes: 0 };
+      await send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
+      log(`heap snapshot (${label}): ${(statSync(path).size / 1048576).toFixed(1)} MB → ${path}`);
+      appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp({ type: 'heap-snapshot', at: new Date(now()).toISOString(), label, file: path })) + '\n');
+    } catch (e) { log(`heap snapshot (${label}) not taken: ${e?.message ?? e}`); }
+    finally { snapshot = null; }
+  }
+  let snapTimer = null;
+
   async function start() {
+    if (heapOpts.snapshots) {
+      try { await send('HeapProfiler.enable'); } catch { /* none */ }
+      // The start snapshot once the reloaded page has settled; the end one at stop.
+      snapTimer = setT(() => { snapTimer = null; chain = chain.then(() => takeSnapshot('start')).catch(() => {}); }, opts.snapshotAfterMs ?? 30_000);
+      snapTimer?.unref?.();
+    }
+    if (coverage) { await startCoverage(); return; }
     await send('Profiler.enable');
     await send('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
     await send('Profiler.start');
     profiling = true;
     arm();
   }
-  async function stop() {
+  // stop() twice (a signal during the loop's own stop) is one stop.
+  let stopping = null;
+  function stop() { return (stopping ??= doStop()); }
+  async function doStop() {
     disarm();
+    if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
+    if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));
+    if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
     if (!profiling) { writeRun(true); return; }
     profiling = false;
     try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
@@ -246,6 +379,19 @@ export function createIncidentPipeline(opts) {
 
   async function handle(rec) {
     stamp(rec);
+    if (rec.type === 'conditions') {
+      // The page's half — display cadence, device, GPU — merged into the
+      // run's block and written whole. Not phase-stamped: a run's conditions
+      // are the run's, and a --phase filter must not drop them.
+      for (const k of ['display', 'device', 'gpu']) if (rec[k] !== undefined) conditions[k] = rec[k];
+      if (regime === 'unknown' && typeof rec.gpu === 'string' && rec.gpu) {
+        regime = SOFTWARE_GPU.test(rec.gpu) ? 'software' : 'hardware';
+        conditions.regime = regime;
+      }
+      writeConditions();
+      writeRun(true);
+      return;
+    }
     if (typeof rec.phase === 'string') pagePhase = rec.phase;
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
@@ -254,6 +400,12 @@ export function createIncidentPipeline(opts) {
     }
     if (rec.type === 'profile') {
       run?.addFrame(rec);
+      // Which denominator the run's counters are read over (SPEC §3.11): the
+      // game's clock or wall time — two runs on different ones do not compare.
+      if (rec.tally) {
+        const clock = rec.clock?.name ? `clock:${rec.clock.name}` : 'wall';
+        if (conditions.counters?.denominator !== clock) { conditions.counters = { denominator: clock }; writeConditions(); }
+      }
       writeFileSync(join(dir, 'profile.json'), JSON.stringify({ ...rec, regime, at: new Date().toISOString() }, null, 2));
       return;
     }
@@ -327,9 +479,10 @@ export function createIncidentPipeline(opts) {
       writeClusters();
       return;
     }
+    if (rec.type === 'heartbeat') await readHeap(rec);
     appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
     if (rec.type === 'armed') log(`recorder armed in page: ${rec.url}`);
   }
 
-  return { onRecord, clusters, start, stop, regime, session, build };
+  return { onRecord, onEvent, clusters, start, stop, get regime() { return regime; }, conditions, session, build };
 }

@@ -65,6 +65,9 @@ export function attributedGuess(spans, excessMs) {
  * @param {AttributedSpan[]} [h.attributed] what the host's own instruments
  *   measured inside the gap — usually absent at mint time (a host seals its
  *   attribution after the frame) and supplied through `reclassify` later
+ * @param {number} [h.gpuMs]        GPU time for the frame, if the driver said
+ *                                  (src/gpu.js). ABSENT means unmeasured and
+ *                                  is never read as zero.
  * @returns {Guess[]}
  */
 export function classifyHitch(h) {
@@ -94,6 +97,22 @@ export function classifyHitch(h) {
       evidence: `${h.spawned} entities spawned in the hitch frame`,
     });
   }
+  // What the GPU took, if anybody counted. This has to be decided BEFORE the
+  // render share, because the two are not independent: `insideRenderMs` is
+  // wall time the CPU spent inside the render call, and on a GPU-bound frame
+  // that is small - the CPU queues the commands and returns, and the cost
+  // lands afterwards in the driver. So a frame waiting on the GPU and a frame
+  // running a long script are the SAME SHAPE from the CPU's side, and without
+  // this number every one of them was called `long-script`.
+  const gpu = typeof h.gpuMs === 'number' && h.gpuMs >= 0 ? h.gpuMs : null;
+  const gpuBound = gpu !== null && h.frameMs > 0 && gpu >= h.frameMs * 0.6;
+  if (gpuBound) {
+    out.push({
+      guess: 'gpu-bound',
+      confidence: 'high',
+      evidence: `GPU ${gpu.toFixed(1)}ms of a ${h.frameMs.toFixed(1)}ms frame`,
+    });
+  }
   const inside = h.insideRenderMs ?? 0;
   if (inside > 0 && inside >= h.frameMs * 0.6) {
     out.push({
@@ -101,11 +120,16 @@ export function classifyHitch(h) {
       confidence: 'high',
       evidence: `inside-render ${inside.toFixed(1)}ms of a ${h.frameMs.toFixed(1)}ms frame`,
     });
-  } else if (h.frameMs > 0 && inside < h.frameMs * 0.25) {
+  } else if (h.frameMs > 0 && inside < h.frameMs * 0.25 && !gpuBound) {
+    // Knowing the GPU was IDLE is what makes this verdict worth acting on:
+    // the frame is long, the render call was short, and the drawing was not
+    // the reason - so it really is script, or something outside the loop.
+    // Unmeasured, it stays the low-confidence guess it always was.
     out.push({
       guess: 'long-script',
-      confidence: inside > 0 ? 'medium' : 'low',
-      evidence: `frame ${h.frameMs.toFixed(1)}ms with only ${inside.toFixed(1)}ms inside render`,
+      confidence: gpu !== null ? 'high' : (inside > 0 ? 'medium' : 'low'),
+      evidence: `frame ${h.frameMs.toFixed(1)}ms with only ${inside.toFixed(1)}ms inside render`
+        + (gpu !== null ? `, and ${gpu.toFixed(1)}ms on the GPU` : ''),
     });
   }
   // By elimination ONLY when nothing — counters or host — said anything. An
@@ -115,6 +139,19 @@ export function classifyHitch(h) {
       guess: 'gc-or-upload-by-elimination',
       confidence: h.memorySampled ? 'medium' : 'low',
       evidence: 'no counter moved and the render share is inconclusive'
+        // Only RULE THE DRAWING OUT when the GPU was genuinely small. A
+        // frame of 125 ms with 56 ms on the GPU is not gpu-bound by the
+        // threshold above and is certainly not evidence that drawing was
+        // innocent - saying so was a confident sentence pointing the reader
+        // away from nearly half the frame. Above that, report the number and
+        // draw no conclusion from it, which is what the honest version of
+        // "inconclusive" looks like.
+        + (gpu === null ? ''
+          // An idle GPU rules out the GPU, not the CPU's own render work: say
+          // which, when the render call itself took a real share.
+          : gpu < h.frameMs * 0.25 ? (inside < h.frameMs * 0.25 ? `; the GPU took ${gpu.toFixed(1)}ms, so the drawing was not it`
+            : `; the GPU took ${gpu.toFixed(1)}ms, so the GPU was not it — ${inside.toFixed(1)}ms of the frame was the CPU inside the render call`)
+            : `; the GPU took ${gpu.toFixed(1)}ms of it, which is neither small nor most of the frame`)
         + (h.memorySampled ? '' : ' (performance.memory unavailable, downgrading)'),
     });
   }
@@ -157,6 +194,8 @@ export function reclassify(rec, spans) {
     frameMs: rec.frameMs, medianMs: rec.medianMs, insideRenderMs: rec.insideRenderMs ?? 0,
     delta: rec.delta ?? {}, spawned: rec.world?.spawned?.length ?? rec.spawned ?? 0,
     memorySampled: !!rec.memorySampled, attributed: kept,
+    // The GPU's time stays part of the verdict when the host re-seals it.
+    ...(typeof rec.gpuMs === 'number' ? { gpuMs: rec.gpuMs } : {}),
   });
   return rec.classification[0]?.guess !== before;
 }

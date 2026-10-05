@@ -333,6 +333,56 @@ export function buildFix(records, opts = {}) {
   return fix;
 }
 
+// ── Recurrence: a footprint on a timer (SPEC §3.7) ───────────────────────────
+// Three ~600 ms frames at a 15 s interval is an autosave's signature, and
+// "recurs every 15.0 s ± 0.2" is most of the diagnosis — a timer, not a
+// player action. The occurrence times are in the ledger already. Gaps are
+// read only within one session and one page boot (a reload restarts every
+// timer), a gap of two or three periods is a missed occurrence (one under the
+// detection bar), and the answer needs at least RECUR_MIN occurrences and says
+// its spread: three occurrences are two gaps, which any two events have.
+export const RECUR_MIN = 4;
+
+/**
+ * @param {{t:number, session?:string}[]} occ  occurrence times (ms)
+ * @param {Map<string, number[]>} [boots]       per session, the times its page (re)armed
+ * @returns {{periodSec:number, jitterSec:number, occurrences:number, gaps:number, missed:number, sessions:number} | undefined}
+ */
+export function recurrenceOf(occ, boots = new Map()) {
+  if (occ.length < RECUR_MIN) return undefined;
+  // Per session first: two players' timers interleave in time.
+  const bySession = new Map();
+  for (const o of occ) (bySession.get(o.session ?? '') ?? bySession.set(o.session ?? '', []).get(o.session ?? '')).push(o.t);
+  const gaps = [];
+  for (const [session, ts] of bySession) {
+    ts.sort((x, y) => x - y);
+    const reboots = boots.get(session) ?? [];
+    for (let i = 1; i < ts.length; i++) {
+      if (reboots.some((t) => t > ts[i - 1] && t < ts[i])) continue;
+      const g = (ts[i] - ts[i - 1]) / 1000;
+      if (g > 0 && g <= 3600) gaps.push(g);
+    }
+  }
+  if (gaps.length < RECUR_MIN - 1) return undefined;
+  const med = [...gaps].sort((x, y) => x - y)[gaps.length >> 1];
+  // The LONGEST period that explains the gaps: a 15 s timer with one missed
+  // occurrence has gaps 15, 15, 30, 15 — 15 fits, and so would 7.5.
+  for (const k of [1, 2, 3]) {
+    const p = med / k;
+    if (p < 0.5) break;
+    const tol = Math.max(0.3, 0.06 * p);
+    const fit = gaps.map((g) => ({ g, n: Math.round(g / p) })).filter(({ g, n }) => n >= 1 && n <= 3 && Math.abs(g - n * p) <= tol * Math.max(1, Math.sqrt(n)));
+    if (fit.length < RECUR_MIN - 1 || fit.length / gaps.length < 0.8) continue;
+    const period = fit.reduce((a, x) => a + x.g, 0) / fit.reduce((a, x) => a + x.n, 0);
+    const devs = fit.map(({ g, n }) => g / n - period);
+    const jitter = Math.sqrt(devs.reduce((a, d) => a + d * d, 0) / Math.max(1, devs.length - 1));
+    if (jitter > 0.1 * period) continue;
+    return { periodSec: +period.toFixed(1), jitterSec: +Math.max(jitter, 0.01).toFixed(2), occurrences: occ.length, gaps: fit.length,
+      missed: fit.reduce((a, x) => a + x.n - 1, 0), sessions: new Set(occ.map((o) => o.session ?? '')).size };
+  }
+  return undefined;
+}
+
 /**
  * THE ISSUE CATALOGUE (SPEC §3.7): every incident record in `records`,
  * grouped by footprint — the same cause across builds, sessions and days is
@@ -352,7 +402,9 @@ export function buildIssues(records, opts = {}) {
   const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;
   const now = opts.now ?? Date.now();
   const groups = new Map();
+  const boots = new Map();
   for (const { t, r } of stamped(records)) {
+    if (r.type === 'armed') (boots.get(r.session ?? '') ?? boots.set(r.session ?? '', []).get(r.session ?? '')).push(t);
     if (t < lo || t > hi) continue;
     if (r.automated === true && opts.includeAutomated !== true) continue;   // a robot's session is not a player's issue
     const fp = footprintOf(r);
@@ -362,10 +414,11 @@ export function buildIssues(records, opts = {}) {
     if (!g) {
       const d = describeFootprint(fp.key);
       g = { id: fp.id, key: fp.key, type: r.type, glyph: d.glyph, label: d.label, phase: d.phase, ctx: d.ctx,
-        count: 0, firstMs: t, lastMs: t, builds: new Set(), worst: undefined, sample: undefined };
+        count: 0, firstMs: t, lastMs: t, builds: new Set(), worst: undefined, sample: undefined, times: [] };
       groups.set(fp.id, g);
     }
     g.count++;
+    g.times.push({ t, session: r.session });
     if (t < g.firstMs) g.firstMs = t;
     if (t > g.lastMs) { g.lastMs = t; g.sample = r.classification?.[0] ?? g.sample; }
     if (r.build) g.builds.add(r.build);
@@ -384,6 +437,7 @@ export function buildIssues(records, opts = {}) {
       builds: [...g.builds],
       ...(g.worst ? { worst: g.worst } : {}),
       ...(g.sample ? { sample: g.sample } : {}),
+      ...((() => { const rc = recurrenceOf(g.times, boots); return rc ? { recurs: rc } : {}; })()),
       fixes: linked.map((f) => ({ id: f.id, title: f.title, at: f.at, ...(f.commit ? { commit: f.commit } : {}),
         ...(f.status ? { status: f.status } : {}), ...(f.pr ? { pr: f.pr } : {}), ...(f.mergeCommit ? { mergeCommit: f.mergeCommit } : {}) })),
     });

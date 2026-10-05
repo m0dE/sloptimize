@@ -126,8 +126,9 @@ Tier-0 timings are **rAF intervals with the recorder attached**: vsync-quantized
 (a 26 ms frame body presents every 33.3 ms on a 60 Hz display) and paying for
 the recorder and the sampler. Compare them with other attached runs only —
 never with the app's own frame timer or with an unattached run. `report`
-says so under every tier-0 profile, and `compare` warns when its two sides
-were measured by different tiers. Draws are counted at the
+says so under every tier-0 profile, with the display's refresh rate (read
+off the rAF cadence) and which vsync steps the median is made of; `compare`
+refuses two sides measured by different tiers. Draws are counted at the
 WebGL/WebGPU API the way `renderer.info` counts them — instanced and
 multi-draw calls included — as a mean over the sample window.
 
@@ -158,6 +159,33 @@ npx sloptimize touched [--changed src/a.ts,src/b.ts | --since main] [--map dist/
 npx sloptimize compare before-build after-build [--phase steady]
 ```
 
+A fixed camera cannot see what only a moving one shows. A drive script — the
+game's own, run on the recording's timeline — scripts the camera and input,
+and its hash keeps runs of different scripts apart:
+
+```bash
+npx sloptimize attach --launch http://localhost:5173 --drive bench/orbit.mjs --runs 3 --build $SHA
+# bench/orbit.mjs: export default async function drive({ phase, at, eval, key, drag, until }) { … }
+```
+
+A long session leaks where frame metrics cannot see: the heartbeat carries
+live GPU objects (created − deleted − collected, at the graphics API),
+three.js's `renderer.info.memory`, and the JS heap, and `report` reads them
+as trends (`▲ GPU buffers (live): 1200 → 1927 (+1500/h …) — GROWING: a
+dispose missed on a rebuild?`). `attach --heap-gc` reads the heap post-GC;
+`--heap-snapshots` writes a start and an end snapshot for DevTools.
+
+What did the run NEVER call? A coverage run counts every function's calls
+exactly — its own run, since coverage slows the page:
+
+```bash
+npx sloptimize attach --coverage --launch http://localhost:5173 --duration 60
+npx sloptimize coverage                     # loaded-but-idle modules, never-loaded files
+#   ◌ src/entities/TrafficLight.ts  14.2 KB  2/9 called — IDLE: loaded and sat (bench content missing?)
+#       never called: update:41, setPhase:88, …
+npx sloptimize coverage --since main        # every changed FUNCTION, called or not (exit 1 if not)
+```
+
 `touched` exits 1 when a changed code file received no samples: a clean
 A/B on a scene that never ran the new code path is a rubber stamp, not a
 measurement. `compare` reads every metric per run — frame median/p95/body,
@@ -169,6 +197,27 @@ on a side is `unproven`. A frame delta can be noise while one section's
 it. When the frame moved ≥10% but the composition (section or function
 shares) did not, and the draw calls are equal, `compare` flags it as the
 machine, not the code.
+
+Frame time is half a verdict: a game can also report its own throughput,
+over its own clock, from the page —
+
+```js
+window.__sloptimizeCount('delivered', n);       // what the game did
+window.__sloptimizeClock('sim', simMs, 1000);   // how much game time passed
+```
+
+— and `report`, `compare` and `check` read it as a rate per game-second.
+Per wall second, a build that renders faster covers more game time and
+flatters itself; `report` says so when no clock was given (SPEC §3.11).
+
+Before any of that, `compare` checks that the two sides were measured under
+the same **conditions** — every run records its display refresh rate, GPU,
+drawing size, instrument (attached or in-app), run mode, sampler interval
+and phase mix (SPEC §3.8). Two sides that differ on any of them are
+refused, exit 3, with the difference named — a 60 Hz run against a 144 Hz
+run is a delta of displays, not of code. `--allow-mismatch` reads them
+anyway under a banner, for when the difference is the question. A run
+recorded before conditions existed is listed as unverified, not refused.
 
 Attach also sees a three.js page's scenes, through three's own devtools
 hook (`__THREE_DEVTOOLS__`: every `Scene` three constructs announces itself
@@ -409,7 +458,35 @@ never goes in a client bundle.
 ```
 
 ```bash
-npx sloptimize check              # exit 0 inside · 1 breached · 4 unmeasured
+npx sloptimize check              # exit 0 inside · 1 breached · 3 other conditions · 4 unmeasured
+```
+
+Budgets can name a phase and are then judged over a whole run — a build's
+runs, the median of them — which is what a gate after every build runs:
+
+```json
+{ "perf.budget.load.worst_ms": 500,
+  "perf.budget.steady.p95_ms": 40,
+  "perf.budget.*.frames_over_100ms_per_min": 2 }
+```
+
+```bash
+npx sloptimize attach --launch http://localhost:5173 --build $SHA --runs 3 --duration 60
+npx sloptimize check --build $SHA --min-runs 3     # 0 pass · 1 breach · 5 cannot judge (too few runs, unmeasured)
+npx sloptimize compare $BASE $SHA --fail-on-regression   # 1 regressed · 5 fewer than 3 runs a side · 3 the machine changed
+```
+
+Hitch budgets count frames over a FIXED bar (`frames_over_<N>ms_per_min`):
+detection is relative to the rolling median, so a uniformly slower build
+reports fewer hitches, and a relative hitch budget alone is refused. Too few
+runs is exit 5, never a pass (SPEC §7.1).
+
+A budget met at 144 Hz says nothing about 60 Hz. Say what the numbers were
+set for, and `check` refuses (exit 3) a measurement taken under anything
+else:
+
+```json
+{ "perf.budget.frame_ms_p95": 16.7, "perf.conditions": { "refreshHz": 60, "regime": "hardware" } }
 ```
 
 That exit code is what lets an agent self-iterate in a loop that terminates.
@@ -423,7 +500,8 @@ sloptimize census        per-entity costs + closed-vocabulary hints
 sloptimize history       the timeline: p95 / draw calls / hitches per time
                          bucket and per build, plus the fix ledger
 sloptimize compare A B   A/B by run: each metric vs its own noise floor
-                         (significant / within noise / unproven), host-load flag
+                         (significant / within noise / unproven), host-load flag;
+                         refused (exit 3) across conditions — --allow-mismatch
 sloptimize touched       did the run execute the changed files? (exit 1 if not)
 sloptimize fix           record a verified fix (title, issue, solution,
                          commit) with MEASURED before/after windows

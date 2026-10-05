@@ -220,12 +220,31 @@ Classification vocabulary (closed set, extensible only by spec change):
 `shader-compile` (programs delta > 0), `texture-upload` (textures delta > 0,
 programs 0), `spawn-burst` (spawned length above threshold),
 `gc-or-upload-by-elimination` (no counter moved), `long-render`
-(insideRenderMs dominates), `long-script` (frame delta dominates,
-insideRenderMs small), `host-attributed` (a span the HOST's own instrument
-measured inside the gap explains at least half of the frame's excess over
-its median — see below). Multiple guesses allowed, ranked. `confidence` is
-`low | medium | high` and the `evidence` string is mandatory — a guess
-without its reason is banned by principle 4.
+(insideRenderMs dominates), `gpu-bound` (`gpuMs` dominates), `long-script`
+(frame delta dominates, insideRenderMs small, and the GPU did not take it),
+`host-attributed` (a span the HOST's own instrument measured inside the gap
+explains at least half of the frame's excess over its median — see below).
+Multiple guesses allowed, ranked. `confidence` is `low | medium | high` and
+the `evidence` string is mandatory — a guess without its reason is banned by
+principle 4.
+
+`gpuMs` is OPTIONAL and its absence is not zero. `insideRenderMs` is wall
+time the CPU spent inside the render call, and on a GPU-bound frame that is
+small — the CPU queues the commands and returns, and the cost lands
+afterwards in the driver. A frame waiting on the GPU and a frame running a
+long script are therefore the same shape from the CPU's side, and a host that
+cannot measure the GPU sees both as `long-script`; that is the honest verdict
+for it, and it keeps its old confidence. A host that CAN measure separates
+them, and the same number sharpens the other side: a long frame whose GPU was
+idle is `long-script` with confidence, not by elimination. `src/gpu.js`
+(`createGpuClock`) is the reference collector —
+`EXT_disjoint_timer_query_webgl2`, results a few frames late by design,
+discarded on `GPU_DISJOINT_EXT`, null where the extension is absent. A record
+carries `gpuMs` only when somebody counted, and `reclassify` keeps it in the
+verdict when a host re-seals its attribution. This answers "was the GPU the
+frame"; whether ANOTHER process held the GPU is a different question —
+`compare` flags it across two sides (uniform change, unchanged composition),
+and within one run it is not detected.
 
 `host-attributed` ranks FIRST whenever it applies, ahead of every
 counter-derived guess, and by-elimination is never appended behind it: a
@@ -436,10 +455,86 @@ A tier-0 page may also stamp its phase — `window.__sloptimizePhase =
 'steady'` — so a run with distinct workloads is keyed and filtered
 (`sloptimize issues --phase steady`) one phase at a time.
 
+**Recurrence.** A footprint that recurs on a timer carries `recurs:
+{periodSec, jitterSec, occurrences, gaps, missed, sessions}` — three ~600 ms
+frames at a 15 s interval is an autosave's signature, and "recurs every
+15.0 s ± 0.2" says timer, not player action, which is most of the
+diagnosis. Gaps are read only within one session and one page boot (an
+`armed` record restarts every timer); a gap of two or three periods is a
+missed occurrence (one under the detection bar; never more than three
+periods), gaps are taken per session (two players' timers interleave), and
+the longest period that explains ≥80% of the gaps with a spread under 10%
+of it wins. Four
+occurrences at least: three are two gaps, which any two events have.
+`issues` and the panel's Issues tab say it. A backgrounded tab's throttled
+timers are not modelled.
+
 Cloud path: the footprint is computed by the writer, so a service that
 ingests many clients' records dedupes on `footprint.id` from day one; the
 fold is the same code. The service is specified in the sloptimize-cloud repo
 (`docs/superpowers/specs/2026-09-02-sloptimize-cloud-design.md`).
+
+### 3.8 Run conditions — what a run was measured under, and the refusal
+
+Every false performance conclusion this tool has been party to was a
+comparability failure: an in-app frame body (26.37 ms) set beside an
+attached run's rAF interval (34.7 ms) read as "+27% attach overhead" — it
+was the second vsync on a 60 Hz display; a dev build sharing the GPU read as
+a +46% regression. So a run carries a **conditions block**, and every verb
+that sets two measurements side by side diffs the blocks first
+(`src/conditions.js`, one table for all of them).
+
+```json
+{ "type": "conditions", "at": "…", "session": "vmH2bFxdZhz8", "tier": 0,
+  "conditions": {
+    "v": 1, "instrument": "attach", "mode": "timing", "regime": "hardware",
+    "sampler": { "intervalUs": 10000 }, "headless": false,
+    "recorder": { "minHitchMs": 25, "slots": true }, "browser": "Chrome/131.0.6778.86",
+    "display": { "refreshHz": 60, "periodMs": 16.667, "from": "raf-cadence", "confirmed": true },
+    "gpu": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 …)",
+    "device": { "platform": "Windows", "cores": 16, "vw": 1600, "vh": 900, "dpr": 1, "…": "…" } } }
+```
+
+Attach writes the block into `runs/<session>.json` from the start, and a
+`conditions` ledger line when the page reports its half and on every change
+after (never phase-stamped: a `--phase` read must not drop it). The page's
+half: the **display refresh rate**, read off rAF intervals — timestamps are
+vsync-aligned, so the lowest common rate that explains ≥90% of a 120-frame
+window is the display's (`src/cadence.js`); a rate stands once two windows
+agree, and only rises on evidence (a steady 33.3 ms game reads 30 Hz until
+one frame lands on the single period). A variable-refresh display has no
+fixed period and says `refreshHz: null, cadence: "variable"`. The **GPU** is
+the renderer string of the game's own context (never a probe context), and
+it settles an `unknown` regime: a software rasterizer's name is `software`,
+anything else `hardware`. The **device** is `browserDevice()`, re-read each
+window so a resized window lands in the block (the block holds the last
+state; a mid-run resize is not itemised).
+
+A tier-1 host may write the same line itself; `refreshFromIntervals` and
+`createRefreshTracker` are exported for its frame ring. A run with no line
+still has what its records imply: `instrument` from its tier, `regime` from
+its profile lines, `phases` from what its records carry.
+
+**Material** — the comparison is refused: instrument (attach vs in-app),
+run mode (`timing` vs `coverage`), regime, display refresh, GPU (driver
+build numbers ignored), platform, CPU cores, drawing size (device pixels,
+beyond ±10%), headless, sampler interval, drive script, and the phase mix
+(skipped when `--phase` scoped both sides alike). **Minor** — said, not
+refused: browser version, hitch floor, instance-slot watch. A material
+field one side never recorded is **unverified**: listed, not refused —
+every ledger written before the block existed would otherwise be orphaned. A side whose
+own runs disagree is refused as mixed.
+
+`compare` exits **3** on a refusal (SPEC §6.3 gave 3 to "incomparable") and
+names each difference with why it matters; `--allow-mismatch` reads the
+deltas anyway under a banner. `check` refuses with 3 when `budgets.json`
+declares what its numbers were set for and the measurement differs:
+`"perf.conditions": { "refreshHz": 60, "regime": "hardware", "pixels":
+"1600x900" }` (keys are the table's: `instrument mode regime refreshHz gpu
+platform cores pixels headless samplerUs drive phases`). `report` prints
+the session's conditions, and when the median interval spans more than one
+period, the vsync note: which steps the interval is made of, and that an
+in-app frame timer measures the work, not the interval.
 
 ---
 
@@ -500,6 +595,133 @@ them (§3.3, §3.6); the ticker would only be guessing the same thing with
 less. `describeRecord(rec)` / `lineOf(rec)` are the pure half — the same
 line for a console or a host overlay — and bookkeeping records (`profile`,
 `heartbeat`, `armed`, `warm`, `answer`) are never lines.
+
+### 3.11 Game counters — throughput over the game's own clock
+
+Frame time is half a verdict. A field team shipped a frame-time win that
+cost throughput, and only their own `deliveredPerSimMinute` caught it. Any
+game has one: deliveries, requests served, entities processed, projectiles
+simulated. Two page globals, defined by attach before any page script (a
+tier-1 host puts the same fields on its `profile` lines):
+
+```js
+window.__sloptimizeCount('delivered', n);        // what the game did (default n = 1)
+window.__sloptimizeClock('sim', simMs, 1000);    // how much GAME time passed: value, units per second
+```
+
+Every profile window carries `tally` (totals in the window — every name seen
+so far, zero included: a counter that stopped is the finding), `clock:
+{name, seconds}` (the game clock's advance) and `window.seconds` (visible
+wall time). Rates divide by the **game clock** when one was supplied, and by
+wall time only when not. Wall time over-credits a faster build: rendering
+20% faster covers 20% more simulated world per wall second, so a fixed-
+timestep game's deliveries per wall second rise with no throughput gained —
+the frame win counted twice (the field team shipped this bug in their own
+harness, then fixed it to "per minute of sim time"). Per frame is wrong the
+other way. Pause, bullet time, a sim-speed control and a variable tick all
+need the clock; a networked game's "entities synced per second" may want
+wall time — the game decides by supplying a clock or not.
+
+Clock-normalised totals are kept apart from wall ones (a window before the
+game set its clock never enters a clock rate); a window whose clock went
+backwards (a new game, a reload) is dropped whole; a run that reported two
+clocks has no rate. The denominator joins the run's conditions
+(`counters.denominator`: `clock:sim` or `wall`) and compare refuses a wall
+side against a clock side (§3.8). `report` prints the rates and warns when
+they are per wall second; `compare` reads one row per rate (`rate delivered
+/sim-s`) against its noise floor — a significant FALL is a regression under
+`--fail-on-regression` unless the rate's budget is `{max}`; `check` judges
+`perf.budget.<phase>.rate.<name>: {min}` or `{max}` (§7.1).
+
+### 3.12 Coverage runs — what the run never CALLED
+
+`touched` asks whether a changed file ran, from samples. A field team's
+worst miss was the inverse: a whole subsystem never ran because the bench
+city contained none of it — and module granularity would have missed it as
+well. `TrafficLight.js` LOADED: the class was defined, its manager was
+constructed, and the manager's `tick()` ran every frame over an empty map.
+The module reads as executed; `TrafficLight.prototype.update` had **0
+calls**. The unit is the function.
+
+`attach --coverage` is its own run mode: V8 precise coverage, function
+granularity with call counts (`Profiler.startPreciseCoverage({callCount:
+true, detailed: false})`), started before the attach's reload, with no
+sampler. Precise coverage is not free (it keeps feedback vectors alive), so
+the run's conditions say `mode: "coverage"` and compare and check refuse it
+as a timing side (§3.8, §7.1); best-effort coverage is not a substitute — it
+can report a called function as uncalled. The page's old document's scripts
+(same URLs, a few frames of counts before the reload) are told apart by
+execution context. At stop, `coverage/<session>.json` holds every function
+of every script of the measured document: name, source line/column, end
+line, call count, size.
+
+`sloptimize coverage [--session|--build] [--map …]` reports, largest modules
+first: modules that **loaded and sat idle** (functions never called; ≥ half
+uncalled is marked IDLE — bench content missing?), modules loaded with
+nothing run, and repo files that **never loaded** (beside the loaded code;
+tests, tooling, declarations and dependencies excluded — a dead import, a
+stripped feature, or a feature the run never reached). `--changed` /
+`--since <rev>` is the exact `touched`: git's changed line ranges mapped to
+the innermost function each line sits in, with its call count — exit 1 when
+any changed function was never called or a changed file never loaded. A
+build's runs are summed. A bundle needs its map.
+
+### 3.13 Drive scripts — what the run DOES
+
+A harness that holds the camera still cannot test what only a moving camera
+shows: one field game's ghost instances (drawn at stale positions) survived
+every automated check and only a person saw them. Every game's camera and
+input are its own, so the script is the game's — a module run on the
+recording's timeline:
+
+```js
+// drive.mjs
+export default async function drive({ phase, at, eval: run, until, key, move, click, drag, wait, cdp, log }) {
+  await until('window.game?.ready');
+  await phase('orbit');
+  await run('game.camera.orbit({ seconds: 20 })');
+  await at(20, () => phase('steady'));
+  await key('w', { holdMs: 2000 });
+  await at(60);
+}
+```
+
+`attach --drive drive.mjs` starts it once the reloaded document has armed
+and loaded (never against the old one); the run ends when the script does,
+`--duration` is then its time limit (a drive cut short in one of `--runs N`
+stops the set — a partial run is not one of N equal runs), and a throw ends
+the run with exit 1. `drive` ledger records mark start, end and error. The
+script decides the workload, so its content hash (`sha256:…`, the name is
+not identity) joins the run's conditions and runs of two scripts — or one
+script against none — never compare (§3.8). MCP: `attach_start {drive}`.
+
+### 3.14 Long sessions — live GPU objects and the heap, as trends
+
+Players run long sessions, and a slow leak surfaces in reviews rather than
+reports. For a three.js game the leak is usually not the JS heap: merged
+static geometry rebuilt on every map edit, with a dispose that misses,
+grows the GPU's live buffers monotonically and is invisible to every frame
+metric. So the tier-0 heartbeat carries `gpuLive` — live objects per kind
+(buffers, textures, programs, shaders, framebuffers, renderbuffers, vertex
+arrays; WebGPU buffers and textures), counted at the graphics API as
+created − deleted − collected (a `FinalizationRegistry` counts out wrappers
+the page let go of) — and `three: {geometries, textures, programs}` from
+`renderer.info` when three's devtools hook hands the renderer over (not
+under `--no-slots`). The pipeline adds `heap: {usedMB, totalMB, source}`
+from `Runtime.getHeapUsage` to every heartbeat.
+
+A live heap reading is a sawtooth, so its trend is fit to the floor (the
+minimum of each three readings) and says so; `attach --heap-gc` forces a
+collection before each minute's reading (`source: "post-gc"` — the page
+cannot force one itself without `--expose-gc`, but the CDP connection can).
+`attach --heap-snapshots` writes `heap/<session>-start.heapsnapshot` (~30 s
+in) and `-end` at stop, for DevTools' Comparison view. Both pause the page,
+so both are conditions of the run (`soak`) and such a run never compares
+with an ordinary one. `report` prints each series' trend once a session has
+5 minutes and 5 beats: first → last, per hour, R², the share of rising
+steps, and `GROWING` when the fit explains the series (R² ≥ 0.6), BOTH
+halves of the session climb (a level load steps up once and holds — not a
+leak), and the rise is at least a tenth of the start (and 2 MB / 5 objects).
 
 ## 4. Census and attribution
 
@@ -754,11 +976,72 @@ sloptimize check                # reads profile.json (or runs a bench with --ben
   exit 1
 ```
 
-Exit `0` when all budgets pass, `1` on any breach, `4` when no measurement
-exists to check against (never a silent pass). `--counters-only` restricts to
+Exit `0` when all budgets pass, `1` on any breach, `3` when budgets.json's
+`perf.conditions` do not match what the measurement was taken under (§3.8),
+`4` when no measurement exists to check against (never a silent pass). `--counters-only` restricts to
 the exact grade for CI on GPU-less machines. In a project with no
 `perf.budget.*` tunables, `check` reports "no budgets declared" and exits 0
 with a warning — budgets are opt-in, but their absence is said out loud.
+
+### 7.1 The gate — per-phase budgets over whole runs, and "cannot judge"
+
+A snapshot of the last 120 frames cannot see a load-phase stall, and a
+global p95 dilutes a steady-state regression; both of one field week's real
+findings were phase ceilings. So a budget may name its phase —
+`perf.budget.<phase>.<metric>`, `*` for every phase the run carried — and
+`check --session <id>` / `--build <id>` (or any phased budget, which then
+judges profile.json's session) reads EVERY record of the run in that phase:
+
+| metric | read as | ceiling |
+|---|---|---|
+| `median_ms`, `p95_ms` | median of the phase's window medians / p95s | `n` or `{max}` |
+| `worst_ms` | exact from each window's longest frame (`frame.maxMs`); for older runs an interval — between the highest bar passed and the next — breach on the lower bound, pass on the upper, "cannot tell" between | |
+| `frames_over_<N>ms_per_min` | frames over a FIXED bar (50/100/200/500/1000 ms, counted in the page per window) per minute of visible phase time | |
+| `draw_calls`, `triangles`, `programs` | median / median / max | |
+| `section.<name>` | the host's loop section, median ms per frame (§3.2b) | |
+| `rate.<name>` | a counter's rate (§3.11) — `{min}` or `{max}`, never a bare number | |
+| `hitches_per_h` | RELATIVE hitches per hour — only beside a `median_ms`/`p95_ms` budget for the phase | |
+
+Hitch detection is relative (a frame over twice the rolling median), so a
+build uniformly 20% slower lifts its own bar and reports FEWER hitches; a
+relative hitch budget alone would pass while the game got worse — refused
+as a bad budgets.json (exit 2). `frames_over_<N>ms_per_min` counts against
+the absolute bar, and every row says which rule produced it.
+
+A build is several runs: each metric is read per run, the build's value is
+the median, the range is printed. `--min-runs N` declares how many it needs
+— of the build, and of EACH budget (a phase only one run reached is a
+reading of that run); fewer, or a budget nothing measured (`--allow-unmeasured` passes those),
+is **exit 5 — cannot judge**, never a pass: a gate that passes because it
+could not measure converts "unknown" into "fine" on every CI run. A
+coverage-mode run (§3.8) is refused as a timing measurement (exit 3), as
+are runs of one build measured under different conditions. Timing budgets
+are skipped, not judged, for a software renderer or under `--counters-only`.
+A runtime that stamps no session has its lines of a build cut into runs at
+5-minute silences, as `compare` does. Per-phase frame figures come from the
+run file's windows where it has them, from heartbeats otherwise.
+
+`compare <base> <new> --fail-on-regression` is the relative gate: exit 1
+when any directional metric moved significantly the worse way (frame ms,
+draw calls, triangles, hitches/h, sections, frames over a bar; a rate
+falling, unless its budget is `{max}`; function shares are composition,
+never a regression); exit 5 with fewer than `--min-runs` (default 3) runs a
+side, or with any directional metric measured by fewer runs than that;
+exit 3 when every timing regression is part of a uniform SLOWDOWN with
+unchanged composition and equal draw calls — the machine, not the code (a
+draw-call, triangle or rate regression beside it, or a timing row that moved
+well beyond the uniform scale, still exits 1; a uniform speedup never
+fails). The gate never judges sides measured under different conditions,
+`--allow-mismatch` or not. A coverage run recorded under the build's id
+is left out of the build's runs (named by `--session`, it is refused).
+An unknown `perf.*` key in budgets.json is exit 2 (a typo is not "no
+budget"); a file with no `perf.budget.*` row passes with the no-budgets
+warning, as an absent file does. `attach --runs N --duration <s>` records the N runs
+of one build in one command.
+
+Exit codes, `check`: 0 pass · 1 breach · 2 bad budgets.json · 3 incomparable
+· 4 no measurement · 5 cannot judge. `compare --fail-on-regression`: 0 pass ·
+1 regressed · 3 incomparable · 4 unmeasured · 5 too few runs.
 
 ---
 
