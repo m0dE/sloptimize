@@ -461,8 +461,10 @@ frames at a 15 s interval is an autosave's signature, and "recurs every
 15.0 s ± 0.2" says timer, not player action, which is most of the
 diagnosis. Gaps are read only within one session and one page boot (an
 `armed` record restarts every timer); a gap of two or three periods is a
-missed occurrence (one under the detection bar), and the longest period that
-explains ≥80% of the gaps with a spread under 10% of it wins. Four
+missed occurrence (one under the detection bar; never more than three
+periods), gaps are taken per session (two players' timers interleave), and
+the longest period that explains ≥80% of the gaps with a spread under 10%
+of it wins. Four
 occurrences at least: three are two gaps, which any two events have.
 `issues` and the panel's Issues tab say it. A backgrounded tab's throttled
 timers are not modelled.
@@ -717,9 +719,9 @@ in) and `-end` at stop, for DevTools' Comparison view. Both pause the page,
 so both are conditions of the run (`soak`) and such a run never compares
 with an ordinary one. `report` prints each series' trend once a session has
 5 minutes and 5 beats: first → last, per hour, R², the share of rising
-steps, and `GROWING` when the fit explains the series (R² ≥ 0.6), seven in
-ten steps rise, and the rise is at least a tenth of the start (and 2 MB /
-5 objects).
+steps, and `GROWING` when the fit explains the series (R² ≥ 0.6), BOTH
+halves of the session climb (a level load steps up once and holds — not a
+leak), and the rise is at least a tenth of the start (and 2 MB / 5 objects).
 
 ## 4. Census and attribution
 
@@ -993,7 +995,7 @@ judges profile.json's session) reads EVERY record of the run in that phase:
 | metric | read as | ceiling |
 |---|---|---|
 | `median_ms`, `p95_ms` | median of the phase's window medians / p95s | `n` or `{max}` |
-| `worst_ms` | an interval: the longest hitch when every frame over the highest bar passed was recorded, else between that bar and the next — breach on the lower bound, pass on the upper, "cannot tell" between | |
+| `worst_ms` | exact from each window's longest frame (`frame.maxMs`); for older runs an interval — between the highest bar passed and the next — breach on the lower bound, pass on the upper, "cannot tell" between | |
 | `frames_over_<N>ms_per_min` | frames over a FIXED bar (50/100/200/500/1000 ms, counted in the page per window) per minute of visible phase time | |
 | `draw_calls`, `triangles`, `programs` | median / median / max | |
 | `section.<name>` | the host's loop section, median ms per frame (§3.2b) | |
@@ -1007,22 +1009,30 @@ as a bad budgets.json (exit 2). `frames_over_<N>ms_per_min` counts against
 the absolute bar, and every row says which rule produced it.
 
 A build is several runs: each metric is read per run, the build's value is
-the median, the range is printed. `--min-runs N` declares how many it needs;
-fewer, or a budget nothing measured (`--allow-unmeasured` passes those),
+the median, the range is printed. `--min-runs N` declares how many it needs
+— of the build, and of EACH budget (a phase only one run reached is a
+reading of that run); fewer, or a budget nothing measured (`--allow-unmeasured` passes those),
 is **exit 5 — cannot judge**, never a pass: a gate that passes because it
 could not measure converts "unknown" into "fine" on every CI run. A
 coverage-mode run (§3.8) is refused as a timing measurement (exit 3), as
-are runs of one build measured under different conditions.
+are runs of one build measured under different conditions. Timing budgets
+are skipped, not judged, for a software renderer or under `--counters-only`.
+A runtime that stamps no session has its lines of a build cut into runs at
+5-minute silences, as `compare` does. Per-phase frame figures come from the
+run file's windows where it has them, from heartbeats otherwise.
 
 `compare <base> <new> --fail-on-regression` is the relative gate: exit 1
 when any directional metric moved significantly the worse way (frame ms,
 draw calls, triangles, hitches/h, sections, frames over a bar; a rate
 falling, unless its budget is `{max}`; function shares are composition,
 never a regression); exit 5 with fewer than `--min-runs` (default 3) runs a
-side; exit 3 when every timing regression is part of a uniform SLOWDOWN
-with unchanged composition and equal draw calls — the machine, not the code
-(a draw-call, triangle or rate regression beside it still exits 1; a
-uniform speedup never fails). A coverage run recorded under the build's id
+side, or with any directional metric measured by fewer runs than that;
+exit 3 when every timing regression is part of a uniform SLOWDOWN with
+unchanged composition and equal draw calls — the machine, not the code (a
+draw-call, triangle or rate regression beside it, or a timing row that moved
+well beyond the uniform scale, still exits 1; a uniform speedup never
+fails). The gate never judges sides measured under different conditions,
+`--allow-mismatch` or not. A coverage run recorded under the build's id
 is left out of the build's runs (named by `--session`, it is refused).
 An unknown `perf.*` key in budgets.json is exit 2 (a typo is not "no
 budget"); a file with no `perf.budget.*` row passes with the no-budgets

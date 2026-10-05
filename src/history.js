@@ -333,20 +333,6 @@ export function buildFix(records, opts = {}) {
   return fix;
 }
 
-/**
- * THE ISSUE CATALOGUE (SPEC §3.7): every incident record in `records`,
- * grouped by footprint — the same cause across builds, sessions and days is
- * ONE row — with how often it happened, when first and last, on which builds,
- * how bad at worst, and which fixes were applied to it (a fix names the
- * footprints it addresses in `footprints`). Records stamped by the writer keep
- * their footprint; older lines are derived here, so the catalogue reaches back
- * to before footprints existed.
- *
- * `from`/`to` scope the occurrences counted (ms or ISO; either end open);
- * `phase` counts only occurrences stamped with that phase (`?` for records
- * with none) — a run with a spawn flood and a steady state is two readings;
- * `now` is for `lastAgoMs`. Sorted most-frequent first; ties by most recent.
- */
 // ── Recurrence: a footprint on a timer (SPEC §3.7) ───────────────────────────
 // Three ~600 ms frames at a 15 s interval is an autosave's signature, and
 // "recurs every 15.0 s ± 0.2" is most of the diagnosis — a timer, not a
@@ -364,14 +350,18 @@ export const RECUR_MIN = 4;
  */
 export function recurrenceOf(occ, boots = new Map()) {
   if (occ.length < RECUR_MIN) return undefined;
-  const sorted = [...occ].sort((a, b) => a.t - b.t);
+  // Per session first: two players' timers interleave in time.
+  const bySession = new Map();
+  for (const o of occ) (bySession.get(o.session ?? '') ?? bySession.set(o.session ?? '', []).get(o.session ?? '')).push(o.t);
   const gaps = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const a = sorted[i - 1], b = sorted[i];
-    if ((a.session ?? '') !== (b.session ?? '')) continue;
-    if ((boots.get(a.session ?? '') ?? []).some((t) => t > a.t && t < b.t)) continue;
-    const g = (b.t - a.t) / 1000;
-    if (g > 0 && g <= 3600) gaps.push(g);
+  for (const [session, ts] of bySession) {
+    ts.sort((x, y) => x - y);
+    const reboots = boots.get(session) ?? [];
+    for (let i = 1; i < ts.length; i++) {
+      if (reboots.some((t) => t > ts[i - 1] && t < ts[i])) continue;
+      const g = (ts[i] - ts[i - 1]) / 1000;
+      if (g > 0 && g <= 3600) gaps.push(g);
+    }
   }
   if (gaps.length < RECUR_MIN - 1) return undefined;
   const med = [...gaps].sort((x, y) => x - y)[gaps.length >> 1];
@@ -381,7 +371,7 @@ export function recurrenceOf(occ, boots = new Map()) {
     const p = med / k;
     if (p < 0.5) break;
     const tol = Math.max(0.3, 0.06 * p);
-    const fit = gaps.map((g) => ({ g, n: Math.round(g / p) })).filter(({ g, n }) => n >= 1 && Math.abs(g - n * p) <= tol * Math.max(1, Math.sqrt(n)));
+    const fit = gaps.map((g) => ({ g, n: Math.round(g / p) })).filter(({ g, n }) => n >= 1 && n <= 3 && Math.abs(g - n * p) <= tol * Math.max(1, Math.sqrt(n)));
     if (fit.length < RECUR_MIN - 1 || fit.length / gaps.length < 0.8) continue;
     const period = fit.reduce((a, x) => a + x.g, 0) / fit.reduce((a, x) => a + x.n, 0);
     const devs = fit.map(({ g, n }) => g / n - period);
@@ -393,6 +383,20 @@ export function recurrenceOf(occ, boots = new Map()) {
   return undefined;
 }
 
+/**
+ * THE ISSUE CATALOGUE (SPEC §3.7): every incident record in `records`,
+ * grouped by footprint — the same cause across builds, sessions and days is
+ * ONE row — with how often it happened, when first and last, on which builds,
+ * how bad at worst, and which fixes were applied to it (a fix names the
+ * footprints it addresses in `footprints`). Records stamped by the writer keep
+ * their footprint; older lines are derived here, so the catalogue reaches back
+ * to before footprints existed.
+ *
+ * `from`/`to` scope the occurrences counted (ms or ISO; either end open);
+ * `phase` counts only occurrences stamped with that phase (`?` for records
+ * with none) — a run with a spawn flood and a steady state is two readings;
+ * `now` is for `lastAgoMs`. Sorted most-frequent first; ties by most recent.
+ */
 export function buildIssues(records, opts = {}) {
   const lo = opts.from !== undefined && opts.from !== null && opts.from !== '' ? asMs(opts.from) : -Infinity;
   const hi = opts.to !== undefined && opts.to !== null && opts.to !== '' ? asMs(opts.to) : Infinity;

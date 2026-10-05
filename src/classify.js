@@ -147,7 +147,10 @@ export function classifyHitch(h) {
         // draw no conclusion from it, which is what the honest version of
         // "inconclusive" looks like.
         + (gpu === null ? ''
-          : gpu < h.frameMs * 0.25 ? `; the GPU took ${gpu.toFixed(1)}ms, so the drawing was not it`
+          // An idle GPU rules out the GPU, not the CPU's own render work: say
+          // which, when the render call itself took a real share.
+          : gpu < h.frameMs * 0.25 ? (inside < h.frameMs * 0.25 ? `; the GPU took ${gpu.toFixed(1)}ms, so the drawing was not it`
+            : `; the GPU took ${gpu.toFixed(1)}ms, so the GPU was not it — ${inside.toFixed(1)}ms of the frame was the CPU inside the render call`)
             : `; the GPU took ${gpu.toFixed(1)}ms of it, which is neither small nor most of the frame`)
         + (h.memorySampled ? '' : ' (performance.memory unavailable, downgrading)'),
     });

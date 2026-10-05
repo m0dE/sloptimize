@@ -357,7 +357,8 @@ globalThis.__sloptimizeCount = function (name, n = 1) {
 globalThis.__sloptimizeClock = function (name, t, perSecond = 1) {
   const v = Number(t), per = Number(perSecond);
   if (typeof name !== 'string' || !name || !Number.isFinite(v) || !(per > 0)) return;
-  if (name !== clockName) { clockName = name.slice(0, 40); clockScale = per; clockStart = v; clockLast = v; return; }
+  const k = name.slice(0, 40);
+  if (k !== clockName) { clockName = k; clockScale = per; clockStart = v; clockLast = v; return; }
   if (v < clockLast) clockReset = true;   // a new game, a reload: this window has no honest denominator
   clockLast = v;
 };
@@ -387,7 +388,7 @@ const PROFILE_EVERY = 120;
 // The slot watch, offset half a window from the profile so the two never
 // share a frame.
 const SLOTS_EVERY = 120, SLOTS_AT = 60;
-const win = { frames: 0, draws: 0, tris: 0, ms: 0, over: new Array(16).fill(0) };
+const win = { frames: 0, draws: 0, tris: 0, ms: 0, max: 0, over: new Array(16).fill(0) };
 // Frames over FIXED bars, per window: the absolute count a hitch budget needs.
 // Detection is relative (2× the rolling median), so a build that is uniformly
 // slower clears its own bar less often and reports FEWER hitches; a frame over
@@ -411,6 +412,7 @@ function tick(ts) {
   const lt = longTaskMs;
   gpu.draws = 0; gpu.triangles = 0; gpu.creates = 0; gpu.uploadKB = 0; longTaskMs = 0;
   win.frames++; win.draws += draws; win.tris += tris; win.ms += frameMs;
+  if (frameMs > win.max) win.max = frameMs;
   for (let i = 0; i < OVER_BARS.length; i++) if (frameMs > OVER_BARS[i]) win.over[i]++;
   beat.frames++; beat.draws += draws; beat.tris += tris;
 
@@ -439,13 +441,15 @@ function tick(ts) {
     const over = {};
     for (let i = 0; i < OVER_BARS.length; i++) over[OVER_BARS[i]] = win.over[i];
     emit({ type: 'profile', at: new Date().toISOString(),
-      frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2) },
+      // maxMs: the window's longest frame — the exact worst, whatever the
+      // relative hitch bar recorded.
+      frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2), maxMs: +win.max.toFixed(1) },
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       ...(takeCounters() ?? {}),
       tier: 0 });
-    win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.over.fill(0);
+    win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0);
     updateConditions();
   }
   if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {

@@ -27,6 +27,8 @@
 // Pure: the CLI hands records and run files in.
 
 import { emptyTally, foldTally, ratesOf } from './runs.js';
+import { CONDITION_FIELDS } from './conditions.js';
+import { UNIFORM_RATIO } from './compare.js';
 
 const median = (v) => {
   if (!v.length) return undefined;
@@ -58,14 +60,20 @@ const METRICS = {
 export function parseBudgets(budgets = {}) {
   const rows = [], errors = [];
   for (const [key, raw] of Object.entries(budgets ?? {})) {
-    if (key === 'perf.conditions') continue;
+    if (key === 'perf.conditions') {
+      // What the budgets were set for: an object of known condition keys. A
+      // typo here would otherwise refuse every run as "other conditions".
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) errors.push(`perf.conditions: an object of conditions, e.g. { "refreshHz": 60, "regime": "hardware" }`);
+      else for (const k of Object.keys(raw)) if (!CONDITION_FIELDS.some((f) => f.key === k)) errors.push(`perf.conditions.${k}: not a condition — ${CONDITION_FIELDS.map((f) => f.key).join(', ')}`);
+      continue;
+    }
     // A typo must not read as "no budget": a perf.* key this file does not
     // know is an error, not a skip (other tools' keys pass through).
     if (!key.startsWith('perf.budget.')) { if (key.startsWith('perf.')) errors.push(`${key}: unknown key — budgets are perf.budget.*, conditions perf.conditions`); continue; }
     const lim = typeof raw === 'number' ? { max: raw } : raw && typeof raw === 'object' && (typeof raw.max === 'number' || typeof raw.min === 'number') ? { ...(typeof raw.max === 'number' ? { max: raw.max } : {}), ...(typeof raw.min === 'number' ? { min: raw.min } : {}) } : null;
     if (!lim) { errors.push(`${key}: a budget is a number (a ceiling) or {max}/{min}`); continue; }
     const rest = key.slice('perf.budget.'.length);
-    if (LEGACY[rest]) { rows.push({ key, phase: null, metric: LEGACY[rest], ...lim }); continue; }
+    if (Object.hasOwn(LEGACY, rest)) { rows.push({ key, phase: null, metric: LEGACY[rest], ...lim }); continue; }
     const dot = rest.indexOf('.');
     if (dot < 0) { errors.push(`${key}: unknown budget — global keys are ${Object.keys(LEGACY).map((k) => `perf.budget.${k}`).join(', ')}; per phase, perf.budget.<phase>.<metric>`); continue; }
     const phase = rest.slice(0, dot), metric = rest.slice(dot + 1);
@@ -83,7 +91,7 @@ export function parseBudgets(budgets = {}) {
       rows.push({ key, phase, metric: 'frames_over', bar: +over[1], ...lim });
       continue;
     }
-    if (!METRICS[metric]) { errors.push(`${key}: unknown metric "${metric}" — ${[...Object.keys(METRICS), 'frames_over_<N>ms_per_min', 'section.<name>', 'rate.<name>'].join(', ')}`); continue; }
+    if (!Object.hasOwn(METRICS, metric)) { errors.push(`${key}: unknown metric "${metric}" — ${[...Object.keys(METRICS), 'frames_over_<N>ms_per_min', 'section.<name>', 'rate.<name>'].join(', ')}`); continue; }
     rows.push({ key, phase, metric, ...lim });
   }
   // The relative hitch count inverts under a uniform slowdown: only beside a
@@ -104,7 +112,7 @@ export function runPhaseMetrics(records = [], run = null) {
   const ph = new Map();
   const at = (k) => {
     const key = typeof k === 'string' && k ? k : '?';
-    return ph.get(key) ?? ph.set(key, { medians: [], p95s: [], calls: [], tris: [], programs: [], hitches: 0, worst: undefined, hitchMs: [], seconds: 0, over: null, sections: new Map(), tally: emptyTally(), times: [] }).get(key);
+    return ph.get(key) ?? ph.set(key, { medians: [], p95s: [], calls: [], tris: [], programs: [], hitches: 0, worst: undefined, hitchMs: [], windowMax: undefined, hb: { medians: [], p95s: [], calls: [] }, seconds: 0, over: null, sections: new Map(), tally: emptyTally(), times: [] }).get(key);
   };
   const addOver = (b, over, seconds) => {
     if (!over || !(seconds > 0)) return;
@@ -122,9 +130,11 @@ export function runPhaseMetrics(records = [], run = null) {
       b.hitchMs.push(r.frameMs);
       if (b.worst === undefined || r.frameMs > b.worst) b.worst = r.frameMs;
     } else if (r.type === 'heartbeat') {
-      if (typeof r.medianFrameMs === 'number') b.medians.push(r.medianFrameMs);
-      if (typeof r.p95Ms === 'number') b.p95s.push(r.p95Ms);
-      if (typeof r.calls === 'number') b.calls.push(r.calls);
+      // Held apart: a heartbeat's frame figures are a rolling ring, and a run
+      // file's (every window of the phase) win where both exist — as compare reads them.
+      if (typeof r.medianFrameMs === 'number') b.hb.medians.push(r.medianFrameMs);
+      if (typeof r.p95Ms === 'number') b.hb.p95s.push(r.p95Ms);
+      if (typeof r.calls === 'number') b.hb.calls.push(r.calls);
       if (typeof r.triangles === 'number') b.tris.push(r.triangles);
       if (typeof r.programs === 'number') b.programs.push(r.programs);
     } else if (r.type === 'profile') {
@@ -134,6 +144,7 @@ export function runPhaseMetrics(records = [], run = null) {
       if (typeof r.frame?.medianMs === 'number') b.medians.push(r.frame.medianMs);
       if (typeof r.frame?.p95Ms === 'number') b.p95s.push(r.frame.p95Ms);
       if (typeof r.render?.calls === 'number') b.calls.push(r.render.calls);
+      if (typeof r.frame?.maxMs === 'number' && !(b.windowMax >= r.frame.maxMs)) b.windowMax = r.frame.maxMs;
       for (const [k, v] of Object.entries(r.sections ?? {})) if (typeof v === 'number') (b.sections.get(k) ?? b.sections.set(k, []).get(k)).push(v);
       addOver(b, r.over, r.window?.seconds);
       foldTally(b.tally, r);
@@ -149,10 +160,14 @@ export function runPhaseMetrics(records = [], run = null) {
       if (typeof p.frame.calls === 'number') b.calls.push(p.frame.calls);
     }
     if (p.over && p.seconds > 0) addOver(b, p.over, p.seconds);
+    if (typeof p.maxMs === 'number' && !(b.windowMax >= p.maxMs)) b.windowMax = p.maxMs;
     if (p.counters) foldTally(b.tally, p.counters);
   }
   const out = new Map();
   for (const [k, b] of ph) {
+    if (!b.medians.length) b.medians.push(...b.hb.medians);
+    if (!b.p95s.length) b.p95s.push(...b.hb.p95s);
+    if (!b.calls.length) b.calls.push(...b.hb.calls);
     const m = {};
     if (b.medians.length) m.median_ms = r2(median(b.medians));
     if (b.p95s.length) m.p95_ms = r2(median(b.p95s));
@@ -167,7 +182,12 @@ export function runPhaseMetrics(records = [], run = null) {
     // recorded. Otherwise the worst lies between that bar (or the longest
     // hitch, if higher) and the next bar up — and a budget inside that
     // interval cannot be judged either way.
-    if (b.over) {
+    if (b.windowMax !== undefined) {
+      // Every window's longest frame was recorded: the worst is exact (a
+      // hitch credited to this phase from a window credited elsewhere still counts).
+      const w = r2(Math.max(b.windowMax, b.worst ?? 0));
+      m.worst = { lo: w, hi: w };
+    } else if (b.over) {
       const bars = Object.keys(b.over).map(Number).sort((x, y) => x - y);
       const passed = bars.filter((x) => b.over[x] > 0).at(-1);
       const next = passed === undefined ? bars[0] : bars.find((x) => x > passed) ?? Infinity;
@@ -215,9 +235,14 @@ function judgeWorst(row, phase, runs, phases, real) {
     return res;
   }
   const lo = r2(median(ivs.map((x) => x.lo))), hi = median(ivs.map((x) => x.hi));
+  res.n = ivs.length;
   if (ivs.length > 1) res.runs = { n: ivs.length, lo: r2(Math.min(...ivs.map((x) => x.lo))), hi: r2(Math.max(...ivs.map((x) => x.lo))) };
   res.value = lo;
-  if (hi !== lo) { res.upTo = Number.isFinite(hi) ? hi : null; res.note = `between ${lo} and ${Number.isFinite(hi) ? hi : '∞'} ms: a frame passed a fixed bar without being recorded as a hitch`; }
+  if (hi !== lo) {
+    res.upTo = Number.isFinite(hi) ? hi : null;
+    res.note = lo === 0 ? `every frame under ${hi} ms (no fixed bar passed)`
+      : `between ${lo} and ${Number.isFinite(hi) ? hi : '∞'} ms: a frame passed a fixed bar without being recorded as a hitch`;
+  }
   const max = row.max ?? Infinity;
   if (lo > max) { res.verdict = `over by ${(lo / max).toFixed(1)}x`; res.breached = true; }
   else if (hi <= max) res.verdict = 'inside';
@@ -276,6 +301,7 @@ export function judgeBudgets(rows, runs) {
       }
       const v = r2(median(vals));
       res.value = v;
+      res.n = vals.length;   // the runs that measured it — a build's other runs may not have had the phase
       if (vals.length > 1) res.runs = { n: vals.length, lo: r2(Math.min(...vals)), hi: r2(Math.max(...vals)) };
       const over = row.max !== undefined && v > row.max, under = row.min !== undefined && v < row.min;
       res.verdict = over ? `over by ${(row.max > 0 ? v / row.max : Infinity).toFixed(1)}x` : under ? `under by ${(v > 0 ? row.min / v : Infinity).toFixed(1)}x` : 'inside';
@@ -311,13 +337,21 @@ export function regressionGate(cmp, { minRuns = 3, rateDir = {} } = {}) {
   if (na < minRuns || nb < minRuns) {
     return { verdict: 'insufficient', regressions: [], why: `${na} run(s) on A, ${nb} on B — the gate needs ${minRuns} a side (--min-runs): a noise floor from fewer runs is a guess, and a gate that passes because it could not measure is no gate` };
   }
+  // Per metric too: a run that did not measure a metric is not a run of it.
+  const thin = cmp.rows.filter((r) => worseDirection(r.metric, rateDir) !== 0 && Math.min(r.a.n, r.b.n) < minRuns);
+  if (thin.length) {
+    return { verdict: 'insufficient', regressions: [], why: `${thin.map((r) => `${r.metric} (${r.a.n}/${r.b.n} runs)`).join(', ')} measured by fewer than ${minRuns} runs a side (--min-runs)` };
+  }
   const regressions = cmp.rows.filter((r) => r.verdict === 'significant' && worseDirection(r.metric, rateDir) * Math.sign(r.delta) > 0);
   if (!regressions.length) return { verdict: 'pass', regressions };
   // A uniform SLOWDOWN with unchanged composition is the machine: its timing
   // regressions are not the code's. What timing cannot explain — draw calls,
   // triangles, a rate — still regressed. A speedup is never this.
   if (cmp.hostSuspect && cmp.hostSuspect.ratio > 1) {
-    const kept = regressions.filter((r) => /^(draw calls|triangles|rate )/.test(r.metric));
+    // Kept: what timing cannot explain, and any timing row that moved well
+    // beyond the uniform scale (a p95 that doubled inside a 12% slowdown).
+    const beyond = (r) => r.a.median > 0 && r.b.median / r.a.median > cmp.hostSuspect.ratio * UNIFORM_RATIO;
+    const kept = regressions.filter((r) => /^(draw calls|triangles|rate )/.test(r.metric) || beyond(r));
     return kept.length ? { verdict: 'regressed', regressions: kept, note: 'timing moved uniformly (the machine?); these did not' }
       : { verdict: 'machine', regressions, why: 'a uniform slowdown with unchanged composition — the machine changed, not the code; re-measure on a quiet machine' };
   }

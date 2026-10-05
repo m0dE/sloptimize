@@ -269,8 +269,10 @@ export function createIncidentPipeline(opts) {
       for (const f of sc.functions ?? []) {
         const r = f.ranges?.[0];
         if (!r) continue;
-        const [line, col] = pos(r.startOffset), [endLine] = pos(Math.max(r.startOffset, r.endOffset - 1));
-        fns.push([f.functionName || '', line, col, endLine, r.count, r.endOffset - r.startOffset]);
+        const [line, col] = pos(r.startOffset), [endLine, endCol] = pos(Math.max(r.startOffset, r.endOffset - 1));
+        // [name, line, col, endLine, count, size, endCol]: the end column lets a
+        // source map place the function's LAST position, not its end line's first.
+        fns.push([f.functionName || '', line, col, endLine, r.count, r.endOffset - r.startOffset, endCol]);
       }
       scripts.push({ url: sc.url, size: src.length || Math.max(0, ...fns.map((x) => x[5])), fns });
     }
@@ -326,7 +328,10 @@ export function createIncidentPipeline(opts) {
     profiling = true;
     arm();
   }
-  async function stop() {
+  // stop() twice (a signal during the loop's own stop) is one stop.
+  let stopping = null;
+  function stop() { return (stopping ??= doStop()); }
+  async function doStop() {
     disarm();
     if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
     if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));

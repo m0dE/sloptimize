@@ -300,6 +300,15 @@ if (cmd === 'check') {
     else if (buildArg) sessions = [...new Set([...records.filter((r) => r.build === buildArg).map((r) => r.session), ...runFiles.filter((r) => r.build === buildArg).map((r) => r.session)].filter(Boolean))];
     else sessions = profile?.session ? [profile.session] : [];
     sessions = sessions.filter((s) => records.some((r) => r.session === s) || runFiles.some((r) => r.session === s));
+    // A runtime that stamps no session (the node server, older hosts): its
+    // lines of the build are cut into runs at 5-minute silences, as compare does.
+    if (buildArg) {
+      const loose = records.filter((r) => r.build === buildArg && !r.session && Number.isFinite(Date.parse(r.at))).sort((x, y) => Date.parse(x.at) - Date.parse(y.at));
+      let cut = [], n = 0;
+      const flush = () => { if (cut.length) { const id = `(run ${++n})`; for (const r of cut) r.session = id; sessions.push(id); } cut = []; };
+      for (const r of loose) { if (cut.length && Date.parse(r.at) - Date.parse(cut.at(-1).at) > 5 * 60_000) flush(); cut.push(r); }
+      flush();
+    }
     if (!sessions.length) {
       out({ error: 'no measured run' }, sessionArg || buildArg ? `no run recorded for ${sessionArg ? `session ${sessionArg}` : `build ${buildArg}`}` : 'per-phase budgets judge a whole run — and profile.json names no session: pass --session <id> or --build <id>');
       process.exit(4);
@@ -330,18 +339,30 @@ if (cmd === 'check') {
     if (!mixed.comparable) refuse(conds[0], mixed, `the ${runs.length} runs were measured under different conditions`);
     const expect = want && typeof want === 'object' ? C.expectConditions(conds[0], want) : null;
     if (expect && !expect.comparable) refuse(conds[0], expect, 'budgets.json\'s perf.conditions do not match what this measurement was taken under');
-    const j = G.judgeBudgets(parsed.rows, runs.map((r) => r.metrics));
+    // Timings from a software rasterizer (or --counters-only) are not judged.
+    const countersOnly = args.includes('--counters-only') || conds.some((c) => c.regime === 'software');
+    const TIMING = new Set(['median_ms', 'p95_ms', 'worst_ms', 'frames_over', 'hitches_per_h', 'section']);
+    const judged = countersOnly ? parsed.rows.filter((r) => !TIMING.has(r.metric)) : parsed.rows;
+    const j = G.judgeBudgets(judged, runs.map((r) => r.metrics));
+    if (countersOnly) for (const r of parsed.rows.filter((x) => TIMING.has(x.metric))) j.results.push({ budget: r.key, phase: r.phase, metric: r.metric, value: null, skipped: true, verdict: 'skipped (counters-only: timing from a software renderer is not a timing)' });
+    // A budget only some runs measured (a phase one run never reached) is a
+    // reading of those runs, not of the build.
+    const thin = j.results.filter((r) => r.value !== null && r.n !== undefined && r.n < minRuns);
     // Too few runs, or a budget nothing measured: the gate cannot judge, and
     // says so with its own exit code — never a pass by default.
-    const insufficient = runs.length < minRuns ? `${runs.length} run(s), --min-runs ${minRuns}` : j.unmeasured && !args.includes('--allow-unmeasured') ? `${j.unmeasured} budget(s) unmeasured (--allow-unmeasured to pass them)` : null;
-    const fmtV = (r) => (r.value === null ? '—' : `${r.value}${r.runs ? ` [${r.runs.lo}–${r.runs.hi}]` : ''}`);
+    const insufficient = runs.length < minRuns ? `${runs.length} run(s), --min-runs ${minRuns}`
+      : thin.length ? `${thin.map((r) => `${r.budget} measured in ${r.n} of ${runs.length} run(s)`).join(', ')} — --min-runs ${minRuns}`
+        : j.unmeasured && !args.includes('--allow-unmeasured') ? `${j.unmeasured} budget(s) unmeasured (--allow-unmeasured to pass them)` : null;
+    const fmtV = (r) => (r.value === null ? '—'
+      : r.upTo !== undefined ? (r.value === 0 ? `< ${r.upTo ?? '∞'}` : `${r.value}–${r.upTo ?? '∞'}`)   // a worst frame known as an interval
+        : `${r.value}${r.runs ? ` [${r.runs.lo}–${r.runs.hi}]` : ''}`);
     const lim = (r) => (r.max !== undefined ? `≤ ${r.max}` : `≥ ${r.min}`);
     out({ mode: 'run', sessions, ...(buildArg ? { build: buildArg } : {}), conditions: conds[0], checked: j.results.length, breached: j.breached, unmeasured: j.unmeasured,
       ...(insufficient ? { insufficient } : {}), ...(expect?.unverified.length ? { unverified: expect.unverified } : {}), results: j.results },
       [`check ${buildArg ? `build ${buildArg}` : `session ${sessions[0]}`} — ${runs.length} run(s), judged per phase over the whole run`,
         `measured under: ${C.describeConditions(conds[0])}`,
         ...(expect?.unverified.length ? [`  ? perf.conditions unverified — not recorded by this run: ${expect.unverified.map((u) => u.label).join(', ')}`] : []),
-        ...j.results.map((r) => `  ${r.budget.padEnd(40)} ${fmtV(r).padStart(18)} ${lim(r).padEnd(10)} ${r.breached ? '✗ ' : ''}${r.verdict}${r.rule ? `  · ${r.rule}` : ''}${r.note ? `  · ${r.note}` : ''}`),
+        ...j.results.map((r) => `  ${r.budget.padEnd(40)} ${fmtV(r).padStart(18)} ${(r.skipped ? '' : lim(r)).padEnd(10)} ${r.breached ? '✗ ' : ''}${r.verdict}${r.rule ? `  · ${r.rule}` : ''}${r.note ? `  · ${r.note}` : ''}`),
         `budgets: ${j.results.length} checked, ${j.breached} breached${j.unmeasured ? `, ${j.unmeasured} unmeasured` : ''}`,
         ...(insufficient ? [`cannot judge: ${insufficient} — exit 5`] : [])].join('\n'));
     process.exit(j.breached > 0 ? 1 : insufficient ? 5 : 0);
@@ -632,6 +653,8 @@ if (cmd === 'compare') {
     for (const [k, v] of Object.entries(budgets)) { const m = /^perf\.budget\.[^.]+\.rate\.(.+)$/.exec(k); if (m && v && typeof v === 'object') rateDir[m[1]] = typeof v.max === 'number' ? 'max' : 'min'; }
     const { regressionGate } = await import('../src/gate.js');
     g = regressionGate(c, { minRuns, rateDir });
+    // --allow-mismatch reads the deltas; the gate never judges across conditions.
+    if (!c.conditions.comparable) g = { verdict: 'machine', regressions: [], why: 'the sides were measured under different conditions — the gate does not judge across them, --allow-mismatch or not' };
   }
   const gateExit = !g ? 0 : g.verdict === 'regressed' ? 1 : g.verdict === 'machine' ? 3 : g.verdict === 'insufficient' ? 5 : 0;
   if (json) { out(refused ? { refused: true, conditions: c.conditions, a: c.a, b: c.b } : { ...c, ...(g ? { gate: g } : {}) }); process.exit(refused ? 3 : gateExit); }
@@ -707,14 +730,22 @@ if (cmd === 'coverage') {
   // --changed / --since: the exact `touched` — per changed FUNCTION.
   let changed = null;
   if (args.includes('--changed') || args.includes('--since')) {
+    // A flag with no value is a usage error (exit 2) — never exit 1, which
+    // means "changed code never ran".
+    if (args.includes('--since') ? !get('--since') : !get('--changed')) { console.error(`sloptimize coverage: ${args.includes('--since') ? '--since takes a git rev' : '--changed takes a comma list of files'}`); process.exit(2); }
+    // One diff format whatever the user's git config: unquoted paths, a/ b/
+    // prefixes, no external diff tool.
+    const diffArgs = ['-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', '-U0'];
     let diff;
-    if (get('--since')) diff = git('diff', '-U0', get('--since'));
+    if (get('--since')) diff = git(...diffArgs, get('--since'));
     else {
-      const names = get('--changed').split(',').map((x) => x.trim()).filter(Boolean);
-      diff = git('diff', '-U0', 'HEAD', '--', ...names);
-      if (!diff) diff = git('diff', '-U0', 'HEAD~1', 'HEAD', '--', ...names);
+      const { normPath } = await import('../src/runs.js');
+      const names = [...new Set(get('--changed').split(',').map((x) => normPath(x.trim())).filter(Boolean))];
+      diff = git(...diffArgs, 'HEAD', '--', ...names);
+      if (!diff) diff = git(...diffArgs, 'HEAD~1', 'HEAD', '--', ...names);
       // A named file with no diff at all: every line of it is "the change".
-      for (const n of names) if (!diff?.includes(`+++ b/${n}`)) diff = `${diff ?? ''}\n+++ b/${n}\n@@ -0,0 +1,1000000 @@`;
+      const inDiff = new Set(Cv.changedRanges(diff ?? '').keys());
+      for (const n of names) if (!inDiff.has(n)) diff = `${diff ?? ''}\n+++ b/${n}\n@@ -0,0 +1,1000000 @@`;
     }
     if (diff === null) { console.error('sloptimize coverage: not a git repo — run from the repo, or --repo <dir>'); process.exit(2); }
     changed = Cv.changedFunctions(mods, Cv.changedRanges(diff));
@@ -912,7 +943,11 @@ if (cmd === 'attach') {
   // leave through close(): it is the only place a --launch'd browser is
   // killed, so a page that vanished under a still-running browser must not
   // orphan that browser.
-  const stop = async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); };
+  // Bounded: a target that never answers the final Profiler.stop must not
+  // keep us alive — but an end heap snapshot or a coverage collection of a
+  // big page takes as long as it takes, and cutting it loses the file.
+  const stopLimitMs = opts.heap.snapshots || opts.coverage ? 15 * 60_000 : 5000;
+  const stop = async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, stopLimitMs))]); };
   const bye = async (why, code = 0) => {
     if (closing) return; closing = true;
     console.log(`[attach] ${why} — stopping`);

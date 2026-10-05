@@ -46,12 +46,19 @@ export function trendOf(pts, kind = 'count', { floor = false } = {}) {
   // A sawtooth's floor: the minimum of each reading and its two neighbours.
   const series = floor ? s.map((p, i) => ({ t: p.t, v: Math.min(...s.slice(Math.max(0, i - 1), i + 2).map((q) => q.v)) })) : s;
   const { slope, r2 } = fit(series.map((p) => ({ x: (p.t - s[0].t) / 3_600_000, y: p.v })));
-  let up = 0;
-  for (let i = 1; i < series.length; i++) if (series[i].v >= series[i - 1].v) up++;
-  const rising = up / (series.length - 1);
+  let up = 0, moved = 0;
+  for (let i = 1; i < series.length; i++) { const d = series[i].v - series[i - 1].v; if (d !== 0) { moved++; if (d > 0) up++; } }
+  const rising = moved ? up / moved : 0;
   const rise = series.at(-1).v - series[0].v;
   const big = Math.abs(rise) >= Math.max(MIN_RISE[kind] ?? MIN_RISE.count, 0.1 * Math.abs(series[0].v));
-  const verdict = big && r2 >= 0.6 && slope > 0 && rising >= 0.7 ? 'growing' : big && r2 >= 0.6 && slope < 0 ? 'shrinking' : 'flat';
+  // A leak keeps climbing; a level load climbs ONCE and then holds. So the
+  // rise must continue: each half of the session climbs at a quarter of the
+  // whole session's rate or more (a step up in the first half, flat after,
+  // is not growth).
+  const half = (part) => fit(part.map((p) => ({ x: (p.t - s[0].t) / 3_600_000, y: p.v }))).slope;
+  const mid = series.length >> 1;
+  const sustained = half(series.slice(0, mid + 1)) >= 0.25 * slope && half(series.slice(mid)) >= 0.25 * slope;
+  const verdict = big && r2 >= 0.6 && slope > 0 && sustained ? 'growing' : big && r2 >= 0.6 && slope < 0 ? 'shrinking' : 'flat';
   return { ...base, first: series[0].v, last: series.at(-1).v, perHour: +slope.toFixed(kind === 'heapMB' ? 2 : 1), r2: +r2.toFixed(2), rising: +rising.toFixed(2), verdict };
 }
 
@@ -88,7 +95,7 @@ export function memoryLines(trends) {
   if (entries.every(([, t]) => t.verdict === 'too short')) return [`  memory: ${minutes} min of heartbeats — a trend needs ${MIN_MINUTES} min and ${MIN_POINTS} beats`];
   const lines = [`  memory over ${minutes} min:`];
   for (const [k, t] of entries.filter(([, x]) => x.verdict === 'growing' || x.verdict === 'shrinking')) {
-    lines.push(`    ${t.verdict === 'growing' ? '▲' : '▼'} ${label(k)}: ${t.first}${unit(k)} → ${t.last}${unit(k)} (${t.perHour > 0 ? '+' : ''}${t.perHour}${unit(k)}/h, R² ${t.r2}, rising in ${Math.round(t.rising * 100)}% of steps) — ${t.verdict.toUpperCase()}${t.verdict === 'growing' && k !== 'heap' ? ': a dispose missed on a rebuild?' : ''}`);
+    lines.push(`    ${t.verdict === 'growing' ? '▲' : '▼'} ${label(k)}: ${t.first}${unit(k)} → ${t.last}${unit(k)} (${t.perHour > 0 ? '+' : ''}${t.perHour}${unit(k)}/h, R² ${t.r2}, rising in both halves) — ${t.verdict.toUpperCase()}${t.verdict === 'growing' && k !== 'heap' ? ': a dispose missed on a rebuild?' : ''}`);
   }
   const flat = entries.filter(([, x]) => x.verdict === 'flat').map(([k, t]) => `${label(k).replace(/ \(.*\)$/, '')} ${t.last}${unit(k)}`);
   if (flat.length) lines.push(`    flat: ${flat.join(' · ')}`);

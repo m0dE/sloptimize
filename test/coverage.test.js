@@ -90,7 +90,7 @@ test('pipeline coverage mode: precise function coverage instead of the sampler; 
   assert.equal(calls.filter((c) => c === 'Profiler.takePreciseCoverage').length, 1);
   const cov = JSON.parse(readFileSync(join(dir, 'coverage', readdirSync(join(dir, 'coverage'))[0]), 'utf8'));
   assert.deepEqual(cov.scripts.map((s) => [s.url, s.fns.length]), [['http://h/src/a.js', 2]]);
-  assert.deepEqual(cov.scripts[0].fns[1], ['a', 1, 0, 3, 1, 28]);
+  assert.deepEqual(cov.scripts[0].fns[1], ['a', 1, 0, 3, 1, 28, 0]);
   assert.equal(p.conditions.mode, 'coverage');
   assert.equal(p.conditions.sampler, undefined);
 });

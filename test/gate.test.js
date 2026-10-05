@@ -102,7 +102,8 @@ test('judgeBudgets: * expands to every phase; a build is the median of its runs 
 
 test('regressionGate: too few runs is insufficient, not a pass; only significant moves the WORSE way regress', () => {
   const row = (metric, delta, verdict = 'significant') => ({ metric, delta, verdict });
-  const cmp = (n, rows) => ({ a: { runs: Array(n).fill('x') }, b: { runs: Array(n).fill('y') }, rows });
+  const cmp = (n, rows) => ({ a: { runs: Array(n).fill('x') }, b: { runs: Array(n).fill('y') },
+    rows: rows.map((r) => ({ ...r, a: { n, median: 10 }, b: { n, median: 10 + r.delta } })) });
   assert.equal(regressionGate(cmp(2, [row('frame p95 ms', 5)])).verdict, 'insufficient');
   assert.equal(regressionGate(cmp(2, [row('frame p95 ms', 5)]), { minRuns: 2 }).verdict, 'regressed');
   const g = regressionGate(cmp(3, [row('frame p95 ms', -3), row('fn stepCars@cars.ts %js', 8), row('draw calls', 40, 'within noise'), row('rate delivered /sim-s', -0.4)]));

@@ -61,10 +61,11 @@ test('long-render is unaffected: the CPU really was inside the call', () => {
 
 test('elimination says what it eliminated', () => {
   // Nothing moved, the render share is inconclusive (between 25% and 60%),
-  // and the GPU was idle - so the drawing is ruled OUT rather than unmentioned.
+  // and the GPU was idle - so the GPU is ruled OUT rather than unmentioned;
+  // the CPU's 16 ms inside the render call is not, and is said.
   const [top] = classifyHitch({ frameMs: 40, medianMs: 8, insideRenderMs: 16, delta: {}, gpuMs: 0.5 });
   assert.equal(top.guess, 'gc-or-upload-by-elimination');
-  assert.match(top.evidence, /the GPU took 0\.5ms, so the drawing was not it/);
+  assert.match(top.evidence, /the GPU took 0\.5ms, so the GPU was not it — 16\.0ms of the frame was the CPU inside the render call/);
 });
 
 test('the boundary is 60% of the frame, and it is not jumpy', () => {

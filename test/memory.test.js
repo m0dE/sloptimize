@@ -88,3 +88,8 @@ test('pipeline: every heartbeat carries the heap; --heap-gc collects first; snap
   assert.deepEqual(p.conditions.soak, { forcedGc: true, heapSnapshots: true });
   assert.equal(compareConditions([p.conditions], [{ instrument: 'attach' }]).mismatches[0].key, 'soak');
 });
+
+test('a level load is one step, not a leak: 400 geometries, then 650 and flat, reads flat', () => {
+  const step = [...Array(30)].map((_, i) => ({ t: Date.parse('2026-10-02T10:00:00Z') + i * 60_000, v: i < 12 ? 400 : 650 }));
+  assert.equal(trendOf(step, 'count').verdict, 'flat');
+});

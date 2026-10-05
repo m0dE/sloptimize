@@ -34,10 +34,13 @@ export function foldCoverage(files) {
   for (const f of files) {
     for (const sc of f.scripts ?? []) {
       const s = scripts.get(sc.url) ?? scripts.set(sc.url, { url: sc.url, size: sc.size, fns: new Map() }).get(sc.url);
-      for (const [name, line, col, endLine, count, size] of sc.fns ?? []) {
-        const k = `${line}:${col}`;
+      for (const fn of sc.fns ?? []) {
+        // The script's top level starts where its first function does:
+        // position alone is not identity.
+        const [name, line, col, , count, size] = fn;
+        const k = `${name}|${line}:${col}|${size}`;
         const r = s.fns.get(k);
-        if (r) r[4] += count; else s.fns.set(k, [name, line, col, endLine, count, size]);
+        if (r) r[4] += count; else s.fns.set(k, [...fn]);
       }
     }
   }
@@ -54,16 +57,18 @@ export function byModule(scripts, { maps = [] } = {}) {
   const mods = new Map();
   for (const sc of scripts) {
     const sm = byMap.get(normPath(sc.url).split('/').pop());
-    for (const [name, line, col, endLine, count, size] of sc.fns) {
+    for (const [name, line, col, endLine, count, size, endCol] of sc.fns) {
       let file = normPath(sc.url), l = line, el = endLine;
       if (sm) {
         const o = sm.original(line, col);
         if (!o?.file) continue;   // bundler glue with no source
         file = normPath(o.file); l = o.line;
-        const e = sm.original(endLine, 0);
+        // The function's LAST position (coverage files written before end
+        // columns were recorded fall back to the end line's first mapping).
+        const e = sm.original(endLine, endCol ?? 0) ?? sm.original(endLine, Number.MAX_SAFE_INTEGER);
         el = e?.file && normPath(e.file) === file ? Math.max(e.line, l) : l;
       }
-      const m = mods.get(file) ?? mods.set(file, { file, fns: [], lo: Infinity, hi: -Infinity, bytes: 0 }).get(file);
+      const m = mods.get(file) ?? mods.set(file, { file, fns: [], lo: Infinity, hi: -Infinity, bytes: 0, mapped: !!sm }).get(file);
       // The script's top-level "function" is the module itself (unbundled).
       const top = !sm && name === '' && line === 1 && col === 0 && size >= (sc.size || size);
       m.fns.push({ name: name || '(anonymous)', line: l, endLine: el, count, size, top });
@@ -75,6 +80,9 @@ export function byModule(scripts, { maps = [] } = {}) {
     m.size = tops.length ? Math.max(...tops.map((f) => f.size)) : m.bytes;
     m.loaded = true;
     m.ran = m.fns.some((f) => f.count > 0);
+    // Through a map, a module's top level is the bundle's: whether it RAN is
+    // not visible, so "nothing in it ran" is never claimed for it.
+    m.topKnown = !m.mapped || m.fns.some((f) => f.top);
     const inner = m.fns.filter((f) => !f.top);
     m.called = inner.filter((f) => f.count > 0).length;
     m.uncalled = inner.filter((f) => f.count === 0);
@@ -91,13 +99,13 @@ export function byModule(scripts, { maps = [] } = {}) {
  */
 export function analyzeCoverage(mods, { repoFiles = [], includeDeps = false, idleShare = 0.5 } = {}) {
   const own = [...mods.values()].filter((m) => includeDeps || !DEP.test(m.file));
-  const idle = own.filter((m) => m.ran && m.uncalled.length > 0)
+  const idle = own.filter((m) => (m.ran || !m.topKnown) && m.uncalled.length > 0)
     .map((m) => ({ file: m.file, size: m.size, called: m.called, total: m.called + m.uncalled.length,
       share: +(m.uncalled.length / (m.called + m.uncalled.length)).toFixed(3),
       uncalled: m.uncalled.sort((a, b) => b.size - a.size).map((f) => ({ name: f.name, line: f.line, size: f.size })) }))
     .map((m) => ({ ...m, idle: m.share >= idleShare }))
     .sort((a, b) => b.size - a.size);
-  const silent = own.filter((m) => !m.ran).map((m) => ({ file: m.file, size: m.size })).sort((a, b) => b.size - a.size);
+  const silent = own.filter((m) => !m.ran && m.topKnown).map((m) => ({ file: m.file, size: m.size })).sort((a, b) => b.size - a.size);
   // Where the run's code lives in the repo: for every loaded module that
   // names a repo file, the repo path down to the module's own first segment
   // (a dev server serves `src/a.ts` for `packages/client/src/a.ts`).
@@ -129,9 +137,17 @@ export function changedRanges(diff) {
   const out = new Map();
   let file = null;
   for (const line of String(diff).split('\n')) {
-    const f = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (f) { file = f[1]; if (!out.has(file)) out.set(file, []); continue; }
+    if (line.startsWith('diff --git ')) { file = null; continue; }   // a new file's header: no hunk belongs to the last one
     if (line.startsWith('+++ /dev/null')) { file = null; continue; }
+    const f = /^\+\+\+ (.+?)\t?$/.exec(line);
+    if (f) {
+      let path = f[1];
+      // git C-quotes paths with unusual bytes: "b/caf\303\251.js".
+      if (path.startsWith('"') && path.endsWith('"')) path = unquoteC(path.slice(1, -1));
+      file = path.replace(/^b\//, '');
+      if (!out.has(file)) out.set(file, []);
+      continue;
+    }
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
     if (h && file) {
       const lo = +h[1], n = h[2] === undefined ? 1 : +h[2];
@@ -139,6 +155,18 @@ export function changedRanges(diff) {
     }
   }
   return out;
+}
+
+/** git's C-style quoting (octal UTF-8 bytes, \t \n \" \\) back to a string. */
+function unquoteC(s) {
+  const bytes = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '\\') { bytes.push(...Buffer.from(s[i])); continue; }
+    const n = s[++i];
+    if (/[0-7]/.test(n)) { bytes.push(parseInt(s.slice(i, i + 3), 8)); i += 2; }
+    else bytes.push(({ t: 9, n: 10, r: 13, '"': 34, '\\': 92 })[n] ?? n.charCodeAt(0));
+  }
+  return Buffer.from(bytes).toString('utf8');
 }
 
 /**
@@ -157,8 +185,9 @@ export function changedFunctions(mods, ranges) {
     const inner = m.fns.filter((f) => !f.top);
     const hit = new Map();
     let moduleLevel = false;
+    const last = Math.max(1, ...m.fns.map((f) => f.endLine));
     for (const [lo, hi] of rs) {
-      for (let l = lo; l <= hi; l++) {
+      for (let l = lo; l <= Math.min(hi, last); l++) {
         const around = inner.filter((f) => f.line <= l && l <= f.endLine).sort((a, b) => (a.endLine - a.line) - (b.endLine - b.line))[0];
         if (around) hit.set(`${around.name}:${around.line}`, around); else moduleLevel = true;
       }

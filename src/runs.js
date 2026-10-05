@@ -35,7 +35,7 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, tally: emptyTally() };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
 }
 
 // ── Game counters (SPEC §3.11): totals over the game's OWN clock ────────────
@@ -164,9 +164,10 @@ export function createRunFold(meta) {
     if (typeof rec.frame?.medianMs === 'number') b.medians.push(rec.frame.medianMs);
     if (typeof rec.frame?.p95Ms === 'number') b.p95s.push(rec.frame.p95Ms);
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
+    if (typeof rec.frame?.maxMs === 'number' && !(b.maxMs >= rec.frame.maxMs)) b.maxMs = rec.frame.maxMs;
+    foldTally(b.tally, rec);
     // Frames over fixed bars and the visible seconds they were counted in —
     // summed, so a gate can read frames over 100 ms per minute of the phase.
-    foldTally(b.tally, rec);
     if (rec.over && typeof rec.window?.seconds === 'number') {
       b.seconds += rec.window.seconds;
       b.over ??= {};
@@ -195,6 +196,7 @@ export function createRunFold(meta) {
         if (b.calls.length) p.frame.calls = median(b.calls);
       }
       if (b.over) { p.seconds = +b.seconds.toFixed(3); p.over = b.over; }
+      if (b.maxMs !== undefined) p.maxMs = b.maxMs;   // the phase's longest frame, every window counted
       const t = tallyJSON(b.tally);
       if (t) p.counters = t;
       // Heaviest first by inclusive samples; one array per function keeps a

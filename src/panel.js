@@ -333,7 +333,7 @@ function renderIssues(issues, range, selected) {
           <span>first ${esc(when(i.first))}</span><span>last ${esc(when(i.last))} (${esc(agoText(i.lastAgoMs))})</span>
           <span>${i.count} occurrence${i.count === 1 ? '' : 's'}</span>${worst ? `<span>${worst}</span>` : ''}
           <span>builds ${i.builds.length ? esc(i.builds.slice(-6).join(', ')) : '—'}${i.builds.length > 6 ? ` +${i.builds.length - 6}` : ''}</span></div>
-        ${i.recurs ? `<div style="margin-top:6px;color:${C.warn}">⟳ recurs every ${num(i.recurs.periodSec, 's')} ± ${num(i.recurs.jitterSec, 's')} <span style="color:${C.dim}">(${i.recurs.occurrences} occurrences${i.recurs.missed ? `, ${i.recurs.missed} missed` : ''}) — a timer, not a player action</span></div>` : ''}
+        ${i.recurs ? `<div style="margin-top:6px;color:${C.warn}">⟳ recurs every ${i.recurs.periodSec.toFixed(1)}s ± ${i.recurs.jitterSec}s <span style="color:${C.dim}">(${i.recurs.occurrences} occurrences${i.recurs.missed ? `, ${i.recurs.missed} missed` : ''}) — a timer, not a player action</span></div>` : ''}
         ${i.sample ? `<div style="margin-top:6px"><span style="color:${C.mute}">last verdict</span> <b style="color:${C.ink}">${esc(i.sample.guess)}</b> <span>${esc(i.sample.evidence)}</span></div>` : ''}
         ${H('fixes applied to this issue')}
         ${i.fixes.length ? i.fixes.map(fixLine).join('') : `<div style="color:${C.mute}">none recorded — a session that fixes it names the footprint: <code style="font-family:${MONO};color:${C.ink}">sloptimize fix propose --footprints ${esc(i.id)} --title "…"</code></div>`}

@@ -216,6 +216,16 @@ export async function attach(opts = {}) {
   // the old one, which still answers `document.readyState === 'complete'`.
   let settleArmed;
   const armed = new Promise((r) => { settleArmed = r; });
+  // A launched browser is gone before close() returns: the next run of
+  // `--runs N` launches on the same port and must not find this one. A
+  // child that already died of a signal has exitCode null and signalCode set.
+  async function killChild() {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise((r) => child.once('exit', r));
+    child.kill();
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
   const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser, drive: drive?.meta }) });
   const onRecord = pipeline.onRecord;
@@ -253,17 +263,13 @@ export async function attach(opts = {}) {
     // The sampler stops BEFORE the socket: a page left with the profiler
     // running pays for it until the session is torn down.
     close: async () => {
-      if (open) await pipeline.stop();
-      try { ws.close(); } catch { /* done */ }
-      // A launched browser is gone before close() returns: the next run of
-      // `--runs N` launches on the same port and must not find this one.
-      if (child && child.exitCode === null) {
-        const exited = new Promise((r) => child.once('exit', r));
-        child.kill();
-        await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
-        if (child.exitCode === null) child.kill('SIGKILL');
+      try { if (open) await pipeline.stop(); }
+      finally {
+        try { ws.close(); } catch { /* done */ }
+        await killChild();
       }
     },
+
     closed,
     /** Run the drive script to its end (throws what it threw). */
     runDrive: async () => {
