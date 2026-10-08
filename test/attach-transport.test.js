@@ -62,7 +62,9 @@ test('a rotation the target never answers is rejected when the socket closes, an
   ws.answer = false;
   ws.binding({ type: 'hitch', at: '2026-09-09T00:00:00Z', frameMs: 300, classification: [{ guess: 'long-script' }] });
   await new Promise((r) => setTimeout(r, 5));
-  assert.ok(ws.sent.includes('Profiler.stop'), 'the rotation is in flight, unanswered');
+  // One batch, in order: the clock reads bracket the stop and start, which go
+  // out together (incident-pipeline.mjs, rotateProfile) — all unanswered.
+  assert.deepEqual(ws.sent.slice(-4), ['Runtime.evaluate', 'Profiler.stop', 'Profiler.start', 'Runtime.evaluate'], 'the rotation is in flight, unanswered');
   ws.drop();
   await s.closed;
   await new Promise((r) => setTimeout(r, 5));
