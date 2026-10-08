@@ -73,10 +73,12 @@ if (cmd === 'report') {
   const auto = hitches.filter((h) => h.type === 'hitch');
   const jitters = hitches.filter((h) => h.type === 'jitter');
   const census = readJson('census.json');
+  // The whole ledger, read once: conditions, rates, spans, memory and reboots all fold it.
+  const ledger = readJsonl('perf.jsonl', Infinity);
   // The session's conditions (conditions.js): what every number below was
   // measured under — the display's refresh rate first among them.
   const C = await import('../src/conditions.js');
-  const conds = profile ? C.runConditions([profile, ...readJsonl('perf.jsonl', Infinity).filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
+  const conds = profile ? C.runConditions([profile, ...ledger.filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
     profile.session ? (await import('../src/runs.js')).readRuns(DIR).find((r) => r.session === profile.session) : null) : undefined;
   if (json) { out({ profile, conditions: conds, hitches: auto, usermarks: marks, jitters, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
@@ -117,7 +119,7 @@ if (cmd === 'report') {
     const R = await import('../src/runs.js');
     const file = R.readRuns(DIR).find((r) => r.session === profile.session);
     const acc = file ? R.runBucket(file).tally : R.emptyTally();
-    for (const r of readJsonl('perf.jsonl', Infinity)) if (r.session === profile.session && r.type === 'profile' && r.tally && !(file && r.tier === 0)) R.foldTally(acc, r);
+    for (const r of ledger) if (r.session === profile.session && r.type === 'profile' && r.tally && !(file && r.tier === 0)) R.foldTally(acc, r);
     const rates = R.ratesOf(acc);
     if (rates) {
       const vals = Object.entries(rates.values).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${k} ${v}/${rates.per}`).join(' · ');
@@ -128,7 +130,7 @@ if (cmd === 'report') {
     // Phases as spans (SPEC §3.15): how long each took, per unit of what it
     // worked on, and the host's sections as ms × calls.
     const S = await import('../src/spans.js');
-    const sessionLines = readJsonl('perf.jsonl', Infinity).filter((r) => r.session === profile.session);
+    const sessionLines = ledger.filter((r) => r.session === profile.session);
     const spanRecs = PHASES ? H.onlyPhases(sessionLines, PHASES) : sessionLines;
     const table = S.spanTable(S.phaseSpans(spanRecs));
     if (table.size) {
@@ -149,8 +151,9 @@ if (cmd === 'report') {
     }
     // Which statement inside the heaviest functions: V8's per-line ticks,
     // whole run (or the --phase), not one hitch's chunk.
+    const phBucket = file ? R.runBucket(file, PHASES) : null;
     if (file) {
-      const top = R.heaviestSelf(R.runBucket(file, PHASES), 3, file.intervalUs);
+      const top = R.heaviestSelf(phBucket, 3, file.intervalUs);
       if (top.length) {
         console.log(`  heaviest self time${PHASES ? ` (${[...PHASES].join(',')})` : ' (whole run)'}:`);
         for (const f of top) {
@@ -163,7 +166,7 @@ if (cmd === 'report') {
     // frame it worked, and which thread is the ceiling.
     if (file) {
       const T = await import('../src/threads.js');
-      const bucket = R.runBucket(file, PHASES);
+      const bucket = phBucket;
       const rows = T.threadRows(bucket, bucket.frame?.medianMs);
       if (rows.length) {
         console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
@@ -178,7 +181,7 @@ if (cmd === 'report') {
     }
     // Long sessions (SPEC §3.14): live GPU objects and the JS heap, as trends.
     const M = await import('../src/memory.js');
-    for (const l of M.memoryLines(M.memoryTrends(readJsonl('perf.jsonl', Infinity).filter((r) => r.session === profile.session)))) console.log(l);
+    for (const l of M.memoryLines(M.memoryTrends(sessionLines))) console.log(l);
   }
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
@@ -230,7 +233,7 @@ if (cmd === 'report') {
   // one of them — the first boot runs before the recorder, so one `armed`
   // per session is the normal case.
   const armedBy = new Map();
-  for (const r of readJsonl('perf.jsonl', Infinity)) if (r.type === 'armed' && r.session) armedBy.set(r.session, (armedBy.get(r.session) ?? 0) + 1);
+  for (const r of ledger) if (r.type === 'armed' && r.session) armedBy.set(r.session, (armedBy.get(r.session) ?? 0) + 1);
   const reboots = [...new Set(hitches.map((r) => r.session).filter(Boolean))].filter((s) => armedBy.get(s) > 1);
   for (const s of reboots) console.log(`  note: session ${s} armed ${armedBy.get(s)}× — the page loaded ${armedBy.get(s)} times under the recorder, so load-phase hitch counts and worst frames span every one of those boots`);
   for (const m of marks.slice(-3)) {
@@ -785,8 +788,8 @@ if (cmd === 'equivalence') {
     console.log(`    A: ${show(r.a.digest)}`);
     console.log(`    B: ${show(r.b.digest)}`);
     if (r.same) console.log(`    differs: ${r.parts.join(', ')}${r.same.length ? `   (identical: ${r.same.join(', ')})` : ''}`);
-  } else if (r.verdict === 'within') console.log(`  ✔ every value within ${r.tolerance * 100}% over ${r.window}-tick windows (largest: ${Object.entries(r.drift).sort((a, b) => b[1].rel - a[1].rel).slice(0, 3).map(([k, d]) => `${k} ${+(d.rel * 100).toFixed(2)}%`).join(', ')})`);
-  else if (r.verdict === 'drifted') console.log(`  ✗ ${r.first.value} drifts ${+(r.first.rel * 100).toFixed(1)}% from tick ${r.first.from} (window ${r.first.from}–${r.first.to}: A ${r.first.a}, B ${r.first.b}; tolerance ${r.tolerance * 100}%)`);
+  } else if (r.verdict === 'within') console.log(`  ✔ every value within ${+(r.tolerance * 100).toFixed(2)}% over ${r.window}-tick windows (largest: ${Object.entries(r.drift).sort((a, b) => b[1].rel - a[1].rel).slice(0, 3).map(([k, d]) => `${k} ${+(d.rel * 100).toFixed(2)}%`).join(', ')})`);
+  else if (r.verdict === 'drifted') console.log(`  ✗ ${r.first.value} drifts ${+(r.first.rel * 100).toFixed(1)}% from tick ${r.first.from} (window ${r.first.from}–${r.first.to}: A ${r.first.a}, B ${r.first.b}; tolerance ${+(r.tolerance * 100).toFixed(2)}%)`);
   else console.log(`  ${r.verdict === 'refused' ? 'refused' : r.verdict === 'insufficient' ? 'cannot judge' : 'no data'}: ${r.why}`);
   for (const w of r.warnings ?? []) console.log(`  ⚠ ${w}`);
   process.exit(code);
@@ -805,7 +808,9 @@ if (cmd === 'sweep') {
   const frameBudgetMs = budgetAt !== undefined ? Number(budgetAt) : 1000 / 60;
   if (!(frameBudgetMs > 0)) { console.error('sloptimize sweep: --frame-budget is the frame time in ms to find N for (default 16.7)'); process.exit(2); }
   const print = (saved, t) => {
-    if (json) { out({ ...saved, ...t }); return; }
+    // `levels` stays the saved one (with each level's sessions); the table's
+    // per-level run counts ride as `measured`.
+    if (json) { out({ ...saved, rows: t.rows, ...(t.capacity ? { capacity: t.capacity } : {}), measured: t.levels }); return; }
     const w = Math.min(Math.max(12, ...t.rows.map((r) => r.metric.length)), 48);
     console.log(`sweep ${saved.id}: ${saved.knob} = ${saved.levels.map((l) => l.value).join(', ')}  (${saved.runs} run${saved.runs === 1 ? '' : 's'} a level, ${saved.settleS}s settle + ${saved.measureS}s measured${saved.build ? `, build ${saved.build}` : ''})`);
     const head = t.levels.map((l) => String(l.value).padStart(9)).join('');
@@ -857,6 +862,16 @@ if (cmd === 'sweep') {
       } catch (e) {
         if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
         console.error(`sloptimize sweep: ${knob}=${value} run ${i + 1}: ${e?.message ?? e}`);
+        // The levels already measured are kept: a tab that dies at 9000 is a
+        // finding, and the sessions before it are a sweep up to there.
+        if (level.sessions.length) saved.levels.push(level);
+        if (saved.levels.length) {
+          saved.incomplete = `stopped at ${knob}=${value} run ${i + 1}: ${String(e?.message ?? e).slice(0, 200)}`;
+          mkdirSync(sdir, { recursive: true });
+          writeFileSync(join(sdir, `${id}.json`), JSON.stringify(saved, null, 2));
+          print(saved, S.sweepTable(saved.levels, readJsonl('perf.jsonl', Infinity), readRuns(DIR), { frameBudgetMs }));
+          if (!json) console.log(`  INCOMPLETE — ${saved.incomplete}; saved: ${join(sdir, `${id}.json`)}`);
+        }
         process.exit(4);
       }
       await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);

@@ -223,7 +223,7 @@ window.__sloptimizeSection('createSidewalks', ms, calls);  // named work, with i
 saves compare per unit, and `compare` says which factor of a section moved:
 
 ```
-  section createSidewalks   737 -> 23060 ms   x3762 -> x3747
+  section load/createSidewalks   737 -> 23060 ms   x3762 -> x3747
     same call count, 31x ms/call → the work PER CALL changed (look inside it)
 ```
 

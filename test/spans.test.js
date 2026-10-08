@@ -140,9 +140,9 @@ test('compare: phase duration, ms per unit, section rows and the which-factor ve
   const B = { label: 'B', runs: [runMetrics('b1', [span('b1', 'load', 32000, { scale: { roads: 1469 }, sections: { createSidewalks: [23060, 3747] } })], null)] };
   assert.equal(A.runs[0].metrics['phase load ms'], 9000);
   assert.equal(A.runs[0].metrics['phase load ms/road'], 6.127);
-  assert.equal(A.runs[0].metrics['section createSidewalks calls'], 3762);
+  assert.equal(A.runs[0].metrics['section load/createSidewalks calls'], 3762);
   const c = compareSides(A, B);
-  const s = c.sections.find((x) => x.name === 'createSidewalks');
+  const s = c.sections.find((x) => x.name === 'load/createSidewalks');
   assert.equal(s.moved, 'per-call');
   assert.equal(s.unlike, undefined);
   assert.ok(!c.rows.some((r) => r.verdict === 'unlike'));
@@ -157,8 +157,8 @@ test('compare: two different sizes mark the absolute rows unlike, and the verdic
   const c = compareSides(A, B);
   const row = (m) => c.rows.find((r) => r.metric === m);
   assert.equal(row('phase load ms').verdict, 'unlike');
-  assert.equal(row('section createSidewalks total ms').verdict, 'unlike');
-  assert.equal(row('section createSidewalks calls').verdict, 'unlike');
+  assert.equal(row('section load/createSidewalks total ms').verdict, 'unlike');
+  assert.equal(row('section load/createSidewalks calls').verdict, 'unlike');
   assert.notEqual(row('phase load ms/road').verdict, 'unlike', 'per unit is the comparison');
   assert.ok(c.warnings.some((w) => /phase load: the sides worked on different sizes: roads 286 vs 1469/.test(w) && /ms\/road is the comparison/.test(w)));
   const s = c.sections[0];
@@ -203,6 +203,6 @@ test('report prints the phase spans, per-unit cost and sections; compare prints 
   assert.match(rep, /phases: load 32000 ms · 1469 roads → 21\.78 ms\/road {2}\| {2}play \(still open\)/);
   assert.match(rep, /sections in load: createSidewalks 23060 ms x3747 \(6\.154 ms\/call\)/);
   const cmp = cli('compare', 'a', 'b', '--phase', 'load', '--dir', dir);
-  assert.match(cmp, /section createSidewalks {3}737 -> 23060 ms {3}x3762 -> x3747/);
+  assert.match(cmp, /section load\/createSidewalks {3}737 -> 23060 ms {3}x3762 -> x3747/);
   assert.match(cmp, /same call count, 31x ms\/call → the work PER CALL changed/);
 });

@@ -236,3 +236,31 @@ test('a frame no held chunk covers is not-sampled — never attributed from a ch
   assert.equal(l.unattributed, 'not-sampled');
   assert.deepEqual(l.topFrames, []);
 });
+
+test('a function running across a phase edge has its line ticks split with its samples, never copied to both', async () => {
+  const h = harness();
+  await h.p.start();
+  h.chunks.push(chunk(0, 500, []));
+  h.reads.push(500.5, 501.5);
+  h.chunks[0].endTime = (501 + OFF) * 1000;
+  await h.p.onRecord(hitch(0, 500));
+  await h.p.onRecord({ type: 'phase-span', at: at(1000), phase: 'load', span: 'x.1', ms: 400, t0: 600, t1: 1000, next: 'play' });
+  h.chunks.push(chunk(500, 1400, [{ fn: 'update', line: 5, from: 600, to: 1400, hot: (t) => (t % 20 ? 10 : 11) }]));
+  await h.p.stop();
+  const run = JSON.parse(readFileSync(join(h.dir, 'runs', `${h.p.session}.json`), 'utf8'));
+  const lines = (ph) => run.phases[ph].fns.find((f) => f[0] === 'update')[6];
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+  assert.equal(Math.round(sum(lines('load')) + sum(lines('play'))), 80, 'every tick once');
+  assert.equal(Math.round(sum(lines('load'))), 40);
+});
+
+test('a hitch filed under a past phase does not move the page\'s current phase', async () => {
+  const h = harness();
+  await h.p.start();
+  await h.p.onRecord({ type: 'heartbeat', at: at(0), phase: 'play' });
+  h.chunks.push(chunk(0, 2000, [{ fn: 'loadCity', line: 1, from: 0, to: 2000 }]));
+  await h.p.onRecord({ ...hitch(0, 2000), phase: 'load' });   // the frame was mostly load; the page is in play
+  await h.p.stop();
+  const run = JSON.parse(readFileSync(join(h.dir, 'runs', `${h.p.session}.json`), 'utf8'));
+  assert.ok(run.phases.play && !run.phases.load, `chunks follow the page's phase: ${Object.keys(run.phases)}`);
+});

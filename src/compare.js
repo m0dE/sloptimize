@@ -97,18 +97,18 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
   const rates = ratesOf(tally);
   if (rates) for (const [k, v] of Object.entries(rates.values)) put(`rate ${k} /${rates.per}`, v);
   // Phases as spans (spans.js): how long each took, per unit of what it
-  // worked on, and the host's sections as total ms × calls. A section name
-  // reported in two phases is two sections, phase-qualified.
+  // worked on, and the host's sections as total ms × calls.
   const table = spanTable(phaseSpans(records));
   const scales = {}, sectionPhase = {};
-  const named = new Map();
-  for (const [, t] of table) for (const name of t.sections.keys()) named.set(name, (named.get(name) ?? 0) + 1);
   for (const [ph, t] of table) {
     if (t.ms !== undefined) put(`phase ${ph} ms`, t.ms);
     if (Object.keys(t.scale).length) scales[ph] = t.scale;
     for (const [u, v] of Object.entries(t.perUnit)) put(`phase ${ph} ms/${oneOf(u)}`, v);
     for (const [name, e] of t.sections) {
-      const k = named.get(name) > 1 ? `${ph}/${name}` : name;
+      // Keyed by phase whenever the phase has a name — decided by the
+      // record, never by what else this run reported, so two runs' rows
+      // always line up (`load/createSidewalks`).
+      const k = ph === '?' ? name : `${ph}/${name}`;
       sectionPhase[k] = ph;
       put(`section ${k} total ms`, e.ms);
       if (e.calls > 0) { put(`section ${k} calls`, e.calls); put(`section ${k} ms/call`, e.perCall); }

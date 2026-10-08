@@ -186,11 +186,15 @@ export function equivalence(A, B, { ticks, mode, tolerance = TOLERANCE, window =
   if (refuse.length) return { ...base, verdict: 'refused', why: `the runs simulated different things — ${refuse.join('; ')}` };
   const common = [...A.ticks.keys()].filter((t) => B.ticks.has(t)).sort((x, y) => x - y);
   if (!common.length) return { ...base, verdict: 'no-data', why: 'no tick appears in both logs' };
-  const from = common[0];
-  const upTo = ticks > 0 ? from + ticks - 1 : common.at(-1);
-  const range = common.filter((t) => t <= upTo);
-  const gaps = (L) => { let n = 0; for (let t = from; t <= Math.min(upTo, common.at(-1)); t++) if (!L.ticks.has(t)) n++; return n; };
-  base.range = { from, to: range.at(-1), compared: range.length, ...(gaps(A) ? { missingA: gaps(A) } : {}), ...(gaps(B) ? { missingB: gaps(B) } : {}) };
+  // `--ticks N` is N ticks COMPARED — the first N both logs carry — not a
+  // span of tick numbers: a game may log every 10th tick, or number ticks by
+  // its own clock. A tick one log has inside the compared span and the other
+  // lacks is counted as missing from the other.
+  const range = ticks > 0 ? common.slice(0, ticks) : common;
+  const from = range[0], to = range.at(-1);
+  const missing = (L, O) => { let n = 0; for (const t of O.ticks.keys()) if (t >= from && t <= to && !L.ticks.has(t)) n++; return n; };
+  const mA = missing(A, B), mB = missing(B, A);
+  base.range = { from, to, compared: range.length, ...(mA ? { missingA: mA } : {}), ...(mB ? { missingB: mB } : {}) };
   const short = ticks > 0 && range.length < ticks;
   const hasD = range.some((t) => A.ticks.get(t).d !== undefined && B.ticks.get(t).d !== undefined);
   const m = mode ?? (hasD ? 'exact' : 'tolerant');
@@ -232,6 +236,6 @@ export function equivalence(A, B, { ticks, mode, tolerance = TOLERANCE, window =
     }
   }
   if (first) return { ...base, verdict: 'drifted', tolerance, window, first, drift };
-  if (short) return { ...base, verdict: 'insufficient', tolerance, window, drift, why: `within ${tolerance * 100}% so far, but only ${range.length} of the ${ticks} ticks asked for are in both logs` };
+  if (short) return { ...base, verdict: 'insufficient', tolerance, window, drift, why: `within ${+(tolerance * 100).toFixed(2)}% so far, but only ${range.length} of the ${ticks} ticks asked for are in both logs` };
   return { ...base, verdict: 'within', tolerance, window, drift };
 }

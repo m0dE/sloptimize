@@ -330,7 +330,22 @@ export function createIncidentPipeline(opts) {
         const part = parts.get(k) ?? parts.set(k, { phase: ph, samples: [], timeDeltas: [], us: 0 }).get(k);
         part.samples.push(profile.samples[i]); part.timeDeltas.push(deltas[i] ?? 0); part.us += deltas[i] ?? 0;
       }
-      for (const p of parts.values()) run.addProfile({ nodes: profile.nodes, samples: p.samples, timeDeltas: p.timeDeltas, startTime: 0, endTime: p.us }, p.phase, now(), thread);
+      // A node's line ticks cover all its samples in the chunk: each part
+      // carries them in proportion to the samples it kept, so a function's
+      // lines are never credited to a phase it did not run in.
+      const total = new Map();
+      for (const id of profile.samples) total.set(id, (total.get(id) ?? 0) + 1);
+      for (const p of parts.values()) {
+        const kept = new Map();
+        for (const id of p.samples) kept.set(id, (kept.get(id) ?? 0) + 1);
+        const nodes = parts.size === 1 ? profile.nodes : profile.nodes.map((n) => {
+          if (!n.positionTicks?.length) return n;
+          const share = (kept.get(n.id) ?? 0) / (total.get(n.id) || 1);
+          const { positionTicks, ...rest } = n;
+          return share > 0 ? { ...rest, positionTicks: positionTicks.map((t) => ({ line: t.line, ticks: t.ticks * share })) } : rest;
+        });
+        run.addProfile({ nodes, samples: p.samples, timeDeltas: p.timeDeltas, startTime: 0, endTime: p.us }, p.phase, now(), thread);
+      }
     }
     writeRun(false);
   }
@@ -363,6 +378,7 @@ export function createIncidentPipeline(opts) {
   const sendTo = typeof opts.sendTo === 'function' && opts.workers !== false && !coverage ? opts.sendTo : null;
   const workers = new Map();   // sessionId → { name }
   let workerChain = Promise.resolve(), workerTimer = null;
+  let closing = false;   // stop() began: a worker attaching now is released, never started
   const WORKER_TYPES = new Set(['worker', 'shared_worker']);
   function threadName(info) {
     const title = typeof info.title === 'string' && info.title && !/^[a-z][\w+.-]*:/i.test(info.title) ? info.title : '';
@@ -374,13 +390,14 @@ export function createIncidentPipeline(opts) {
   }
   async function attachWorker({ sessionId, targetInfo = {}, waitingForDebugger }) {
     try {
-      if (!WORKER_TYPES.has(targetInfo.type) || !profiling) return;
+      if (!WORKER_TYPES.has(targetInfo.type) || !profiling || closing) return;
       await sendTo(sessionId, 'Profiler.enable');
       await sendTo(sessionId, 'Profiler.setSamplingInterval', { interval: samplingIntervalUs });
       await sendTo(sessionId, 'Profiler.start');
       // A worker's own workers (a sim that farms out pathfinding).
       try { await sendTo(sessionId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); } catch { /* not supported here */ }
       const name = threadName(targetInfo);
+      if (closing) { try { await sendTo(sessionId, 'Profiler.stop'); } catch { /* gone */ } return; }
       workers.set(sessionId, { name });
       log(`profiling ${name}`);
       // The run is now measured with a sampler in the worker too: a
@@ -412,7 +429,7 @@ export function createIncidentPipeline(opts) {
     return workerChain;
   }
   function armWorkers() {
-    if (workerTimer !== null || !(windowMs > 0)) return;
+    if (workerTimer !== null || !(windowMs > 0) || closing) return;
     const tick = () => { workerTimer = setT(() => { void rotateWorkers().then(() => { if (workerTimer !== null) tick(); }); }, windowMs); workerTimer?.unref?.(); };
     tick();
   }
@@ -548,6 +565,7 @@ export function createIncidentPipeline(opts) {
   let stopping = null;
   function stop() { return (stopping ??= doStop()); }
   async function doStop() {
+    closing = true;
     disarm();
     // The page's buffered ticks and open span, before anything stops: the
     // records cross the binding ahead of the reply, and the chain writes them.
@@ -648,8 +666,10 @@ export function createIncidentPipeline(opts) {
       writeRun(true);
       return;
     }
-    // A closing span names the phase that ENDED; the next record says the new one.
-    if (typeof rec.phase === 'string' && rec.type !== 'phase-span') pagePhase = rec.phase;
+    // A closing span names the phase that ENDED, and a hitch the phase that
+    // covered most of its frame — both may be past; the next record says the
+    // page's current one.
+    if (typeof rec.phase === 'string' && rec.type !== 'phase-span' && rec.type !== 'hitch') pagePhase = rec.phase;
     // A closed span is a phase EDGE on the page clock (header: a hitch's own
     // samples): every chunk is credited to its phases by sample time.
     if (rec.type === 'phase-span' && !rec.open && typeof rec.t0 === 'number' && typeof rec.t1 === 'number') {

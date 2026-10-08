@@ -751,6 +751,7 @@ instead, a 2 s load whose last statement set `'play'` was a play hitch).
 - `report` prints `phases: load 9000 ms · 1469 roads → 6.127 ms/road` and
   each phase's sections as `createSidewalks 23060 ms x3747 (6.154 ms/call)`.
 - `compare` reads `phase <p> ms`, `phase <p> ms/<unit>`, and per section
+  (named `<phase>/<name>`, so two runs' rows always line up)
   `total ms`, `calls`, `ms/call` as rows against their noise floors, and
   states which factor of each section moved: `same call count, 31x ms/call
   → the work PER CALL changed (look inside it)` versus `same ms/call, 32x

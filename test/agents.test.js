@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -227,3 +227,25 @@ test('a worker whose sampler cannot start is still released: a paused worker is 
   assert.equal(toWorker.at(-1), 'Runtime.runIfWaitingForDebugger');
   await p.stop();
 });
+
+test('equivalence compares ticks as logged — every 10th tick, or ticks numbered by the game\'s clock', () => {
+  const dir = tmp();
+  const a = createTickLog({ dir, session: 'A' }), b = createTickLog({ dir, session: 'B' });
+  for (const L of [a, b]) { L.sim({ seed: 1, tickHz: 60 }); for (let t = 10; t <= 2000; t += 10) L.tick(1.7e12 + t, 'h' + t); }
+  const r = equivalence(readTickLog(a.path), readTickLog(b.path), { ticks: 100 });
+  assert.equal(r.verdict, 'identical');
+  assert.equal(r.range.compared, 100);
+  assert.equal(r.range.missingA, undefined);
+});
+
+test('sweep --show --json keeps each level\'s sessions', () => {
+  const dir = tmp();
+  mkdirSync(join(dir, 'sweeps'), { recursive: true });
+  writeFileSync(join(dir, 'sweeps', 'x.json'), JSON.stringify({ type: 'sweep', id: 'x', knob: 'cars', runs: 1, settleS: 1, measureS: 1, levels: [{ value: 1000, sessions: ['s1'] }, { value: 3000, sessions: ['s3'] }] }));
+  writeFileSync(join(dir, 'perf.jsonl'), '');
+  const r = cli('sweep', '--show', 'x', '--json', '--dir', dir);
+  const j = JSON.parse(r.out);
+  assert.deepEqual(j.levels.map((l) => l.sessions), [['s1'], ['s3']]);
+  assert.deepEqual(j.measured.map((l) => l.value), [1000, 3000]);
+});
+
