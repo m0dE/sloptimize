@@ -127,6 +127,18 @@ if (cmd === 'report') {
         ? `  rates (per wall second — no game clock: a build that renders faster covers more game time per second and flatters itself; window.__sloptimizeClock('sim', simMs, 1000) fixes it): ${vals}`
         : `  rates (per second of the game's ${rates.denominator.slice(6)} clock): ${vals}`);
     } else if (acc.clock?.mixed) console.log('  rates: the run reported two different game clocks — no honest denominator');
+    // What the recorder itself cost (SPEC-attach §2, restart): V8 walks the
+    // heap on every profiler start, so on a big heap the instrument can be
+    // the stall it records. Said on every report; loud past 2% or 50 ms.
+    if (file?.recorder?.restarts > 0) {
+      const r = file.recorder;
+      const runMs = Date.parse(file.to) - Date.parse(file.from);
+      const share = runMs > 0 ? r.restartMs / runMs : undefined;
+      console.log(`  recorder: ${r.restarts} profiler restart${r.restarts === 1 ? '' : 's'}, ${r.restartMs} ms in total, the longest ${r.maxRestartMs} ms${share !== undefined ? ` — ${pct(share)} of the run` : ''}${r.anchored ? '' : ' (no anchor profile: every restart walks the heap)'}`);
+      if ((share ?? 0) >= 0.02 || r.maxRestartMs >= 50) {
+        console.log(`  ⚠ the recorder's own profiler restarts cost ${share !== undefined ? pct(share) : 'a large share'} of this run (up to ${r.maxRestartMs} ms each) — frame times and hitches here INCLUDE them; compare with the page's own frame timer, or re-measure with a newer sloptimize`);
+      }
+    }
     // Phases as spans (SPEC §3.15): how long each took, per unit of what it
     // worked on, and the host's sections as ms × calls.
     const S = await import('../src/spans.js');

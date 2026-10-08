@@ -35,7 +35,7 @@ const open = (over = {}) => attach({ wsUrl: 'ws://fake/devtools/page/1', WebSock
 test('attach over an explicit wsUrl runs the CDP sequence and exposes `closed`', async () => {
   const s = await open();
   assert.deepEqual(FakeWS.last.sent, ['Runtime.enable', 'Page.enable', 'Runtime.addBinding', 'Page.addScriptToEvaluateOnNewDocument',
-    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Target.setAutoAttach', 'Page.reload']);
+    'Profiler.enable', 'Profiler.setSamplingInterval', 'Runtime.evaluate', 'Profiler.start', 'Target.setAutoAttach', 'Page.reload']);
   assert.ok(s.closed instanceof Promise);
   await s.close();
 });
@@ -50,7 +50,8 @@ test('the target going away settles `closed` with the reason', async () => {
 test('close() stops the sampler before the socket, and settles `closed`', async () => {
   const s = await open();
   await s.close();
-  assert.equal(FakeWS.last.sent.at(-1), 'Profiler.stop');
+  // The sampler stops, then its anchor profile is ended — both before the socket.
+  assert.deepEqual(FakeWS.last.sent.slice(-2), ['Profiler.stop', 'Runtime.evaluate']);
   assert.ok(FakeWS.last.closed);
   await s.closed;
 });

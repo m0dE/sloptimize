@@ -169,6 +169,21 @@ export function sliceFrame(chunks, span, offsetMs) {
 //              (each with its `share` of the frame) but says `unattributed:
 //              'low-share'` and clusters on the verdict alone; `sampled`
 //              says where the chunk's time went instead (GC, native, idle).
+//   restart    what a rotation really costs is its Profiler.START: with no
+//              profile running, V8 walks the whole heap to log every
+//              compiled function — measured 35 ms at 16 MB, 270 ms at 158 MB,
+//              1069 ms at 629 MB (≈1.7 ms per MB), on the page's main thread.
+//              A 9000-car sim attached at 520 ms frames against 60 ms
+//              unattached, the time all "native": every frame restarted the
+//              profiler, and the restart made the next frame long enough to
+//              restart it again. So an ANCHOR profile (the console's
+//              `profile()`, replaced every 5 min) keeps the profiler alive
+//              and every rotation's start cheap (865 ms → 1 ms at 513 MB) —
+//              and every start is TIMED: when one is expensive anyway (no
+//              anchor) the rotations back off to keep the recorder under
+//              2% of the run (cooldown and window ≥ 50× the start), the
+//              long-frame exemption needs the frame to be 10× the start,
+//              and the run file and `report` say what the recorder cost.
 //   long       a frame still at least this long is exempt from the
 //              cooldown. A load made of back-to-back 400 ms frames (a field
 //              report: its four worst frames AND a 25 s one all came back
@@ -201,6 +216,12 @@ export const SAMPLING_INTERVAL_US = 10_000;
 export const ATTRIBUTE_FLOOR_MS = 80;
 export const ATTRIBUTE_COOLDOWN_MS = 1000;
 export const ATTRIBUTE_LONG_FRAME_MS = 150;
+/** The share of the run the recorder's profiler restarts may cost. */
+export const RESTART_BUDGET = 0.02;
+/** A Profiler.start slower than this was not anchored: re-anchor, then back off. */
+const EXPENSIVE_START_MS = 25;
+/** The anchor profile is replaced this often, so its samples never pile up. */
+const ANCHOR_EVERY_MS = 5 * 60_000;
 /** A worker's sampler stop is given this long before its chunk is skipped. */
 const WORKER_STOP_MS = 3000;
 /** A clock mapping is kept only when both reads fell within this. */
@@ -377,7 +398,7 @@ export function createIncidentPipeline(opts) {
   // untouched: a paused target the attach forgot is a hung page.
   const sendTo = typeof opts.sendTo === 'function' && opts.workers !== false && !coverage ? opts.sendTo : null;
   const workers = new Map();   // sessionId → { name }
-  let workerChain = Promise.resolve(), workerTimer = null;
+  let workerChain = Promise.resolve(), workerTimer = null, workerRestartMs = 0;
   let closing = false;   // stop() began: a worker attaching now is released, never started
   const WORKER_TYPES = new Set(['worker', 'shared_worker']);
   function threadName(info) {
@@ -391,14 +412,18 @@ export function createIncidentPipeline(opts) {
   async function attachWorker({ sessionId, targetInfo = {}, waitingForDebugger }) {
     try {
       if (!WORKER_TYPES.has(targetInfo.type) || !profiling || closing) return;
-      await sendTo(sessionId, 'Profiler.enable');
-      await sendTo(sessionId, 'Profiler.setSamplingInterval', { interval: samplingIntervalUs });
-      await sendTo(sessionId, 'Profiler.start');
+      const to = (m, p) => sendTo(sessionId, m, p);
+      await to('Profiler.enable');
+      await to('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
+      // A worker's heap is walked on every profiler start too (header:
+      // restart) — a sim worker's is the big one. Anchored like the page.
+      const anchorT = await anchor(to);
+      await to('Profiler.start');
       // A worker's own workers (a sim that farms out pathfinding).
       try { await sendTo(sessionId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); } catch { /* not supported here */ }
       const name = threadName(targetInfo);
       if (closing) { try { await sendTo(sessionId, 'Profiler.stop'); } catch { /* gone */ } return; }
-      workers.set(sessionId, { name });
+      workers.set(sessionId, { name, anchor: anchorT });
       log(`profiling ${name}`);
       // The run is now measured with a sampler in the worker too: a
       // condition (a worker-profiled run does not compare with a page-only one).
@@ -416,12 +441,21 @@ export function createIncidentPipeline(opts) {
   function rotateWorkers(final = false) {
     const run1 = async () => {
       await Promise.all([...workers].map(async ([sid, w]) => {
-        const calls = [sendTo(sid, 'Profiler.stop'), ...(final ? [] : [sendTo(sid, 'Profiler.start')])];
+        let tStop = 0, tStart = 0;
+        const calls = [sendTo(sid, 'Profiler.stop').then((r) => { tStop = performance.now(); return r; }),
+          ...(final ? [] : [sendTo(sid, 'Profiler.start').then((r) => { tStart = performance.now(); return r; })])];
         let timer;
         const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
         clearT(timer);
         const profile = res?.[0]?.profile;
         if (profile) foldChunk(profile, w.name);
+        if (res && !final) {
+          const ms = Math.max(0, tStart - tStop);
+          if (ms > cost.maxWorkerRestartMs) cost.maxWorkerRestartMs = ms;
+          workerRestartMs = Math.max(ms, workerRestartMs / 2);
+          if (ms > EXPENSIVE_START_MS && w.anchor === null) w.anchor = await anchor((m, p) => sendTo(sid, m, p));
+        }
+        if (final && w.anchor) { try { await sendTo(sid, 'Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(w.anchor)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
       }));
       writeRun(final);
     };
@@ -430,7 +464,7 @@ export function createIncidentPipeline(opts) {
   }
   function armWorkers() {
     if (workerTimer !== null || !(windowMs > 0) || closing) return;
-    const tick = () => { workerTimer = setT(() => { void rotateWorkers().then(() => { if (workerTimer !== null) tick(); }); }, windowMs); workerTimer?.unref?.(); };
+    const tick = () => { workerTimer = setT(() => { void rotateWorkers().then(() => { if (workerTimer !== null) tick(); }); }, Math.max(windowMs, workerRestartMs / RESTART_BUDGET)); workerTimer?.unref?.(); };
     tick();
   }
 
@@ -438,11 +472,17 @@ export function createIncidentPipeline(opts) {
   // own samples), and the chunks a frame is cut out of.
   let clock = null, clockTries = 0;
   const held = [];
+  // What the recorder costs the page (header: restart): the last start's
+  // cost (decaying), and the run's totals for the run file and `report`.
+  let restartMs = 0, reanchored = false, budgetSaid = false;
+  const cost = { restarts: 0, restartMs: 0, maxRestartMs: 0, anchored: false, maxWorkerRestartMs: 0 };
+  /** The interval between rotations the restart cost allows. */
+  const budgeted = (ms) => Math.max(ms, restartMs / RESTART_BUDGET);
 
   function arm() {
     disarm();
     if (!(windowMs > 0)) return;
-    windowTimer = setT(() => { windowTimer = null; return onRoll(); }, windowMs);
+    windowTimer = setT(() => { windowTimer = null; return onRoll(); }, budgeted(windowMs));
     windowTimer?.unref?.();
   }
   function disarm() {
@@ -553,9 +593,12 @@ export function createIncidentPipeline(opts) {
     if (coverage) { await startCoverage(); return; }
     await send('Profiler.enable');
     await send('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
+    // The anchor first: its start is the one heap walk of the session.
+    await anchorPage();
     await send('Profiler.start');
     profiling = true;
     arm();
+    armAnchor();
     if (sendTo) {
       try { await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); }
       catch (e) { log(`workers not profiled: ${e?.message ?? e}`); }
@@ -579,11 +622,15 @@ export function createIncidentPipeline(opts) {
     if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
     if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));
     if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
+    if (anchorTimer !== null) { clearT(anchorTimer); anchorTimer = null; }
     if (workerTimer !== null) { clearT(workerTimer); workerTimer = null; }
     if (workers.size) await rotateWorkers(true);
     if (!profiling) { writeRun(true); return; }
     profiling = false;
     try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
+    // The anchor goes too: a page left profiling pays for it.
+    if (anchorTitle) { try { await send('Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(anchorTitle)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
+    run?.setRecorder(recorderJSON());
     writeRun(true);
   }
   /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
@@ -600,9 +647,14 @@ export function createIncidentPipeline(opts) {
       // long task together.
       const calibrate = clock === null && clockTries < 10;
       const reads = calibrate ? [pageNow()] : null;
-      const stopped = send('Profiler.stop'), started = send('Profiler.start');
+      // The start's cost is the gap between the two replies: the target runs
+      // stop and start back to back, so start's reply lags stop's by its work.
+      let tStop = 0, tStart = 0;
+      const stopped = send('Profiler.stop').then((r) => { tStop = performance.now(); return r; });
+      const started = send('Profiler.start').then((r) => { tStart = performance.now(); return r; });
       if (reads) reads.push(pageNow());
       const [{ profile } = {}] = await Promise.all([stopped, started]);
+      await restarted(Math.max(0, tStart - tStop));
       arm();
       if (reads) {
         clockTries++;
@@ -620,6 +672,61 @@ export function createIncidentPipeline(opts) {
       foldChunk(profile);
       return profile;
     } catch { return null; }
+  }
+  /** Book one restart's cost; an expensive one is re-anchored once, and
+   *  the rotations back off to the budget (header: restart). */
+  async function restarted(ms) {
+    cost.restarts++; cost.restartMs += ms; if (ms > cost.maxRestartMs) cost.maxRestartMs = ms;
+    restartMs = Math.max(ms, restartMs / 2);
+    run?.setRecorder(recorderJSON());
+    if (ms <= EXPENSIVE_START_MS) return;
+    // The walk was the missing anchor: anchored again, the next restart is
+    // cheap, and the one that was not must not hold attribution off.
+    if (!reanchored) { reanchored = true; if (await anchorPage()) { restartMs = 0; log(`profiler restart cost ${Math.round(ms)} ms — re-anchored`); return; } }
+    if (!budgetSaid) {
+      budgetSaid = true;
+      log(`profiler restarts cost ${Math.round(ms)} ms on this page (V8 walks the heap on every start) — attributing at most every ${(budgeted(cooldownMs) / 1000).toFixed(1)} s to keep the recorder under ${RESTART_BUDGET * 100}% of the run`);
+    }
+  }
+  function recorderJSON() {
+    return { restarts: cost.restarts, restartMs: +cost.restartMs.toFixed(1), maxRestartMs: +cost.maxRestartMs.toFixed(1), anchored: cost.anchored,
+      ...(cost.maxWorkerRestartMs > 0 ? { maxWorkerRestartMs: +cost.maxWorkerRestartMs.toFixed(1) } : {}) };
+  }
+  // The anchor: a second, long-lived profile through the console API, so a
+  // rotation never stops the LAST profile and V8 never re-walks the heap.
+  // Replaced (new one first, then the old ended) so its samples stay few.
+  let anchorSeq = 0, anchorTitle = null, anchorTimer = null;
+  async function anchor(sendFn, current = null) {
+    const title = `__sloptimize_anchor_${++anchorSeq}`;
+    for (const expression of [`profile(${JSON.stringify(title)})`, `console.profile(${JSON.stringify(title)})`]) {
+      try {
+        const r = await sendFn('Runtime.evaluate', { expression, includeCommandLineAPI: true, silent: true });
+        if (r?.exceptionDetails) continue;
+        if (current) { try { await sendFn('Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(current)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
+        return title;
+      } catch { /* next way */ }
+    }
+    return null;
+  }
+  async function anchorPage() {
+    const t = await anchor(send, anchorTitle);
+    if (t) { anchorTitle = t; cost.anchored = true; }
+    return t;
+  }
+  function armAnchor() {
+    if (anchorTimer !== null || closing) return;
+    anchorTimer = setT(() => {
+      anchorTimer = null;
+      const go = async () => {
+        if (profiling && !closing) {
+          await anchorPage();
+          for (const [sid, w] of workers) if (w.anchor) w.anchor = (await anchor((m, p) => sendTo(sid, m, p), w.anchor)) ?? w.anchor;
+        }
+        armAnchor();
+      };
+      chain = chain.then(go, go).catch(() => {});
+    }, ANCHOR_EVERY_MS);
+    anchorTimer?.unref?.();
   }
   async function pageNow() {
     try {
@@ -679,7 +786,13 @@ export function createIncidentPipeline(opts) {
       if (edges.length > 64) edges.splice(0, edges.length - 64);
     }
     // A new document has its own time origin: map its clock afresh.
-    if (rec.type === 'armed') { clock = null; clockTries = 0; held.length = 0; edges.length = 0; }
+    if (rec.type === 'armed') {
+      clock = null; clockTries = 0; held.length = 0; edges.length = 0; reanchored = false;
+      // A navigation ends console-started profiles (measured: the first
+      // restart after attach's reload walked a 400 MB heap, 1082 ms). The
+      // main profile survives it, so anchoring the new document is cheap.
+      if (profiling && !closing) await anchorPage();
+    }
     if (rec.type === 'ticks') {
       try { ticks().ticks(rec.entries); } catch (e) { log(`ticks not written: ${e?.message ?? e}`); }
       return;
@@ -709,8 +822,11 @@ export function createIncidentPipeline(opts) {
       // to end. (A page whose sampler is not running at all still mints an
       // unattributed cluster below: that is a mode, not a rate.)
       const t = Number.isFinite(Date.parse(rec.at)) ? Date.parse(rec.at) : now();
+      // A long frame skips the cooldown only when a restart is a small part
+      // of it: a rotation must never be the cause of the next (header).
+      const long = rec.frameMs >= longFrameMs && rec.frameMs >= 10 * restartMs;
       const gated = !(rec.frameMs >= floorMs) ? 'below-floor'
-        : t - lastRotateAt < cooldownMs && !(rec.frameMs >= longFrameMs) ? 'cooldown' : null;
+        : t - lastRotateAt < budgeted(cooldownMs) && !long ? 'cooldown' : null;
       if (gated && profiling) {
         skippedSinceLast++;
         rec.topFrames = [];

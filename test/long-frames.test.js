@@ -83,10 +83,13 @@ function harness(opts = {}) {
   const chunks = [];
   const reads = [];
   const calls = [];
-  const send = async (method) => {
-    calls.push(method);
+  const send = async (method, params) => {
+    // Clock reads are the evaluates of performance.now(); the anchor's
+    // profile() and the stop's flush are other evaluates, answered empty.
+    const read = method === 'Runtime.evaluate' && params?.expression === 'performance.now()';
+    calls.push(read ? 'clock-read' : method);
     if (method === 'Profiler.stop') return { profile: chunks.shift() };
-    if (method === 'Runtime.evaluate') return reads.length ? { result: { type: 'number', value: reads.shift() } } : {};
+    if (read) return reads.length ? { result: { type: 'number', value: reads.shift() } } : {};
     return {};
   };
   const p = createIncidentPipeline({ dir, send, log: () => {}, ...opts });
@@ -154,7 +157,7 @@ test('no clock mapping — reads too far apart, or a target that will not evalua
   await h.p.onRecord(hitch(600, 1000));
   assert.equal(h.lines()[0].profileWindow, 'rolling-chunk');
   assert.equal(h.lines()[0].topFrames.length, 2);
-  assert.equal(h.calls.filter((c) => c === 'Runtime.evaluate').length, 2);
+  assert.equal(h.calls.filter((c) => c === 'clock-read').length, 2);
 });
 
 test('a new document re-maps the clock: its time origin is its own', async () => {
@@ -166,7 +169,7 @@ test('a new document re-maps the clock: its time origin is its own', async () =>
   await h.p.onRecord({ type: 'armed', at: at(200), url: 'app://x' });
   h.chunks.push(chunk(100, 200, []));
   await h.p.onRecord(hitch(100, 200, { at: at(5000) }));
-  assert.equal(h.calls.filter((c) => c === 'Runtime.evaluate').length, 4, 'calibrated again after the reload');
+  assert.equal(h.calls.filter((c) => c === 'clock-read').length, 4, 'calibrated again after the reload');
 });
 
 test('sliceFrame keeps only the samples inside the span, across chunks', () => {
@@ -263,4 +266,29 @@ test('a hitch filed under a past phase does not move the page\'s current phase',
   await h.p.stop();
   const run = JSON.parse(readFileSync(join(h.dir, 'runs', `${h.p.session}.json`), 'utf8'));
   assert.ok(run.phases.play && !run.phases.load, `chunks follow the page's phase: ${Object.keys(run.phases)}`);
+});
+
+test('an expensive profiler restart (no anchor) backs the rotations off to the budget, and the run file says what the recorder cost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slop-restart-'));
+  const logs = [];
+  const send = async (method, params) => {
+    if (method === 'Runtime.evaluate' && /profile\(/.test(params?.expression ?? '')) return { exceptionDetails: { text: 'no console API' } };
+    if (method === 'Profiler.start') await new Promise((r) => setTimeout(r, 60));   // a heap walk on every start
+    if (method === 'Profiler.stop') return { profile: chunk(0, 100, [{ fn: 'update', line: 1, from: 0, to: 100 }]) };
+    return {};
+  };
+  const p = createIncidentPipeline({ dir, send, log: (l) => logs.push(l), session: 'R' });
+  await p.start();
+  await p.onRecord(hitch(0, 400));                    // rotates: the restart costs ~60 ms
+  await p.onRecord(hitch(400, 800));                  // 400 ms frame, 2 s later: inside the budgeted cooldown (60 ms / 2% = 3 s)
+  await p.onRecord({ ...hitch(800, 1600), at: at(2600) });   // 800 ms ≥ 10× the restart: still explained
+  const l = readFileSync(join(dir, 'perf.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(l[1].unattributed, 'cooldown', 'a long frame is not exempt when a restart is a tenth of it');
+  assert.equal(l[2].unattributed, undefined);
+  assert.ok(logs.some((x) => /profiler restarts cost \d+ ms/.test(x)));
+  await p.stop();
+  const run = JSON.parse(readFileSync(join(dir, 'runs', 'R.json'), 'utf8'));
+  assert.equal(run.recorder.anchored, false);
+  assert.equal(run.recorder.restarts, 2);
+  assert.ok(run.recorder.maxRestartMs >= 50, `max ${run.recorder.maxRestartMs}`);
 });

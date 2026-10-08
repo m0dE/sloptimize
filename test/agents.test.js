@@ -206,7 +206,7 @@ test('workers: auto-attached paused, sampled, released — and anything else rel
   p.onEvent('Target.attachedToTarget', { sessionId: 'w1', targetInfo: { type: 'worker', title: 'sim', url: 'blob:x/123' }, waitingForDebugger: true });
   p.onEvent('Target.attachedToTarget', { sessionId: 'f1', targetInfo: { type: 'iframe', url: 'https://ads' }, waitingForDebugger: true });
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(toWorker.filter(([s]) => s === 'w1').map(([, m]) => m), ['Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger']);
+  assert.deepEqual(toWorker.filter(([s]) => s === 'w1').map(([, m]) => m), ['Profiler.enable', 'Profiler.setSamplingInterval', 'Runtime.evaluate', 'Profiler.start', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger']);
   assert.deepEqual(toWorker.filter(([s]) => s === 'f1').map(([, m]) => m), ['Runtime.runIfWaitingForDebugger'], 'an iframe is released, never profiled');
   await p.stop();
   const run = JSON.parse(readFileSync(join(dir, 'runs', 'W.json'), 'utf8'));
