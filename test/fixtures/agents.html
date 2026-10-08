@@ -1,0 +1,28 @@
+<!doctype html><title>agents</title><body>
+<script>
+// A toy many-agent sim, seeded and stepped once per frame by tick number, so
+// its state depends on the tick count alone. `collision` is linear in N and
+// `junction` is N^1.5 — the sweep must tell them apart. `?bug=<tick>` nudges
+// one agent from that tick on: equivalence must name the tick.
+const params = new URLSearchParams(location.search);
+const BUG = Number(params.get('bug')) || 0;
+let n = 1000, tick = 0, rng = 42;
+let pos = new Float64Array(n);
+const rand = () => (rng = (rng * 1103515245 + 12345) % 2147483648) / 2147483648;
+function resize(m) { n = m; pos = new Float64Array(n); for (let i = 0; i < n; i++) pos[i] = i; }
+window.__sloptimizeKnob('cars', resize);
+window.__sloptimizeSim({ seed: 42, tickHz: 60 });
+function collision() { let s = 0; for (let i = 0; i < n; i++) for (let j = 0; j < 256; j++) s += Math.sqrt(pos[i] + j); return s; }
+function junction() { let s = 0; const k = Math.floor(16 * Math.sqrt(n)); for (let i = 0; i < n; i++) for (let j = 0; j < k; j++) s += Math.sin(pos[i] + j); return s; }
+function step() {
+  tick++;
+  let t0 = performance.now(); collision(); __sloptimizeSection('collision', performance.now() - t0, 1);
+  t0 = performance.now(); junction(); __sloptimizeSection('junction', performance.now() - t0, 1);
+  if (BUG && tick === BUG) pos[0] += 0.5;   // a nudge the digest sees from this tick on
+  let h = 0, speed = 0;
+  for (let i = 0; i < Math.min(n, 1000); i++) { const v = rand(); pos[i] = (pos[i] + v) % 100000; speed += v; h = (h * 31 + Math.floor(pos[i] * 1000)) % 1000000007; }
+  __sloptimizeTick(tick, { agents: h, rng }, { meanSpeed: speed / Math.min(n, 1000) });
+}
+function loop() { requestAnimationFrame(loop); step(); }
+requestAnimationFrame(loop);
+</script></body>

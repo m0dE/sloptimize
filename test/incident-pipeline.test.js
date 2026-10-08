@@ -131,7 +131,7 @@ test('rotation is gated: below the floor or inside the cooldown a hitch is recor
 
 test('the gate is configurable, and a record without a parseable `at` gates on the wall clock', async () => {
   let now = 0;
-  const h = harness({ attributeFloorMs: 30, attributeCooldownMs: 5000, now: () => now });
+  const h = harness({ attributeFloorMs: 30, attributeCooldownMs: 5000, attributeLongFrameMs: 500, now: () => now });
   await h.p.start();
   await h.p.onRecord({ type: 'hitch', frameMs: 40, classification: [{ guess: 'long-script' }] });
   now = 4000;
@@ -152,7 +152,7 @@ test('an unread window rolls itself over so Profiler.stop never serializes a ses
   assert.equal(timers.length, 1);
   assert.equal(timers[0].ms, 10000);
   await timers[0].fn();
-  assert.deepEqual(h.calls.slice(3), ['Profiler.stop', 'Profiler.start']);
+  assert.deepEqual(h.calls.slice(3).filter((c) => c.startsWith('Profiler.')), ['Profiler.stop', 'Profiler.start']);
   assert.ok(!existsSync(join(h.dir, 'perf.jsonl')), 'a roll writes nothing');
   assert.equal(timers.length, 2, 're-armed');
   // A hitch's rotation re-arms the window too: the window measures unread time.

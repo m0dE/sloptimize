@@ -157,6 +157,7 @@ export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch
  * @param {string|Function} [opts.drive] a drive script (SPEC §3.13): run with `runDrive()`
  * @param {{gc?:boolean, snapshots?:boolean}} [opts.heap] soak instruments (SPEC §3.14) — both pause the page
  * @param {boolean} [opts.coverage] a coverage run (SPEC §3.12): precise function coverage, no sampler
+ * @param {boolean} [opts.workers]  false: the page's thread only, no worker samplers (default on, SPEC §3.18)
  * @param {string} [opts.build]      the bundle's identity, stamped on every record — several
  *   runs of one build are then one build with n runs in `history`, not n builds
  * @param {typeof WebSocket} [opts.WebSocket]  injectable transport (tests)
@@ -194,12 +195,14 @@ export async function attach(opts = {}) {
   let seq = 0;
   const pending = new Map();
   let open = true;
-  const send = (method, params = {}) => new Promise((res, rej) => {
+  // `sessionId`: a child session in flat mode — a worker the page started.
+  const sendOn = (sessionId, method, params = {}) => new Promise((res, rej) => {
     if (!open) { rej(new Error('target gone')); return; }
     const id = ++seq;
     pending.set(id, { res, rej });
-    ws.send(JSON.stringify({ id, method, params }));
+    ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
+  const send = (method, params) => sendOn(undefined, method, params);
   // The socket closing settles every in-flight call: a rotation the target
   // never answers must fail its record, not hang the chain behind it.
   let settleClosed;
@@ -226,7 +229,7 @@ export async function attach(opts = {}) {
     await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
   }
-  const pipeline = createIncidentPipeline({ dir, log, send, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
+  const pipeline = createIncidentPipeline({ dir, log, send, sendTo: sendOn, workers: opts.workers, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser, drive: drive?.meta }) });
   const onRecord = pipeline.onRecord;
 
@@ -244,7 +247,7 @@ export async function attach(opts = {}) {
         if (rec?.type === 'armed') settleArmed();
         void onRecord(rec);
       } catch { /* one bad record */ }
-    } else if (msg.method) pipeline.onEvent(msg.method, msg.params);
+    } else if (msg.method) pipeline.onEvent(msg.method, msg.params, msg.sessionId);
   };
 
   await send('Runtime.enable');

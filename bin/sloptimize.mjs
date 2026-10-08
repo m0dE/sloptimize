@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // ============================================================
-// sloptimize CLI — report | check | census | history | compare | touched | fix | doctor  (SPEC §8.1)
+// sloptimize CLI — report | check | census | history | compare | equivalence | sweep | touched | fix | doctor  (SPEC §8.1)
 // ============================================================
 // Files-first: every verb reads `.sloptimize/` in the cwd (or --dir) and
 // says what it cannot know instead of guessing. Exit codes are API:
 //   check: 0 all budgets pass · 1 breach · 2 bad budgets.json · 3 measured under other conditions than the budgets were set for · 4 no measurement · 5 cannot judge (too few runs, a budget unmeasured — run mode)
 //   compare: 0 compared · 3 refused: the sides were measured under different conditions (--allow-mismatch reads anyway) · 4 a side unmeasured
 //   compare --fail-on-regression: 0 no significant regression · 1 regressed · 3 incomparable (incl. the machine changed) · 4 unmeasured · 5 too few runs to judge
+//   equivalence: 0 identical / within tolerance · 1 diverged / drifted · 3 refused: different seed, tick rate or save · 4 no tick log · 5 too few common ticks to judge
+//   sweep: 0 measured · 2 bad usage · 4 a level measured nothing
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,10 +73,12 @@ if (cmd === 'report') {
   const auto = hitches.filter((h) => h.type === 'hitch');
   const jitters = hitches.filter((h) => h.type === 'jitter');
   const census = readJson('census.json');
+  // The whole ledger, read once: conditions, rates, spans, memory and reboots all fold it.
+  const ledger = readJsonl('perf.jsonl', Infinity);
   // The session's conditions (conditions.js): what every number below was
   // measured under — the display's refresh rate first among them.
   const C = await import('../src/conditions.js');
-  const conds = profile ? C.runConditions([profile, ...readJsonl('perf.jsonl', Infinity).filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
+  const conds = profile ? C.runConditions([profile, ...ledger.filter((r) => r.type === 'conditions' && (!profile.session || r.session === profile.session))],
     profile.session ? (await import('../src/runs.js')).readRuns(DIR).find((r) => r.session === profile.session) : null) : undefined;
   if (json) { out({ profile, conditions: conds, hitches: auto, usermarks: marks, jitters, census }); process.exit(0); }
   if (!profile) { console.log('no profile.json — is the game running with the sloptimize runtime?'); process.exit(4); }
@@ -90,6 +94,7 @@ if (cmd === 'report') {
   // no inside-render time and no program count to report — and a hidden
   // page's beat drew no frames to time.
   const fmt = (v, unit = '') => (v === undefined || v === null ? '—' : `${v}${unit}`);
+  const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
   if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${fmt(lastBeat.medianFrameMs, 'ms')} p95 ${fmt(lastBeat.p95Ms, 'ms')}`);
   if (profile.frame?.medianMs !== undefined) {
     console.log(`  frame median ${fmt(profile.frame.medianMs, 'ms')}  p95 ${fmt(profile.frame.p95Ms, 'ms')}  (~${fmt(profile.frame.fps, 'fps')})  inside-render ${fmt(profile.frame.insideRenderMs, 'ms')}`);
@@ -114,7 +119,7 @@ if (cmd === 'report') {
     const R = await import('../src/runs.js');
     const file = R.readRuns(DIR).find((r) => r.session === profile.session);
     const acc = file ? R.runBucket(file).tally : R.emptyTally();
-    for (const r of readJsonl('perf.jsonl', Infinity)) if (r.session === profile.session && r.type === 'profile' && r.tally && !(file && r.tier === 0)) R.foldTally(acc, r);
+    for (const r of ledger) if (r.session === profile.session && r.type === 'profile' && r.tally && !(file && r.tier === 0)) R.foldTally(acc, r);
     const rates = R.ratesOf(acc);
     if (rates) {
       const vals = Object.entries(rates.values).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${k} ${v}/${rates.per}`).join(' · ');
@@ -122,9 +127,61 @@ if (cmd === 'report') {
         ? `  rates (per wall second — no game clock: a build that renders faster covers more game time per second and flatters itself; window.__sloptimizeClock('sim', simMs, 1000) fixes it): ${vals}`
         : `  rates (per second of the game's ${rates.denominator.slice(6)} clock): ${vals}`);
     } else if (acc.clock?.mixed) console.log('  rates: the run reported two different game clocks — no honest denominator');
+    // Phases as spans (SPEC §3.15): how long each took, per unit of what it
+    // worked on, and the host's sections as ms × calls.
+    const S = await import('../src/spans.js');
+    const sessionLines = ledger.filter((r) => r.session === profile.session);
+    const spanRecs = PHASES ? H.onlyPhases(sessionLines, PHASES) : sessionLines;
+    const table = S.spanTable(S.phaseSpans(spanRecs));
+    if (table.size) {
+      const parts = [];
+      for (const [ph, t] of table) {
+        const size = Object.entries(t.scale).map(([u, n]) => `${n} ${u}`).join(', ');
+        const per = Object.entries(t.perUnit).map(([u, v]) => `${v} ms/${S.oneOf(u)}`).join(', ');
+        if (t.ms !== undefined) parts.push(`${ph} ${t.ms} ms${t.spans > 1 ? ` (mean of ${t.spans})` : ''}${size ? ` · ${size}${per ? ` → ${per}` : ''}` : ''}`);
+        else parts.push(`${ph} (still open${size ? ` · ${size}` : ''})`);
+      }
+      console.log(`  phases: ${parts.join('  |  ')}`);
+      for (const [ph, t] of table) {
+        if (!t.sections.size) continue;
+        const secs = [...t.sections].sort((a, b) => b[1].ms - a[1].ms).slice(0, 8)
+          .map(([n, e]) => `${n} ${e.ms} ms${e.calls > 0 ? ` x${e.calls} (${e.perCall} ms/call)` : ''}`);
+        console.log(`    sections in ${ph}: ${secs.join(' · ')}`);
+      }
+    }
+    // Which statement inside the heaviest functions: V8's per-line ticks,
+    // whole run (or the --phase), not one hitch's chunk.
+    const phBucket = file ? R.runBucket(file, PHASES) : null;
+    if (file) {
+      const top = R.heaviestSelf(phBucket, 3, file.intervalUs);
+      if (top.length) {
+        console.log(`  heaviest self time${PHASES ? ` (${[...PHASES].join(',')})` : ' (whole run)'}:`);
+        for (const f of top) {
+          const base = String(f.url).replace(/[?#].*$/, '').split('/').pop();
+          console.log(`    ${f.fn}@${base}:${f.line}${f.selfMs !== undefined ? ` ${f.selfMs}ms` : ''} (${pct(f.share)} of JS)${f.lines.length ? `  ${f.lines.map((l) => `:${l.line} ${pct(l.share)}`).join('  ')}` : ''}`);
+        }
+      }
+    }
+    // The page and its workers (SPEC §3.18): busy per thread, ms of each
+    // frame it worked, and which thread is the ceiling.
+    if (file) {
+      const T = await import('../src/threads.js');
+      const bucket = phBucket;
+      const rows = T.threadRows(bucket, bucket.frame?.medianMs);
+      if (rows.length) {
+        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
+        const v = T.threadVerdict(rows, { clockRate: T.clockRateOf(acc) });
+        if (v) console.log(`    → ${v.text}`);
+        for (const r of rows.filter((x) => x.name !== 'main')) {
+          const t = bucket.threads.get(r.name);
+          const top = R.heaviestSelf(t, 2, file.intervalUs);
+          if (top.length) console.log(`    ${r.name} heaviest: ${top.map((f) => `${f.fn}@${String(f.url).replace(/[?#].*$/, '').split('/').pop()}:${f.line} (${pct(f.share)})${f.lines.length ? ` ${f.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' ')}` : ''}`).join(' · ')}`);
+        }
+      }
+    }
     // Long sessions (SPEC §3.14): live GPU objects and the JS heap, as trends.
     const M = await import('../src/memory.js');
-    for (const l of M.memoryLines(M.memoryTrends(readJsonl('perf.jsonl', Infinity).filter((r) => r.session === profile.session)))) console.log(l);
+    for (const l of M.memoryLines(M.memoryTrends(sessionLines))) console.log(l);
   }
   // The host's own frame (SPEC §3.2b): the newest profile line with sections
   // says where the loop's time goes and what its counters read, without
@@ -146,7 +203,6 @@ if (cmd === 'report') {
   // one under a tenth of the stall is not printed as one (attach's
   // low-share gate; applied here too, to lines written before it existed).
   const { ATTRIBUTE_MIN_SHARE } = await import('../src/incident-pipeline.mjs');
-  const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
   const attribution = (h) => {
     const top = h.topFrames?.[0];
     if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
@@ -161,9 +217,12 @@ if (cmd === 'report') {
       const rest = s ? `; the chunk's other time: native ${s.programMs}ms, gc ${s.gcMs}ms` : '';
       return `  unattributed (heaviest JS ${name} = ${pct(share)} of the frame${rest})`;
     }
-    // The chunk spans more than the frame, so a share can pass 100%: that
-    // reads as "all of it", not as more than all of it.
-    return `  top ${name} (${pct(Math.min(share, 1))} of frame)`;
+    // A chunk spans more than the frame, so a share can pass 100%: that
+    // reads as "all of it", not as more than all of it. Cut from the frame's
+    // own samples (`profileWindow: 'frame'`) it is the function's share.
+    // The hot lines name the statement inside it.
+    const lines = top.lines?.length ? ` — ${top.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : '';
+    return `  top ${name} (${pct(Math.min(share, 1))} of frame)${lines}`;
   };
   for (const h of auto.slice(-5)) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}`);
@@ -174,7 +233,7 @@ if (cmd === 'report') {
   // one of them — the first boot runs before the recorder, so one `armed`
   // per session is the normal case.
   const armedBy = new Map();
-  for (const r of readJsonl('perf.jsonl', Infinity)) if (r.type === 'armed' && r.session) armedBy.set(r.session, (armedBy.get(r.session) ?? 0) + 1);
+  for (const r of ledger) if (r.type === 'armed' && r.session) armedBy.set(r.session, (armedBy.get(r.session) ?? 0) + 1);
   const reboots = [...new Set(hitches.map((r) => r.session).filter(Boolean))].filter((s) => armedBy.get(s) > 1);
   for (const s of reboots) console.log(`  note: session ${s} armed ${armedBy.get(s)}× — the page loaded ${armedBy.get(s)} times under the recorder, so load-phase hitch counts and worst frames span every one of those boots`);
   for (const m of marks.slice(-3)) {
@@ -678,8 +737,14 @@ if (cmd === 'compare') {
   console.log(`  ${'metric'.padEnd(w)}  ${'A median [lo–hi]'.padEnd(24)}  ${'B median [lo–hi]'.padEnd(24)}  ${'Δ'.padStart(9)}  ${'noise'.padStart(7)}  verdict`);
   for (const r of c.rows) {
     const d = `${r.delta > 0 ? '+' : ''}${r.delta}`;
-    const v = r.verdict === 'significant' ? '✱ significant' : r.verdict === 'unproven' ? `unproven (${r.why})` : 'within noise';
+    const v = r.verdict === 'significant' ? '✱ significant' : r.verdict === 'unproven' || r.verdict === 'unlike' ? `${r.verdict} (${r.why})` : 'within noise';
     console.log(`  ${r.metric.slice(0, w).padEnd(w)}  ${sp(r.a).padEnd(24)}  ${sp(r.b).padEnd(24)}  ${d.padStart(9)}  ${String(r.noise ?? '—').padStart(7)}  ${v}`);
+  }
+  // The host's sections (spans.js): which factor of the total moved — the
+  // call count or the time per call. Two different bugs, two different fixes.
+  for (const x of c.sections ?? []) {
+    console.log(`  section ${x.name}   ${x.a.ms} -> ${x.b.ms} ms${x.a.calls !== undefined && x.b.calls !== undefined ? `   x${x.a.calls} -> x${x.b.calls}` : ''}${x.unlike ? `   (${x.unlike})` : ''}`);
+    console.log(`    ${x.text}`);
   }
   if (c.composition) console.log(`  composition (${c.composition.by}): shares moved ${+(c.composition.moved * 100).toFixed(1)}% A→B${c.composition.within !== undefined ? `, ${+(c.composition.within * 100).toFixed(1)}% between runs of one side` : ''}`);
   for (const wn of c.warnings) console.log(`  ⚠ ${wn}`);
@@ -690,6 +755,135 @@ if (cmd === 'compare') {
     else console.log(`gate: cannot pass — ${g.why}`);
   }
   process.exit(gateExit);
+}
+
+if (cmd === 'equivalence') {
+  // Behavioural equivalence (SPEC §3.16): the first tick two runs' sim state
+  // disagrees, from ticks/<session>.jsonl (the page's __sloptimizeTick, or a
+  // headless sim's createTickLog). Exact by default; --tolerant compares
+  // windowed means of the summary values instead.
+  const T = await import('../src/ticks.js');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : undefined; };
+  const valued = ['--dir', '--ticks', '--tolerance', '--window'];
+  const specs = args.slice(1).filter((a, i, all) => !a.startsWith('--') && !valued.includes(all[i]) && !valued.includes(all[i - 1]));
+  if (specs.length < 2) { console.error('sloptimize equivalence: two sides are required — sloptimize equivalence <build|session|ticks.jsonl> <build|session|ticks.jsonl> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]]'); process.exit(2); }
+  const num = (flag, ok) => { const v = get(flag); if (v === undefined) return undefined; const n = Number(v); if (!ok(n)) { console.error(`sloptimize equivalence: ${flag} ${v} is not valid`); process.exit(2); } return n; };
+  const ticks = num('--ticks', (n) => Number.isInteger(n) && n > 0);
+  const tolerance = num('--tolerance', (n) => n > 0 && n < 1);
+  const window = num('--window', (n) => Number.isInteger(n) && n > 0);
+  const sides = specs.slice(0, 2).map((sp) => T.resolveTickSide(sp, DIR));
+  for (const [i, sd] of sides.entries()) if (sd.error) { out({ error: sd.error }, `sloptimize equivalence: ${sd.error}`); process.exit(4); }
+  const r = T.equivalence(sides[0].log, sides[1].log, { ticks, mode: args.includes('--tolerant') ? 'tolerant' : args.includes('--exact') ? 'exact' : undefined, ...(tolerance ? { tolerance } : {}), ...(window ? { window } : {}) });
+  const code = { identical: 0, within: 0, diverged: 1, drifted: 1, refused: 3, 'no-data': 4, insufficient: 5 }[r.verdict] ?? 2;
+  if (json) { out(r); process.exit(code); }
+  const label = (sd, spec) => `${spec}${sd.log.session && sd.log.session !== spec ? ` (session ${sd.log.session})` : ''}${sd.note ? ` — ${sd.note}` : ''}`;
+  console.log(`equivalence A=${label(sides[0], specs[0])} vs B=${label(sides[1], specs[1])}${r.mode ? `  mode ${r.mode}` : ''}`);
+  const sim = (x) => [x.seed !== undefined ? `seed ${x.seed}` : '', x.tickHz ? `${x.tickHz} Hz` : '', x.save ? `save ${x.save}` : ''].filter(Boolean).join(', ') || 'undeclared';
+  console.log(`  sim: A ${sim(r.a.sim)} · B ${sim(r.b.sim)}`);
+  if (r.range) console.log(`  ticks ${r.range.from}–${r.range.to}: ${r.range.compared} in both logs${r.range.missingA ? `, ${r.range.missingA} missing from A` : ''}${r.range.missingB ? `, ${r.range.missingB} missing from B` : ''}`);
+  const show = (d) => (d && typeof d === 'object' ? Object.entries(d).map(([k, v]) => `${k}=${v}`).join(' ') : String(d));
+  if (r.verdict === 'identical') console.log(`  ✔ identical through tick ${r.through} (${r.range.compared} ticks)`);
+  else if (r.verdict === 'diverged') {
+    console.log(`  ✗ first divergence at tick ${r.tick}${r.identicalThrough !== null ? ` (identical through ${r.identicalThrough})` : ' (the first tick compared)'}`);
+    console.log(`    A: ${show(r.a.digest)}`);
+    console.log(`    B: ${show(r.b.digest)}`);
+    if (r.same) console.log(`    differs: ${r.parts.join(', ')}${r.same.length ? `   (identical: ${r.same.join(', ')})` : ''}`);
+  } else if (r.verdict === 'within') console.log(`  ✔ every value within ${+(r.tolerance * 100).toFixed(2)}% over ${r.window}-tick windows (largest: ${Object.entries(r.drift).sort((a, b) => b[1].rel - a[1].rel).slice(0, 3).map(([k, d]) => `${k} ${+(d.rel * 100).toFixed(2)}%`).join(', ')})`);
+  else if (r.verdict === 'drifted') console.log(`  ✗ ${r.first.value} drifts ${+(r.first.rel * 100).toFixed(1)}% from tick ${r.first.from} (window ${r.first.from}–${r.first.to}: A ${r.first.a}, B ${r.first.b}; tolerance ${+(r.tolerance * 100).toFixed(2)}%)`);
+  else console.log(`  ${r.verdict === 'refused' ? 'refused' : r.verdict === 'insufficient' ? 'cannot judge' : 'no data'}: ${r.why}`);
+  for (const w of r.warnings ?? []) console.log(`  ⚠ ${w}`);
+  process.exit(code);
+}
+
+if (cmd === 'sweep') {
+  // Cost against N (SPEC §3.17): each level of a game knob in its own attached
+  // session, every metric of the `sweep` phase against N, with a fitted
+  // exponent and the slope of every step. `--show [id]` re-reads a saved sweep.
+  const S = await import('../src/sweep.js');
+  const { readRuns } = await import('../src/runs.js');
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : undefined; };
+  const sdir = join(DIR, 'sweeps');
+  const budgetAt = get('--frame-budget');
+  const frameBudgetMs = budgetAt !== undefined ? Number(budgetAt) : 1000 / 60;
+  if (!(frameBudgetMs > 0)) { console.error('sloptimize sweep: --frame-budget is the frame time in ms to find N for (default 16.7)'); process.exit(2); }
+  const print = (saved, t) => {
+    // `levels` stays the saved one (with each level's sessions); the table's
+    // per-level run counts ride as `measured`.
+    if (json) { out({ ...saved, rows: t.rows, ...(t.capacity ? { capacity: t.capacity } : {}), measured: t.levels }); return; }
+    const w = Math.min(Math.max(12, ...t.rows.map((r) => r.metric.length)), 48);
+    console.log(`sweep ${saved.id}: ${saved.knob} = ${saved.levels.map((l) => l.value).join(', ')}  (${saved.runs} run${saved.runs === 1 ? '' : 's'} a level, ${saved.settleS}s settle + ${saved.measureS}s measured${saved.build ? `, build ${saved.build}` : ''})`);
+    const head = t.levels.map((l) => String(l.value).padStart(9)).join('');
+    console.log(`  ${'metric'.padEnd(w)}${head}   ${'fit'.padEnd(18)}  steps        shape`);
+    for (const r of t.rows) {
+      const cells = r.cells.map((c) => (c ? String(+c.median.toPrecision(3)) : '—').padStart(9)).join('');
+      const fit = r.fit ? `~n^${r.fit.k}${r.fit.lo !== undefined ? ` [${r.fit.lo}–${r.fit.hi}]` : ''}` : '—';
+      console.log(`  ${r.metric.slice(0, w).padEnd(w)}${cells}   ${fit.padEnd(18)}  ${r.steps.map((x) => (x === null ? '—' : x)).join(' → ').padEnd(12)} ${r.shape}`);
+    }
+    if (t.capacity) {
+      const c = t.capacity, k = saved.knob;
+      if (c.holds === null) console.log(`  frame budget ${c.budgetMs} ms: already over at the smallest level (${c.over} ${k}: ${c.overMs} ms)`);
+      else if (c.over !== null) console.log(`  frame budget ${c.budgetMs} ms: holds through ${c.holds} ${k}, over at ${c.over} (${c.overMs} ms)${c.n ? `; crosses at ~${c.n} (interpolated)` : ''}`);
+      else console.log(`  frame budget ${c.budgetMs} ms: holds through every level (${c.holds} ${k})${c.n ? `; crosses at ~${c.n} — EXTRAPOLATED past the largest level from the last step` : ''}`);
+    }
+    console.log('  fit = log-log slope over every run, [95% interval]; steps = slope between adjacent levels (a fixed overhead flattens the first, the last predicts the next size). A tier-0 frame is vsync-quantized: read the section, function and thread rows for shape.');
+  };
+  if (args.includes('--show')) {
+    let files = [];
+    try { files = readdirSync(sdir).filter((f) => f.endsWith('.json')).sort(); } catch { /* none */ }
+    const want = get('--show');
+    const f = want ? files.find((x) => x === `${want}.json`) : files.at(-1);
+    if (!f) { out({ error: 'no sweep' }, `no sweep${want ? ` ${want}` : ''} under ${sdir} — run one: sloptimize sweep --knob <name> --values a,b,c --launch <url>`); process.exit(4); }
+    const saved = JSON.parse(readFileSync(join(sdir, f), 'utf8'));
+    print(saved, S.sweepTable(saved.levels, readJsonl('perf.jsonl', Infinity), readRuns(DIR), { frameBudgetMs }));
+    process.exit(0);
+  }
+  const knob = get('--knob');
+  const values = (get('--values') ?? '').split(',').map((x) => Number(x.trim())).filter((x) => Number.isFinite(x) && x > 0);
+  if (!knob || values.length < 2) { console.error('sloptimize sweep: --knob <name> --values a,b,c (≥2 positive levels; ≥3 for a fitted interval) — the game registers window.__sloptimizeKnob(name, (n) => …)'); process.exit(2); }
+  const nums = (flag, dflt, ok) => { const v = get(flag); if (v === undefined) return dflt; const n = Number(v); if (!ok(n)) { console.error(`sloptimize sweep: ${flag} ${v} is not valid`); process.exit(2); } return n; };
+  const runs = nums('--runs', 2, (n) => Number.isInteger(n) && n >= 1);
+  const settleS = nums('--settle', 5, (n) => n >= 0);
+  const measureS = nums('--duration', 20, (n) => n > 0);
+  const { attach } = await import('../src/attach.mjs');
+  const base = { launch: get('--launch'), port: get('--port') ? Number(get('--port')) : undefined, dir: DIR, headless: args.includes('--headless'), build: get('--build'),
+    waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined, slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), log: () => {} };
+  const id = new Date().toISOString().replace(/[:.]/g, '-');
+  const saved = { type: 'sweep', v: 1, id, knob, runs, settleS, measureS, ...(base.build ? { build: base.build } : {}), levels: [] };
+  // Smallest first: the order a player grows the city in.
+  for (const value of [...new Set(values)].sort((a, b) => a - b)) {
+    const level = { value, sessions: [] };
+    for (let i = 0; i < runs; i++) {
+      let session;
+      try {
+        session = await attach({ ...base, drive: S.levelDrive(knob, value, { settleS, measureS }) });
+        console.log(`[sweep] ${knob}=${value} run ${i + 1}/${runs} — session ${session.session}`);
+        await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
+      } catch (e) {
+        if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+        console.error(`sloptimize sweep: ${knob}=${value} run ${i + 1}: ${e?.message ?? e}`);
+        // The levels already measured are kept: a tab that dies at 9000 is a
+        // finding, and the sessions before it are a sweep up to there.
+        if (level.sessions.length) saved.levels.push(level);
+        if (saved.levels.length) {
+          saved.incomplete = `stopped at ${knob}=${value} run ${i + 1}: ${String(e?.message ?? e).slice(0, 200)}`;
+          mkdirSync(sdir, { recursive: true });
+          writeFileSync(join(sdir, `${id}.json`), JSON.stringify(saved, null, 2));
+          print(saved, S.sweepTable(saved.levels, readJsonl('perf.jsonl', Infinity), readRuns(DIR), { frameBudgetMs }));
+          if (!json) console.log(`  INCOMPLETE — ${saved.incomplete}; saved: ${join(sdir, `${id}.json`)}`);
+        }
+        process.exit(4);
+      }
+      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+      level.sessions.push(session.session);
+    }
+    saved.levels.push(level);
+  }
+  mkdirSync(sdir, { recursive: true });
+  writeFileSync(join(sdir, `${id}.json`), JSON.stringify(saved, null, 2));
+  print(saved, S.sweepTable(saved.levels, readJsonl('perf.jsonl', Infinity), readRuns(DIR), { frameBudgetMs }));
+  if (!json) console.log(`  saved: ${join(sdir, `${id}.json`)} — re-read with sloptimize sweep --show ${id}`);
+  process.exit(0);
 }
 
 if (cmd === 'coverage') {
@@ -931,6 +1125,7 @@ if (cmd === 'attach') {
     waitMs: get('--wait') !== undefined ? waitSeconds(get('--wait')) * 1000 : undefined,
     minShare: get('--min-share') !== undefined ? share(get('--min-share')) : undefined,
     slots: !args.includes('--no-slots'),
+    workers: !args.includes('--no-workers'),
     coverage: args.includes('--coverage'),
     drive: drivePath,
     heap: { gc: args.includes('--heap-gc'), snapshots: args.includes('--heap-snapshots') },
@@ -991,5 +1186,5 @@ if (cmd === 'attach') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|equivalence|sweep|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--no-workers] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize equivalence <A> <B> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]] [--json]   (A/B: a build, a session or a ticks/*.jsonl; exit 0 identical · 1 diverged · 3 different sim · 4 no ticks · 5 too few ticks)\n       sloptimize sweep --knob <name> --values a,b,c --launch <url>|--port N [--runs 2] [--settle 5] [--duration 20] [--build <id>] [--frame-budget 16.7] | sweep --show [id]\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

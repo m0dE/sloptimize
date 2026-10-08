@@ -27,7 +27,7 @@ let driveState = null;   // { status: 'running'|'done'|'failed', error? } of the
 const TOOLS = [
   { name: 'get_report', description: 'Current profile, recent incidents (classified, clustered), and census hints from the project’s .sloptimize/ directory.',
     inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'max incident records (default 20)' } } } },
-  { name: 'check_budgets', description: 'Check the measurement against .sloptimize/budgets.json. Returns per-budget verdicts; "fast enough" as data. Per-phase budgets (perf.budget.<phase>.<metric>, e.g. load.worst_ms, steady.p95_ms, steady.frames_over_100ms_per_min) and session/build judge a WHOLE run; a build\'s value is the median of its runs. `insufficient` means it could not judge (too few runs, a budget unmeasured) — never read that as a pass. `refused` means the run was measured under other conditions than budgets.json\'s perf.conditions, or is a coverage run.',
+  { name: 'check_budgets', description: 'Check the measurement against .sloptimize/budgets.json. Returns per-budget verdicts; "fast enough" as data. Per-phase budgets (perf.budget.<phase>.<metric>, e.g. load.worst_ms, steady.p95_ms, steady.frames_over_100ms_per_min, load.ms_per.road — the phase\'s cost per unit of work the page declared with __sloptimizeScale) and session/build judge a WHOLE run; a build\'s value is the median of its runs. `insufficient` means it could not judge (too few runs, a budget unmeasured) — never read that as a pass. `refused` means the run was measured under other conditions than budgets.json\'s perf.conditions, or is a coverage run.',
     inputSchema: { type: 'object', properties: { session: { type: 'string' }, build: { type: 'string' }, minRuns: { type: 'number' } } } },
   { name: 'get_history', description: 'The deployment’s timeline folded from perf.jsonl: time buckets (frame p95, draw calls, hitch spikes, build), one measured window per build, and the fix ledger (fixes.jsonl) — the before/after evidence behind every recorded fix.',
     inputSchema: { type: 'object', properties: { buckets: { type: 'number', description: 'time slices (default 24)' } } } },
@@ -44,6 +44,11 @@ const TOOLS = [
       allowMismatch: { type: 'boolean', description: 'read the deltas even when the conditions differ (they then include the difference)' },
       failOnRegression: { type: 'boolean', description: 'the gate: `gate.verdict` is regressed (a significant move the worse way), pass, insufficient (fewer than minRuns a side — not a pass) or machine (uniform change, unchanged composition)' },
       minRuns: { type: 'number', description: 'runs a side the gate needs (default 3)' } }, required: ['a', 'b'] } },
+  { name: 'check_equivalence', description: 'Behavioural equivalence (SPEC §3.16): do two runs simulate the SAME thing, tick by tick? Reads the per-tick state digests the game reports (__sloptimizeTick(tick, digest, values)) and returns `identical` through N ticks, or `diverged` with the first divergent tick, both digests and which named parts differ. tolerant:true compares windowed means of the summary values instead — for a change that alters state on purpose (staggered updates, LOD sims). Call before claiming an optimised or worker-moved sim is identical. `refused` = different seed/tick rate/save; `insufficient` = too few common ticks — neither is a pass.',
+    inputSchema: { type: 'object', properties: { a: { type: 'string', description: 'build, session id or ticks/*.jsonl' }, b: { type: 'string' }, ticks: { type: 'number', description: 'ticks that must be compared' },
+      tolerant: { type: 'boolean' }, tolerance: { type: 'number', description: 'relative, default 0.02' }, window: { type: 'number', description: 'ticks per window, default 60' } }, required: ['a', 'b'] } },
+  { name: 'get_sweep', description: 'The latest (or a named) scaling sweep (SPEC §3.17, recorded with `sloptimize sweep --knob <name> --values a,b,c`): every metric — frame, each host section ms/call, hot functions, worker threads — against the knob\'s N, with the fitted exponent, its 95% interval, the slope of each step and a shape (linear / SUPER-LINEAR / QUADRATIC or worse / noisy), plus the N where the frame crosses its budget. The phase that is worst BEHAVED is the one to fix before the player builds a bigger city — not necessarily the biggest.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } } } },
   { name: 'check_touched', description: 'Did the measured run EXECUTE the change under test? For each changed file (default: git diff of the working tree, else the last commit), whether any profiler sample of the attach run landed in it. Call before trusting any before/after: a clean A/B on a benchmark that never ran the new code path proves nothing. Bundled builds need `maps` to credit samples to sources.',
     inputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string', description: 'git rev to diff against' },
       build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
@@ -138,6 +143,15 @@ async function callTool(name, args = {}) {
     if (name === 'compare_runs' && args.minRuns) argv.push('--min-runs', String(args.minRuns));
     return cliJson(argv);
   }
+  if (name === 'check_equivalence') {
+    const argv = ['equivalence', String(args.a), String(args.b)];
+    if (args.ticks) argv.push('--ticks', String(args.ticks));
+    if (args.tolerant === true) argv.push('--tolerant');
+    if (args.tolerance) argv.push('--tolerance', String(args.tolerance));
+    if (args.window) argv.push('--window', String(args.window));
+    return cliJson(argv);
+  }
+  if (name === 'get_sweep') return cliJson(['sweep', '--show', ...(args.id ? [String(args.id)] : [])]);
   if (name === 'check_coverage') {
     const argv = ['coverage'];
     if (args.session) argv.push('--session', String(args.session)); else if (args.build) argv.push('--build', String(args.build));

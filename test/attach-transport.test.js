@@ -35,7 +35,7 @@ const open = (over = {}) => attach({ wsUrl: 'ws://fake/devtools/page/1', WebSock
 test('attach over an explicit wsUrl runs the CDP sequence and exposes `closed`', async () => {
   const s = await open();
   assert.deepEqual(FakeWS.last.sent, ['Runtime.enable', 'Page.enable', 'Runtime.addBinding', 'Page.addScriptToEvaluateOnNewDocument',
-    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Page.reload']);
+    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Target.setAutoAttach', 'Page.reload']);
   assert.ok(s.closed instanceof Promise);
   await s.close();
 });
@@ -62,7 +62,9 @@ test('a rotation the target never answers is rejected when the socket closes, an
   ws.answer = false;
   ws.binding({ type: 'hitch', at: '2026-09-09T00:00:00Z', frameMs: 300, classification: [{ guess: 'long-script' }] });
   await new Promise((r) => setTimeout(r, 5));
-  assert.equal(ws.sent.at(-1), 'Profiler.stop', 'the rotation is in flight, unanswered');
+  // One batch, in order: the clock reads bracket the stop and start, which go
+  // out together (incident-pipeline.mjs, rotateProfile) — all unanswered.
+  assert.deepEqual(ws.sent.slice(-4), ['Runtime.evaluate', 'Profiler.stop', 'Profiler.start', 'Runtime.evaluate'], 'the rotation is in flight, unanswered');
   ws.drop();
   await s.closed;
   await new Promise((r) => setTimeout(r, 5));

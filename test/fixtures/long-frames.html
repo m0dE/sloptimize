@@ -1,0 +1,50 @@
+<!doctype html><title>long frames</title><body>
+<script>
+// A load made of long frames: one 2 s synchronous city build, then back-to-
+// back 300 ms frames that ALTERNATE between two functions. The phase names
+// the function each frame ran, so a hitch (emitted at the start of the next
+// frame, before the next phase is set) carries the function its OWN frame
+// ran — an attribution one frame late names the other one.
+function busy(ms, step) {
+  const until = performance.now() + ms;
+  let x = 0;
+  while (performance.now() < until) x = step(x);
+  return x;
+}
+function loadCity(roads) {
+  let x = 0;
+  for (let r = 0; r < roads; r++) {
+    const t0 = performance.now();
+    x += busy(50, (v) => v + Math.sqrt(v + 1));      // the row walk: the line that must be named
+    __sloptimizeSection('createSidewalks', performance.now() - t0, 1);
+  }
+  return x;
+}
+// One function per frame, each a loop of its own: an attribution one frame
+// late names a NEIGHBOUR's function, which a shared fnA/fnB pair could hide
+// (and V8, once it has optimized a hot pair, often samples them as (program)).
+const works = [];
+for (let i = 0; i < 12; i++) {
+  works.push(new Function(`return function work${i}() { const until = performance.now() + 300; let x = 0; while (performance.now() < until) x += Math.${i % 2 ? 'sin' : 'sqrt'}(x + 1); return x; }`)());
+}
+let frames = 0, work = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  frames++;
+  if (frames === 60) {
+    window.__sloptimizePhase = 'load';
+    __sloptimizeScale('roads', 40);
+    loadCity(40);
+    window.__sloptimizePhase = 'settle';
+  } else if (frames >= 90 && work < 12) {
+    const f = works[work++];
+    window.__sloptimizePhase = `work_${f.name}`;
+    // Its own task: with no JS caller, V8 cannot inline it out of the stack
+    // (inlined into loop(), both would sample as loop — the stated limit).
+    setTimeout(f, 0);
+  } else if (work === 12) {
+    window.__sloptimizePhase = 'play';
+  }
+}
+requestAnimationFrame(loop);
+</script></body>

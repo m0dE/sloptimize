@@ -172,7 +172,7 @@ test('attachInApp: the CDP sequence over webContents.debugger, regime from the G
   const s = await attachInApp({ ...f, dir, log: (l) => logs.push(l) });
   assert.equal(s.regime, 'hardware');
   assert.deepEqual(f.commands, ['Runtime.enable', 'Page.enable', 'Runtime.addBinding', 'Page.addScriptToEvaluateOnNewDocument',
-    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Page.reload']);
+    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Target.setAutoAttach', 'Page.reload']);
   f.dbg.emit('message', {}, ...binding({ type: 'armed', url: 'app://index.html' }));
   f.dbg.emit('message', {}, ...binding({ type: 'profile', frame: { medianMs: 16.6 } }));
   f.dbg.emit('message', {}, ...binding({ type: 'hitch', at: '2026-09-09T10:00:00Z', frameMs: 210, classification: [{ guess: 'long-script' }] }));

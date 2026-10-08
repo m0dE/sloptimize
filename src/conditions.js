@@ -52,6 +52,11 @@ export const CONDITION_FIELDS = [
     why: 'a headless browser presents nothing and paces frames itself' },
   { key: 'samplerUs', label: 'sampler interval', material: true, unit: ' µs', get: (c) => num(c.sampler?.intervalUs),
     why: 'the sampling profiler\'s own cost scales with its rate' },
+  // Worker threads given a sampler (SPEC §3.18): a sampler costs the worker
+  // it runs in, so a run that profiled the sim worker does not compare with
+  // one that did not. Absent on a page with no workers — and on runs from
+  // before workers were profiled, which read as page-only.
+  { key: 'workers', label: 'workers profiled', material: true, get: (c) => (c.instrument === 'attach' ? (Array.isArray(c.sampler?.workers) && c.sampler.workers.length ? c.sampler.workers.join(', ') : 'none') : undefined) },
   { key: 'drive', label: 'drive script', material: true, get: (c) => (c.instrument || c.drive ? str(c.drive?.hash) ?? str(c.drive) ?? 'none' : undefined),
     why: 'a drive script decides what the run does; two scripts are two workloads' },
   { key: 'soak', label: 'soak instruments', material: true, get: (c) => (c.instrument ? [c.soak?.forcedGc ? 'forced GC each minute' : '', c.soak?.heapSnapshots ? 'heap snapshots' : ''].filter(Boolean).join(' + ') || 'none' : undefined),

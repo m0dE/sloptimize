@@ -33,6 +33,8 @@
 import { stableFile } from './footprint.js';
 import { runBucket, emptyTally, foldTally, ratesOf } from './runs.js';
 import { runConditions, compareConditions } from './conditions.js';
+import { phaseSpans, spanTable, oneOf, sectionVerdict } from './spans.js';
+import { threadRows } from './threads.js';
 
 function median(vals) {
   if (vals.length === 0) return undefined;
@@ -40,7 +42,9 @@ function median(vals) {
   const mid = s.length >> 1;
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 }
-const r3 = (x) => (x === undefined ? undefined : +x.toFixed(3));
+// Three decimals, but never fewer than 4 significant figures: a cost per
+// unit or per call of 0.0049 ms must not compare as 0.005 against 0.005.
+const r3 = (x) => (x === undefined ? undefined : x !== 0 && Math.abs(x) < 1 ? +x.toPrecision(4) : +x.toFixed(3));
 
 /** Composition moved less than this (total variation distance of the share
  *  vectors) while the frame moved ≥ UNIFORM_RATIO: the machine, not the code. */
@@ -92,6 +96,30 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
   for (const r of records) if (r.type === 'profile' && r.tally && !(run && r.tier === 0)) foldTally(tally, r);
   const rates = ratesOf(tally);
   if (rates) for (const [k, v] of Object.entries(rates.values)) put(`rate ${k} /${rates.per}`, v);
+  // Phases as spans (spans.js): how long each took, per unit of what it
+  // worked on, and the host's sections as total ms × calls.
+  const table = spanTable(phaseSpans(records));
+  const scales = {}, sectionPhase = {};
+  for (const [ph, t] of table) {
+    if (t.ms !== undefined) put(`phase ${ph} ms`, t.ms);
+    if (Object.keys(t.scale).length) scales[ph] = t.scale;
+    for (const [u, v] of Object.entries(t.perUnit)) put(`phase ${ph} ms/${oneOf(u)}`, v);
+    for (const [name, e] of t.sections) {
+      // Keyed by phase whenever the phase has a name — decided by the
+      // record, never by what else this run reported, so two runs' rows
+      // always line up (`load/createSidewalks`).
+      const k = ph === '?' ? name : `${ph}/${name}`;
+      sectionPhase[k] = ph;
+      put(`section ${k} total ms`, e.ms);
+      if (e.calls > 0) { put(`section ${k} calls`, e.calls); put(`section ${k} ms/call`, e.perCall); }
+    }
+  }
+  // Threads (SPEC §3.18): each one's busy share and ms of the frame, so a
+  // sim that moved into a worker is a row of its own, not a disappearance.
+  for (const t of bucket ? threadRows(bucket, m['frame median ms']) : []) {
+    put(`thread ${t.name} busy %`, +(t.busy * 100).toFixed(1));
+    if (t.perFrameMs !== undefined) put(`thread ${t.name} ms/frame`, t.perFrameMs);
+  }
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;
   if (bucket && js > 0) {
@@ -104,9 +132,26 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
       fnShares.set(k, (fnShares.get(k) ?? 0) + r.self / js);
     }
   }
+  // A worker's functions, each under its thread and a share of THAT thread's
+  // JS: a sim worker's step() is not a slice of the page. Rows of their own;
+  // the page's composition check reads the page's shares only.
+  let workerFnShares;
+  if (bucket?.threads?.size) {
+    workerFnShares = new Map();
+    for (const [name, t] of bucket.threads) {
+      const tjs = t.samples - t.program - t.gc;
+      if (!(tjs > 0)) continue;
+      for (const r of t.fns.values()) {
+        if (!r.self) continue;
+        const k = `${name}:${r.fn}@${stableFile(r.url) || '?'}`;
+        workerFnShares.set(k, (workerFnShares.get(k) ?? 0) + r.self / tjs);
+      }
+    }
+  }
   const tier = records.some((r) => r.tier === 0) || run ? 0 : records.some((r) => r.type === 'heartbeat' || r.type === 'profile') ? 1 : undefined;
   const conditions = runConditions([...records, ...conditionLines], run);
-  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, conditions, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}) };
+  const spans = Object.keys(scales).length || Object.keys(sectionPhase).length ? { scales, sectionPhase } : undefined;
+  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, conditions, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}), ...(spans ? { spans } : {}), ...(workerFnShares?.size ? { workerFnShares } : {}) };
 }
 
 function spread(vals) {
@@ -169,6 +214,16 @@ export function compareSides(A, B, { phaseScoped = false } = {}) {
       .slice(0, FN_ROWS);
     for (const k of keys) rows.push(row(`fn ${k} %js`, fa.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2)), fb.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2))));
   }
+  // Worker functions (SPEC §3.18): the same rows, each a share of its thread.
+  const wa = A.runs.filter((r) => r.workerFnShares), wb = B.runs.filter((r) => r.workerFnShares);
+  if (wa.length && wb.length) {
+    const ma = meanShares(wa.map((r) => r.workerFnShares)), mb = meanShares(wb.map((r) => r.workerFnShares));
+    const keys = [...new Set([...ma.keys(), ...mb.keys()])]
+      .filter((k) => Math.max(ma.get(k) ?? 0, mb.get(k) ?? 0) >= FN_ROW_SHARE)
+      .sort((x, y) => Math.max(mb.get(y) ?? 0, ma.get(y) ?? 0) - Math.max(mb.get(x) ?? 0, ma.get(x) ?? 0))
+      .slice(0, FN_ROWS);
+    for (const k of keys) rows.push(row(`fn ${k} %thread`, wa.map((r) => +((r.workerFnShares.get(k) ?? 0) * 100).toFixed(2)), wb.map((r) => +((r.workerFnShares.get(k) ?? 0) * 100).toFixed(2))));
+  }
   // Composition: sections when the host measured them (exact), else the
   // sampled function shares. `within` is the largest distance between two
   // runs of ONE side — the composition's own noise.
@@ -179,6 +234,7 @@ export function compareSides(A, B, { phaseScoped = false } = {}) {
     for (const side of [ra, rb]) for (let i = 0; i < side.length; i++) for (let j = i + 1; j < side.length; j++) within = Math.max(within, tvd(side[i], side[j]));
     return { by: key === 'sectionShares' ? 'sections' : 'functions', moved: r3(tvd(meanShares(ra), meanShares(rb))), ...(ra.length + rb.length > 2 ? { within: r3(within) } : {}) };
   };
+  spanFindings(A, B, out);
   const composition = comp('sectionShares') ?? comp('fnShares');
   if (composition) out.composition = composition;
   const frame = rows.find((r) => r.metric === 'frame body ms') ?? rows.find((r) => r.metric === 'frame median ms');
@@ -199,6 +255,70 @@ export function compareSides(A, B, { phaseScoped = false } = {}) {
     out.warnings.push(`the sides were measured by different instruments (tier ${[...ta].join('/')} vs tier ${[...tb].join('/')}) — an attached run pays for its recorder and reads rAF intervals; its timings do not compare with an unattached run's`);
   }
   return out;
+}
+
+/** Sizes that differ by more than this are different inputs. */
+const SCALE_SAME = 0.01;
+
+/**
+ * The span half of a compare (spans.js), onto `out`:
+ *   · a phase whose two sides worked on different SIZES — a 286-road save
+ *     against a 1469-road one — has its absolute rows (`phase X ms`, a
+ *     section's total and calls) marked `unlike`: never significant, never a
+ *     regression. Its per-unit row is the comparison; that reading assumes
+ *     cost linear in the unit, which runs of one build at two sizes check.
+ *   · every section measured on both sides gets a verdict on WHICH factor
+ *     moved — the call count or the ms per call (`out.sections`).
+ */
+function spanFindings(A, B, out) {
+  const med = (side, f) => median(side.runs.map(f).filter((v) => v !== undefined));
+  const phases = new Set([...A.runs, ...B.runs].flatMap((r) => Object.keys(r.spans?.scales ?? {})));
+  const unlike = new Map();   // phase → why
+  const unlikeBy = new Map(); // phase → [unit, A size, B size]: the first that differs
+  for (const ph of phases) {
+    const units = new Set([...A.runs, ...B.runs].flatMap((r) => Object.keys(r.spans?.scales?.[ph] ?? {})));
+    for (const u of units) {
+      const a = med(A, (r) => r.spans?.scales?.[ph]?.[u]), b = med(B, (r) => r.spans?.scales?.[ph]?.[u]);
+      if (a === undefined || b === undefined) {
+        out.warnings.push(`phase ${ph}: only ${a === undefined ? 'B' : 'A'} declared its size in ${u} — its absolute time compares against an input of unknown size (__sloptimizeScale('${u}', n) on both)`);
+        continue;
+      }
+      if (Math.abs(b - a) <= SCALE_SAME * Math.max(a, b)) continue;
+      const why = `different sizes: ${u} ${+a.toFixed(2)} vs ${+b.toFixed(2)}`;
+      if (!unlikeBy.has(ph)) unlikeBy.set(ph, [u, a, b]);
+      unlike.set(ph, unlike.has(ph) ? `${unlike.get(ph)}, ${u} ${+a.toFixed(2)} vs ${+b.toFixed(2)}` : why);
+    }
+  }
+  const phaseOfSection = (name) => A.runs.concat(B.runs).map((r) => r.spans?.sectionPhase?.[name]).find((x) => x !== undefined);
+  for (const r of out.rows) {
+    let ph = /^phase (.+) ms$/.exec(r.metric)?.[1];
+    const sec = /^section (.+) (total ms|calls)$/.exec(r.metric);
+    if (sec) ph = phaseOfSection(sec[1]);
+    if (ph !== undefined && unlike.has(ph)) { r.verdict = 'unlike'; r.why = `${unlike.get(ph)} — read the per-unit row`; }
+  }
+  for (const [ph, why] of unlike) {
+    const per = out.rows.filter((r) => r.metric.startsWith(`phase ${ph} ms/`)).map((r) => r.metric.slice(`phase ${ph} `.length));
+    out.warnings.push(`phase ${ph}: the sides worked on ${why} — its absolute time and section totals compare unlike inputs; ${per.length ? `${per.join(', ')} is the comparison` : 'no per-unit row'} (per unit assumes cost linear in size: runs of one build at two sizes check it)`);
+  }
+  const names = new Set();
+  for (const r of out.rows) { const m = /^section (.+) total ms$/.exec(r.metric); if (m) names.add(m[1]); }
+  const sections = [];
+  for (const name of names) {
+    const side = (S) => {
+      const ms = med(S, (r) => r.metrics[`section ${name} total ms`]), calls = med(S, (r) => r.metrics[`section ${name} calls`]);
+      return ms === undefined ? undefined : { ms: r3(ms), ...(calls !== undefined ? { calls: r3(calls), perCall: +(ms / calls).toPrecision(4) } : {}) };
+    };
+    const a = side(A), b = side(B);
+    if (!a || !b) continue;
+    const ph = phaseOfSection(name);
+    // Unlike sizes: more roads means more calls. The verdict reads calls PER
+    // UNIT against ms per call, so a bigger save is not "called more".
+    const by = ph !== undefined ? unlikeBy.get(ph) : undefined;
+    const per = (x, n) => ({ ms: x.ms / n, ...(x.calls !== undefined ? { calls: x.calls / n } : {}) });
+    const v = by ? sectionVerdict(per(a, by[1]), per(b, by[2])) : sectionVerdict(a, b);
+    sections.push({ name, a, b, moved: v.moved, text: by ? `per ${oneOf(by[0])}: ${v.text}` : v.text, ...(by ? { unlike: unlike.get(ph) } : {}) });
+  }
+  if (sections.length) out.sections = sections;
 }
 
 /** Silence that ends a run of records carrying no `session` (tier-1 ledger

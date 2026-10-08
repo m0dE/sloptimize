@@ -10,7 +10,8 @@
 import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { mintSession } from './cloud-sink.js';
-import { createRunFold } from './runs.js';
+import { createRunFold, hotLines } from './runs.js';
+import { createTickLog } from './ticks.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -20,50 +21,118 @@ export function clusterKey(rec, topFrame) {
   return `${guess}|${topFrame ?? ''}`;
 }
 
-/** Top self-time frames from a CDP Profiler.stop payload, idle/program
- *  filtered, heaviest first. Pure — unit-tested against a fixture. */
-export function topFramesFromProfile(profile, limit = 5) {
-  if (!profile || !profile.nodes) return [];
-  const self = new Map();
-  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
-  const samples = profile.samples ?? [];
-  const deltas = profile.timeDeltas ?? [];
-  for (let i = 0; i < samples.length; i++) {
-    const us = deltas[i] ?? 0;
-    self.set(samples[i], (self.get(samples[i]) ?? 0) + us);
+const NOT_NAMED = new Set(['(idle)', '(program)', '(garbage collector)', '(root)']);
+
+/** The samples a selection keeps: `[{profile, idx?}]`, `idx` the sample
+ *  indexes inside a frame (absent: the whole chunk). Calls
+ *  `fn(node, us, profile)` per sample, `us` its weight (time since the last). */
+function eachSample(parts, fn) {
+  for (const { profile, idx } of parts) {
+    if (!profile?.nodes) continue;
+    const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+    const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
+    if (idx) for (const i of idx) fn(byId.get(samples[i]), deltas[i] ?? 0, profile);
+    else for (let i = 0; i < samples.length; i++) fn(byId.get(samples[i]), deltas[i] ?? 0, profile);
   }
-  const rows = [];
-  for (const [id, us] of self) {
-    const n = byId.get(id);
-    if (!n) continue;
-    const f = n.callFrame ?? {};
-    if (f.functionName === '(idle)' || f.functionName === '(program)' || f.functionName === '(garbage collector)') continue;
-    rows.push({
-      fn: f.functionName || '(anonymous)',
-      url: f.url ? `${f.url.split('/').slice(-1)[0]}:${(f.lineNumber ?? 0) + 1}` : '',
-      selfMs: +(us / 1000).toFixed(1),
-    });
-  }
-  rows.sort((a, b) => b.selfMs - a.selfMs);
-  return rows.slice(0, limit);
+}
+const asParts = (p) => (Array.isArray(p) ? p : p ? [{ profile: p }] : []);
+
+/** A node's `positionTicks` as line → ticks. V8 can list one line several
+ *  times (one entry per code version); they sum. Lines are 1-based. */
+function lineTicks(node) {
+  const m = new Map();
+  for (const t of node?.positionTicks ?? []) if (Number.isFinite(t?.line) && t.ticks > 0) m.set(t.line, (m.get(t.line) ?? 0) + t.ticks);
+  return m;
 }
 
-/** Where a chunk's sampled time went apart from named JS: V8's collector,
- *  `(program)` (native work — layout, GPU sync, compiles, the embedder) and
- *  idle. A stall the JS rows cannot explain is usually in one of these, and
- *  topFramesFromProfile drops all three. ms, one decimal. */
+/** Top self-time frames from a CDP Profiler.stop payload — or a selection of
+ *  samples from several (`[{profile, idx}]`, a frame sliced out of chunks) —
+ *  idle/program/gc filtered, heaviest first. One row per FUNCTION (a
+ *  function reached by two call paths is two profile nodes, one cost), each
+ *  with its hot `lines` from V8's per-line ticks: inside a big update() the
+ *  function is known and the statement is not. Pure — unit-tested against a
+ *  fixture. */
+export function topFramesFromProfile(profile, limit = 5) {
+  const rows = new Map();
+  // A node's line ticks cover all its samples in the chunk; a slice credits
+  // them in proportion to the samples it kept.
+  const kept = new Map();
+  eachSample(asParts(profile), (n, us, prof) => {
+    if (!n) return;
+    const f = n.callFrame ?? {};
+    if (NOT_NAMED.has(f.functionName)) return;
+    const line = (f.lineNumber ?? 0) + 1;
+    // The column too: a minified bundle has every function on line 1, many
+    // of them `e` or anonymous — one row each, as the run fold keys them.
+    const key = `${f.functionName}\t${f.url ?? ''}\t${line}\t${f.columnNumber ?? 0}`;
+    let r = rows.get(key);
+    if (!r) {
+      r = { fn: f.functionName || '(anonymous)', url: f.url ? `${f.url.split('/').slice(-1)[0]}:${line}` : '', us: 0, line, nodes: new Map() };
+      rows.set(key, r);
+    }
+    r.us += us;
+    const nk = kept.get(prof) ?? kept.set(prof, new Map()).get(prof);
+    nk.set(n, (nk.get(n) ?? 0) + 1);
+    r.nodes.set(n, prof);
+  });
+  const out = [...rows.values()].sort((a, b) => b.us - a.us).slice(0, limit);
+  return out.map((r) => {
+    const ticks = new Map();
+    for (const [n, prof] of r.nodes) {
+      const lt = lineTicks(n);
+      let all = 0;
+      for (const v of lt.values()) all += v;
+      if (!all) continue;
+      const w = Math.min(1, (kept.get(prof)?.get(n) ?? 0) / all);
+      for (const [line, v] of lt) ticks.set(line, (ticks.get(line) ?? 0) + v * w);
+    }
+    const lines = hotLines(ticks, r.line);
+    return { fn: r.fn, url: r.url, selfMs: +(r.us / 1000).toFixed(1), ...(lines.length ? { lines } : {}) };
+  });
+}
+
+/** Where a chunk's (or a slice's) sampled time went apart from named JS:
+ *  V8's collector, `(program)` (native work — layout, GPU sync, compiles,
+ *  the embedder) and idle. A stall the JS rows cannot explain is usually in
+ *  one of these, and topFramesFromProfile drops all three. ms, one decimal. */
 export function sampledBreakdown(profile) {
-  if (!profile || !profile.nodes) return undefined;
-  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const parts = asParts(profile);
+  if (!parts.some((x) => x.profile?.nodes)) return undefined;
   const out = { jsMs: 0, gcMs: 0, programMs: 0, idleMs: 0 };
-  const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
-  for (let i = 0; i < samples.length; i++) {
-    const name = byId.get(samples[i])?.callFrame?.functionName;
+  eachSample(parts, (n, us) => {
+    const name = n?.callFrame?.functionName;
     const k = name === '(idle)' ? 'idleMs' : name === '(program)' ? 'programMs' : name === '(garbage collector)' ? 'gcMs' : 'jsMs';
-    out[k] += (deltas[i] ?? 0) / 1000;
-  }
+    out[k] += us / 1000;
+  });
   for (const k of Object.keys(out)) out[k] = +out[k].toFixed(1);
   return out;
+}
+
+/**
+ * The samples of one frame, out of the chunks still held. `span` is the
+ * frame's [from, to] on the page's performance.now() clock; `offsetMs` maps
+ * that clock onto the profiler's (profile µs / 1000 − page ms). A chunk's
+ * samples carry their own times (startTime + running timeDeltas), so a frame
+ * is cut out exactly, wherever the rotations fell.
+ * @returns {{parts:{profile:object, idx:number[]}[], sampledMs:number}}
+ */
+export function sliceFrame(chunks, span, offsetMs) {
+  const lo = (span[0] + offsetMs) * 1000, hi = (span[1] + offsetMs) * 1000;
+  const parts = [];
+  let us = 0;
+  for (const profile of chunks) {
+    if (!(profile?.endTime >= lo) || !(profile.startTime <= hi)) continue;
+    const idx = [];
+    let t = profile.startTime;
+    const samples = profile.samples ?? [], deltas = profile.timeDeltas ?? [];
+    for (let i = 0; i < samples.length; i++) {
+      t += deltas[i] ?? 0;
+      // A sample's weight is the time since the one before: it covers (t − Δ, t].
+      if (t > lo && t <= hi) { idx.push(i); us += deltas[i] ?? 0; }
+    }
+    if (idx.length) parts.push({ profile, idx });
+  }
+  return { parts, sampledMs: +(us / 1000).toFixed(1) };
 }
 
 // ── The observer effect, bounded ─────────────────────────────────────────────
@@ -100,13 +169,49 @@ export function sampledBreakdown(profile) {
 //              (each with its `share` of the frame) but says `unattributed:
 //              'low-share'` and clusters on the verdict alone; `sampled`
 //              says where the chunk's time went instead (GC, native, idle).
+//   long       a frame still at least this long is exempt from the
+//              cooldown. A load made of back-to-back 400 ms frames (a field
+//              report: its four worst frames AND a 25 s one all came back
+//              `unattributed (cooldown)`) is exactly where the cooldown is
+//              inverted — the longest frames are the most worth explaining
+//              and the cheapest to afford a rotation for, since the frame is
+//              already lost: a few ms of Profiler.stop is ~1% of 400 ms. The
+//              loop the cooldown closes cannot run through here: one stop of
+//              a ≤10 s chunk at this interval is ≤1000 samples, nowhere near
+//              a 150 ms frame of its own.
 // What the gate drops is COUNTED, never silent: a skipped hitch carries
 // `unattributed: 'below-floor' | 'cooldown'` and the next minted record
 // carries `skippedSinceLast`. Detection itself is untouched — every hitch
 // the page emits lands in perf.jsonl.
+//
+// ── A hitch's OWN samples ────────────────────────────────────────────────────
+// A rotation cannot cut a frame where it ends: a CDP Profiler.stop waits for
+// the page's current task (measured: a stop sent 300 ms into a 2 s task is
+// answered at 2 s). With long frames back to back, the stop a hitch asks for
+// lands at the end of the NEXT frame, so the chunk holds two frames and the
+// next hitch's chunk holds the one after it — every attribution one frame
+// late. So the pipeline maps the page's clock onto the sampler's once per
+// document (a performance.now() read on either side of a stop: the stop's
+// endTime lies between them), keeps the last few chunks, and cuts each hitch's
+// `frameSpan` out of them by sample time — `profileWindow: 'frame'`, shares
+// that are the frame's own instead of an upper bound. Without a mapping (an
+// old page, an evaluate the target refused, a slice that caught less than
+// half the frame) it falls back to the chunk, as before, and says so.
 export const SAMPLING_INTERVAL_US = 10_000;
 export const ATTRIBUTE_FLOOR_MS = 80;
 export const ATTRIBUTE_COOLDOWN_MS = 1000;
+export const ATTRIBUTE_LONG_FRAME_MS = 150;
+/** A worker's sampler stop is given this long before its chunk is skipped. */
+const WORKER_STOP_MS = 3000;
+/** A clock mapping is kept only when both reads fell within this. */
+export const CLOCK_MAX_ERROR_MS = 10;
+/** Chunks held for slicing: a frame spans at most the chunk it ended in and
+ *  the one before (a stop waits for the task, so it lands a frame late), and
+ *  two more cover a roll and a hitch queued behind another. */
+const KEEP_CHUNKS = 4;
+/** …and beyond that, as many as fit this many samples (~60 s at 10 ms): a
+ *  record chain running behind a burst of long frames must still find them. */
+const KEEP_SAMPLES = 6000;
 export const ATTRIBUTE_MIN_SHARE = 0.1;
 export const PROFILE_WINDOW_MS = 10_000;
 const RUN_WRITE_MS = 5000;
@@ -127,6 +232,7 @@ export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render
  * @param {number} [opts.samplingIntervalUs]  see the header; default 10 000
  * @param {number} [opts.attributeFloorMs]    default 80
  * @param {number} [opts.attributeCooldownMs] default 1000, in page time (`rec.at`)
+ * @param {number} [opts.attributeLongFrameMs] default 150 — a frame this long ignores the cooldown (Infinity: never)
  * @param {number} [opts.attributeMinShare]   default 0.1 — the top frame's self time / frameMs
  * @param {number} [opts.windowMs]            default 10 000; 0 disables the roll
  * @param {boolean} [opts.runs]               default true: fold every chunk into runs/<session>.json (runs.js)
@@ -141,6 +247,10 @@ export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render
  *   heartbeat carries the JS heap (Runtime.getHeapUsage, cheap); `gc` forces a collection first so the
  *   reading is the post-GC floor, `snapshots` writes heap/<session>-start|end.heapsnapshot. Both pause
  *   the page, so both are conditions of the run.
+ * @param {(sessionId:string, method:string, params?:object)=>Promise<any>} [opts.sendTo]  CDP call on a CHILD
+ *   session (flat mode). Given, the page's workers are auto-attached and profiled too (SPEC §3.18):
+ *   each its own thread in the run file. Absent (or `workers: false`), the page alone, as before.
+ * @param {boolean} [opts.workers]           default true when sendTo is given
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -163,6 +273,7 @@ export function createIncidentPipeline(opts) {
   const samplingIntervalUs = opts.samplingIntervalUs ?? SAMPLING_INTERVAL_US;
   const floorMs = opts.attributeFloorMs ?? ATTRIBUTE_FLOOR_MS;
   const cooldownMs = opts.attributeCooldownMs ?? ATTRIBUTE_COOLDOWN_MS;
+  const longFrameMs = opts.attributeLongFrameMs ?? ATTRIBUTE_LONG_FRAME_MS;
   const minShare = Number.isFinite(opts.attributeMinShare) ? opts.attributeMinShare : ATTRIBUTE_MIN_SHARE;
   const windowMs = opts.windowMs ?? PROFILE_WINDOW_MS;
   const now = opts.now ?? Date.now;
@@ -189,10 +300,53 @@ export function createIncidentPipeline(opts) {
     appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp(rec)) + '\n');
   }
   const runPath = join(dir, 'runs', `${session.replace(/[^\w.-]/g, '_')}.json`);
+  // The sim's per-tick digests (SPEC §3.16): their own file, never the ledger.
+  let tickLog = null;
+  const ticks = () => (tickLog ??= createTickLog({ dir, session, build, drive: conditions.drive }));
   let pagePhase, runWrittenAt = -Infinity;
-  function foldChunk(profile) {
+  // Phase edges on the page clock, [t, phase from t on], from closed spans.
+  const edges = [];
+  /** A chunk into the run file. With the clock mapped and the page's phase
+   *  edges known, each sample is credited to the phase it fell in — a 3 s
+   *  phase inside a 10 s window owns its samples, with no rotation at the
+   *  edge (a rotation waits out the page's task: one per edge put the record
+   *  chain a frame behind per edge). Otherwise, the whole chunk to the phase
+   *  the page was last heard in (≤ one window misfiled at an edge). */
+  function foldChunk(profile, thread) {
     if (!run || !profile) return;
-    run.addProfile(profile, pagePhase, now());
+    if (!clock || !edges.length || !Array.isArray(profile.samples) || typeof profile.startTime !== 'number') {
+      run.addProfile(profile, pagePhase, now(), thread);
+    } else {
+      const parts = new Map();
+      let t = profile.startTime;
+      const deltas = profile.timeDeltas ?? [];
+      for (let i = 0; i < profile.samples.length; i++) {
+        t += deltas[i] ?? 0;
+        const ms = t / 1000 - clock.offsetMs;
+        let ph;   // before the first edge we know of: the unnamed boot phase
+        // A sample covers (t − Δ, t]: one landing ON an edge is the phase before it.
+        for (const [et, ep] of edges) { if (et < ms) ph = ep; else break; }
+        const k = ph ?? '';
+        const part = parts.get(k) ?? parts.set(k, { phase: ph, samples: [], timeDeltas: [], us: 0 }).get(k);
+        part.samples.push(profile.samples[i]); part.timeDeltas.push(deltas[i] ?? 0); part.us += deltas[i] ?? 0;
+      }
+      // A node's line ticks cover all its samples in the chunk: each part
+      // carries them in proportion to the samples it kept, so a function's
+      // lines are never credited to a phase it did not run in.
+      const total = new Map();
+      for (const id of profile.samples) total.set(id, (total.get(id) ?? 0) + 1);
+      for (const p of parts.values()) {
+        const kept = new Map();
+        for (const id of p.samples) kept.set(id, (kept.get(id) ?? 0) + 1);
+        const nodes = parts.size === 1 ? profile.nodes : profile.nodes.map((n) => {
+          if (!n.positionTicks?.length) return n;
+          const share = (kept.get(n.id) ?? 0) / (total.get(n.id) || 1);
+          const { positionTicks, ...rest } = n;
+          return share > 0 ? { ...rest, positionTicks: positionTicks.map((t) => ({ line: t.line, ticks: t.ticks * share })) } : rest;
+        });
+        run.addProfile({ nodes, samples: p.samples, timeDeltas: p.timeDeltas, startTime: 0, endTime: p.us }, p.phase, now(), thread);
+      }
+    }
     writeRun(false);
   }
   function writeRun(force) {
@@ -211,6 +365,79 @@ export function createIncidentPipeline(opts) {
   let skippedSinceLast = 0;      // hitches the gate left unattributed since then
   let windowTimer = null;
   let coverageTaken = false;
+  // ── Worker threads (SPEC §3.18) ─────────────────────────────────────────
+  // A game that moves its simulation into a Worker takes the work out of the
+  // page's sampler: the report shows a healthy main thread and nothing of the
+  // sim beside it. With a child-session transport, every dedicated or shared
+  // worker the page starts is auto-attached PAUSED (so its first instruction
+  // is sampled), given a sampler of its own at the page's interval, released,
+  // and rolled on its own chain — never the record chain: a worker's stop
+  // waits for ITS current task, and a hitch must not wait on the sim.
+  // Anything else that auto-attaches (an out-of-process iframe) is released
+  // untouched: a paused target the attach forgot is a hung page.
+  const sendTo = typeof opts.sendTo === 'function' && opts.workers !== false && !coverage ? opts.sendTo : null;
+  const workers = new Map();   // sessionId → { name }
+  let workerChain = Promise.resolve(), workerTimer = null;
+  let closing = false;   // stop() began: a worker attaching now is released, never started
+  const WORKER_TYPES = new Set(['worker', 'shared_worker']);
+  function threadName(info) {
+    const title = typeof info.title === 'string' && info.title && !/^[a-z][\w+.-]*:/i.test(info.title) ? info.title : '';
+    const base = title || String(info.url ?? '').replace(/[?#].*$/, '').split('/').pop() || 'anonymous';
+    let name = `worker[${base.slice(0, 40)}]`;
+    const taken = new Set([...workers.values()].map((w) => w.name));
+    for (let i = 2; taken.has(name); i++) name = `worker[${base.slice(0, 36)}#${i}]`;
+    return name;
+  }
+  async function attachWorker({ sessionId, targetInfo = {}, waitingForDebugger }) {
+    try {
+      if (!WORKER_TYPES.has(targetInfo.type) || !profiling || closing) return;
+      await sendTo(sessionId, 'Profiler.enable');
+      await sendTo(sessionId, 'Profiler.setSamplingInterval', { interval: samplingIntervalUs });
+      await sendTo(sessionId, 'Profiler.start');
+      // A worker's own workers (a sim that farms out pathfinding).
+      try { await sendTo(sessionId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); } catch { /* not supported here */ }
+      const name = threadName(targetInfo);
+      if (closing) { try { await sendTo(sessionId, 'Profiler.stop'); } catch { /* gone */ } return; }
+      workers.set(sessionId, { name });
+      log(`profiling ${name}`);
+      // The run is now measured with a sampler in the worker too: a
+      // condition (a worker-profiled run does not compare with a page-only one).
+      conditions.sampler = { ...(conditions.sampler ?? {}), workers: [...new Set([...(conditions.sampler?.workers ?? []), name.replace(/#\d+\]$/, ']')])].sort() };
+      writeConditions();
+      armWorkers();
+    } catch (e) { log(`worker ${targetInfo.url ?? sessionId} not profiled: ${e?.message ?? e}`); }
+    finally {
+      if (waitingForDebugger) { try { await sendTo(sessionId, 'Runtime.runIfWaitingForDebugger'); } catch { /* gone */ } }
+    }
+  }
+  /** Stop/start every worker's sampler (batched, as the page's) and fold the
+   *  chunks into their threads; `final` stops without restarting. A worker
+   *  that does not answer within the bound is skipped this round. */
+  function rotateWorkers(final = false) {
+    const run1 = async () => {
+      await Promise.all([...workers].map(async ([sid, w]) => {
+        const calls = [sendTo(sid, 'Profiler.stop'), ...(final ? [] : [sendTo(sid, 'Profiler.start')])];
+        let timer;
+        const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
+        clearT(timer);
+        const profile = res?.[0]?.profile;
+        if (profile) foldChunk(profile, w.name);
+      }));
+      writeRun(final);
+    };
+    workerChain = workerChain.then(run1, run1).catch(() => {});
+    return workerChain;
+  }
+  function armWorkers() {
+    if (workerTimer !== null || !(windowMs > 0) || closing) return;
+    const tick = () => { workerTimer = setT(() => { void rotateWorkers().then(() => { if (workerTimer !== null) tick(); }); }, windowMs); workerTimer?.unref?.(); };
+    tick();
+  }
+
+  // The page clock → sampler clock mapping, per document (header: a hitch's
+  // own samples), and the chunks a frame is cut out of.
+  let clock = null, clockTries = 0;
+  const held = [];
 
   function arm() {
     disarm();
@@ -229,6 +456,8 @@ export function createIncidentPipeline(opts) {
   const scriptCtx = new Map();   // scriptId → executionContextId
   let mainFrame = null, docCtx = null;
   function onEvent(method, params) {
+    if (sendTo && method === 'Target.attachedToTarget' && params?.sessionId) { void attachWorker(params); return; }
+    if (sendTo && method === 'Target.detachedFromTarget' && params?.sessionId) { workers.delete(params.sessionId); return; }
     if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
       appendFileSync(snapshot.path, params.chunk);
       snapshot.bytes += params.chunk.length;
@@ -327,15 +556,31 @@ export function createIncidentPipeline(opts) {
     await send('Profiler.start');
     profiling = true;
     arm();
+    if (sendTo) {
+      try { await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); }
+      catch (e) { log(`workers not profiled: ${e?.message ?? e}`); }
+    }
   }
   // stop() twice (a signal during the loop's own stop) is one stop.
   let stopping = null;
   function stop() { return (stopping ??= doStop()); }
   async function doStop() {
+    closing = true;
     disarm();
+    // The page's buffered ticks and open span, before anything stops: the
+    // records cross the binding ahead of the reply, and the chain writes them.
+    if (!coverage) {
+      try { await send('Runtime.evaluate', { expression: 'globalThis.__sloptimizeFlush && globalThis.__sloptimizeFlush()' }); } catch { /* target gone */ }
+      // Bounded: a rotation the target never answers must not hold the stop.
+      let timer;
+      await Promise.race([chain.catch(() => {}), new Promise((r) => { timer = setT(r, WORKER_STOP_MS); timer?.unref?.(); })]);
+      clearT(timer);
+    }
     if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
     if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));
     if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
+    if (workerTimer !== null) { clearT(workerTimer); workerTimer = null; }
+    if (workers.size) await rotateWorkers(true);
     if (!profiling) { writeRun(true); return; }
     profiling = false;
     try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
@@ -346,12 +591,41 @@ export function createIncidentPipeline(opts) {
   async function rotateProfile() {
     if (!profiling) return null;
     try {
-      const { profile } = await send('Profiler.stop');
-      await send('Profiler.start');
+      // Stop and start go out TOGETHER: the target runs them back to back.
+      // Awaited one after the other, the start waits out whatever task the
+      // page began meanwhile — measured on back-to-back 300 ms frames, every
+      // rotation left the whole next frame unsampled (and out of the run
+      // file). The clock reads ride the same batch, so the stop is not
+      // delayed and the bracket stays tight even when all four wait out a
+      // long task together.
+      const calibrate = clock === null && clockTries < 10;
+      const reads = calibrate ? [pageNow()] : null;
+      const stopped = send('Profiler.stop'), started = send('Profiler.start');
+      if (reads) reads.push(pageNow());
+      const [{ profile } = {}] = await Promise.all([stopped, started]);
       arm();
+      if (reads) {
+        clockTries++;
+        const [before, after] = await Promise.all(reads);
+        if (before !== undefined && after !== undefined && after - before <= 2 * CLOCK_MAX_ERROR_MS && typeof profile?.endTime === 'number') {
+          clock = { offsetMs: profile.endTime / 1000 - (before + after) / 2, errMs: +((after - before) / 2).toFixed(2) };
+        }
+      }
+      if (profile?.samples) {
+        held.push(profile);
+        let n = 0;
+        for (const c of held) n += c.samples.length;
+        while (held.length > KEEP_CHUNKS && n > KEEP_SAMPLES) n -= held.shift().samples.length;
+      }
       foldChunk(profile);
       return profile;
     } catch { return null; }
+  }
+  async function pageNow() {
+    try {
+      const v = (await send('Runtime.evaluate', { expression: 'performance.now()', returnByValue: true }))?.result?.value;
+      return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+    } catch { return undefined; }
   }
   /** The window expired unread: its samples serve no hitch — drop them. Runs
    *  on the record chain so it never interleaves with a hitch's rotation. */
@@ -392,7 +666,25 @@ export function createIncidentPipeline(opts) {
       writeRun(true);
       return;
     }
-    if (typeof rec.phase === 'string') pagePhase = rec.phase;
+    // A closing span names the phase that ENDED, and a hitch the phase that
+    // covered most of its frame — both may be past; the next record says the
+    // page's current one.
+    if (typeof rec.phase === 'string' && rec.type !== 'phase-span' && rec.type !== 'hitch') pagePhase = rec.phase;
+    // A closed span is a phase EDGE on the page clock (header: a hitch's own
+    // samples): every chunk is credited to its phases by sample time.
+    if (rec.type === 'phase-span' && !rec.open && typeof rec.t0 === 'number' && typeof rec.t1 === 'number') {
+      if (!edges.some((e) => e[0] === rec.t0)) edges.push([rec.t0, rec.phase]);
+      edges.push([rec.t1, rec.next ?? undefined]);
+      edges.sort((x, y) => x[0] - y[0]);
+      if (edges.length > 64) edges.splice(0, edges.length - 64);
+    }
+    // A new document has its own time origin: map its clock afresh.
+    if (rec.type === 'armed') { clock = null; clockTries = 0; held.length = 0; edges.length = 0; }
+    if (rec.type === 'ticks') {
+      try { ticks().ticks(rec.entries); } catch (e) { log(`ticks not written: ${e?.message ?? e}`); }
+      return;
+    }
+    if (rec.type === 'sim') { try { ticks().sim(rec); } catch { /* the ledger line below still says it */ } }
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
       appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
@@ -418,7 +710,7 @@ export function createIncidentPipeline(opts) {
       // unattributed cluster below: that is a mode, not a rate.)
       const t = Number.isFinite(Date.parse(rec.at)) ? Date.parse(rec.at) : now();
       const gated = !(rec.frameMs >= floorMs) ? 'below-floor'
-        : t - lastRotateAt < cooldownMs ? 'cooldown' : null;
+        : t - lastRotateAt < cooldownMs && !(rec.frameMs >= longFrameMs) ? 'cooldown' : null;
       if (gated && profiling) {
         skippedSinceLast++;
         rec.topFrames = [];
@@ -432,15 +724,27 @@ export function createIncidentPipeline(opts) {
       // dominated its window names itself; the caveat rides the record.
       lastRotateAt = t;
       const profile = await rotateProfile();
-      rec.topFrames = topFramesFromProfile(profile);
+      // The frame's own samples when its interval maps onto the sampler's
+      // clock (header); the whole chunk otherwise.
+      let source = profile;
       rec.profileWindow = 'rolling-chunk';
+      if (clock && Array.isArray(rec.frameSpan) && rec.frameSpan.length === 2 && rec.frameMs > 0) {
+        const cut = sliceFrame(held, rec.frameSpan, clock.offsetMs);
+        if (cut.sampledMs >= 0.5 * rec.frameMs) { source = cut.parts; rec.profileWindow = 'frame'; rec.frameSampledMs = cut.sampledMs; }
+        else if (profile && !(profile.endTime >= (rec.frameSpan[0] + clock.offsetMs) * 1000 && profile.startTime <= (rec.frameSpan[1] + clock.offsetMs) * 1000)) {
+          // The chunk provably holds ANOTHER time: naming its functions
+          // would name a different frame's cause. Said, not guessed.
+          source = null; rec.profileWindow = 'none'; rec.unattributed = 'not-sampled';
+        }
+      }
+      rec.topFrames = topFramesFromProfile(source);
       if (skippedSinceLast > 0) { rec.skippedSinceLast = skippedSinceLast; skippedSinceLast = 0; }
-      // Each frame's self time as a share of THIS frame (header: share). The
-      // chunk spans more than the frame, so a share is an upper bound on
-      // what that function could explain — which is the direction that
-      // matters for refusing to name it.
+      // Each frame's self time as a share of THIS frame (header: share). Cut
+      // from the frame, a share is the function's; from a chunk that spans
+      // more than the frame, an upper bound on what it could explain — which
+      // is the direction that matters for refusing to name it.
       if (rec.frameMs > 0) for (const f of rec.topFrames) f.share = +(f.selfMs / rec.frameMs).toFixed(3);
-      const sampled = sampledBreakdown(profile);
+      const sampled = sampledBreakdown(source);
       if (sampled) rec.sampled = sampled;
       const guess = rec.classification?.[0]?.guess;
       const lead = rec.topFrames[0];
