@@ -90,6 +90,7 @@ if (cmd === 'report') {
   // no inside-render time and no program count to report — and a hidden
   // page's beat drew no frames to time.
   const fmt = (v, unit = '') => (v === undefined || v === null ? '—' : `${v}${unit}`);
+  const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
   if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${fmt(lastBeat.medianFrameMs, 'ms')} p95 ${fmt(lastBeat.p95Ms, 'ms')}`);
   if (profile.frame?.medianMs !== undefined) {
     console.log(`  frame median ${fmt(profile.frame.medianMs, 'ms')}  p95 ${fmt(profile.frame.p95Ms, 'ms')}  (~${fmt(profile.frame.fps, 'fps')})  inside-render ${fmt(profile.frame.insideRenderMs, 'ms')}`);
@@ -122,6 +123,40 @@ if (cmd === 'report') {
         ? `  rates (per wall second — no game clock: a build that renders faster covers more game time per second and flatters itself; window.__sloptimizeClock('sim', simMs, 1000) fixes it): ${vals}`
         : `  rates (per second of the game's ${rates.denominator.slice(6)} clock): ${vals}`);
     } else if (acc.clock?.mixed) console.log('  rates: the run reported two different game clocks — no honest denominator');
+    // Phases as spans (SPEC §3.15): how long each took, per unit of what it
+    // worked on, and the host's sections as ms × calls.
+    const S = await import('../src/spans.js');
+    const sessionLines = readJsonl('perf.jsonl', Infinity).filter((r) => r.session === profile.session);
+    const spanRecs = PHASES ? H.onlyPhases(sessionLines, PHASES) : sessionLines;
+    const table = S.spanTable(S.phaseSpans(spanRecs));
+    if (table.size) {
+      const parts = [];
+      for (const [ph, t] of table) {
+        const size = Object.entries(t.scale).map(([u, n]) => `${n} ${u}`).join(', ');
+        const per = Object.entries(t.perUnit).map(([u, v]) => `${v} ms/${S.oneOf(u)}`).join(', ');
+        if (t.ms !== undefined) parts.push(`${ph} ${t.ms} ms${t.spans > 1 ? ` (mean of ${t.spans})` : ''}${size ? ` · ${size}${per ? ` → ${per}` : ''}` : ''}`);
+        else parts.push(`${ph} (still open${size ? ` · ${size}` : ''})`);
+      }
+      console.log(`  phases: ${parts.join('  |  ')}`);
+      for (const [ph, t] of table) {
+        if (!t.sections.size) continue;
+        const secs = [...t.sections].sort((a, b) => b[1].ms - a[1].ms).slice(0, 8)
+          .map(([n, e]) => `${n} ${e.ms} ms${e.calls > 0 ? ` x${e.calls} (${e.perCall} ms/call)` : ''}`);
+        console.log(`    sections in ${ph}: ${secs.join(' · ')}`);
+      }
+    }
+    // Which statement inside the heaviest functions: V8's per-line ticks,
+    // whole run (or the --phase), not one hitch's chunk.
+    if (file) {
+      const top = R.heaviestSelf(R.runBucket(file, PHASES), 3, file.intervalUs);
+      if (top.length) {
+        console.log(`  heaviest self time${PHASES ? ` (${[...PHASES].join(',')})` : ' (whole run)'}:`);
+        for (const f of top) {
+          const base = String(f.url).replace(/[?#].*$/, '').split('/').pop();
+          console.log(`    ${f.fn}@${base}:${f.line}${f.selfMs !== undefined ? ` ${f.selfMs}ms` : ''} (${pct(f.share)} of JS)${f.lines.length ? `  ${f.lines.map((l) => `:${l.line} ${pct(l.share)}`).join('  ')}` : ''}`);
+        }
+      }
+    }
     // Long sessions (SPEC §3.14): live GPU objects and the JS heap, as trends.
     const M = await import('../src/memory.js');
     for (const l of M.memoryLines(M.memoryTrends(readJsonl('perf.jsonl', Infinity).filter((r) => r.session === profile.session)))) console.log(l);
@@ -146,7 +181,6 @@ if (cmd === 'report') {
   // one under a tenth of the stall is not printed as one (attach's
   // low-share gate; applied here too, to lines written before it existed).
   const { ATTRIBUTE_MIN_SHARE } = await import('../src/incident-pipeline.mjs');
-  const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
   const attribution = (h) => {
     const top = h.topFrames?.[0];
     if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
@@ -161,9 +195,12 @@ if (cmd === 'report') {
       const rest = s ? `; the chunk's other time: native ${s.programMs}ms, gc ${s.gcMs}ms` : '';
       return `  unattributed (heaviest JS ${name} = ${pct(share)} of the frame${rest})`;
     }
-    // The chunk spans more than the frame, so a share can pass 100%: that
-    // reads as "all of it", not as more than all of it.
-    return `  top ${name} (${pct(Math.min(share, 1))} of frame)`;
+    // A chunk spans more than the frame, so a share can pass 100%: that
+    // reads as "all of it", not as more than all of it. Cut from the frame's
+    // own samples (`profileWindow: 'frame'`) it is the function's share.
+    // The hot lines name the statement inside it.
+    const lines = top.lines?.length ? ` — ${top.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : '';
+    return `  top ${name} (${pct(Math.min(share, 1))} of frame)${lines}`;
   };
   for (const h of auto.slice(-5)) {
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}`);
@@ -678,8 +715,14 @@ if (cmd === 'compare') {
   console.log(`  ${'metric'.padEnd(w)}  ${'A median [lo–hi]'.padEnd(24)}  ${'B median [lo–hi]'.padEnd(24)}  ${'Δ'.padStart(9)}  ${'noise'.padStart(7)}  verdict`);
   for (const r of c.rows) {
     const d = `${r.delta > 0 ? '+' : ''}${r.delta}`;
-    const v = r.verdict === 'significant' ? '✱ significant' : r.verdict === 'unproven' ? `unproven (${r.why})` : 'within noise';
+    const v = r.verdict === 'significant' ? '✱ significant' : r.verdict === 'unproven' || r.verdict === 'unlike' ? `${r.verdict} (${r.why})` : 'within noise';
     console.log(`  ${r.metric.slice(0, w).padEnd(w)}  ${sp(r.a).padEnd(24)}  ${sp(r.b).padEnd(24)}  ${d.padStart(9)}  ${String(r.noise ?? '—').padStart(7)}  ${v}`);
+  }
+  // The host's sections (spans.js): which factor of the total moved — the
+  // call count or the time per call. Two different bugs, two different fixes.
+  for (const x of c.sections ?? []) {
+    console.log(`  section ${x.name}   ${x.a.ms} -> ${x.b.ms} ms${x.a.calls !== undefined && x.b.calls !== undefined ? `   x${x.a.calls} -> x${x.b.calls}` : ''}${x.unlike ? `   (${x.unlike})` : ''}`);
+    console.log(`    ${x.text}`);
   }
   if (c.composition) console.log(`  composition (${c.composition.by}): shares moved ${+(c.composition.moved * 100).toFixed(1)}% A→B${c.composition.within !== undefined ? `, ${+(c.composition.within * 100).toFixed(1)}% between runs of one side` : ''}`);
   for (const wn of c.warnings) console.log(`  ⚠ ${wn}`);

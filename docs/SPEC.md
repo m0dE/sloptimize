@@ -723,6 +723,52 @@ steps, and `GROWING` when the fit explains the series (R² ≥ 0.6), BOTH
 halves of the session climb (a level load steps up once and holds — not a
 leak), and the rise is at least a tenth of the start (and 2 MB / 5 objects).
 
+### 3.15 Phases as spans — duration, cost per unit of work, sections with call counts
+
+A one-off phase — a load, a level transition, shader warmup, asset
+streaming — has a figure no frame metric carries: how long it took. And
+that figure alone does not travel: a 1469-road city loading in 9 s and a
+286-road one in 1.1 s are both healthy, and "load: 9 s" says neither. The
+tier-0 recorder makes `window.__sloptimizePhase` an accessor, so every
+assignment is timed where it happens (a load that sets `'load'`, runs 25 s
+inside one frame and sets `'play'` is a 25 s span, though no rAF saw it).
+Two optional calls hang figures on the span the page is in:
+
+```js
+window.__sloptimizeScale('roads', 1469);                 // what the phase worked on
+window.__sloptimizeSection('createSidewalks', ms, calls); // named work, with its call count
+```
+
+A span closes on the phase change — a `phase-span` record: `phase` (the
+one that ENDED), `span` (id), `ms` (exact), `scale`, `sections: {name:
+[ms, calls]}`. The open span is snapshotted (`open: true`, `ms` so far — a
+lower bound, never read as the phase's duration) with the profile window
+and the heartbeat when something on it changed. Sections belong to the span
+open when they arrive: report them before leaving the phase. A hitch is
+filed under the phase that covered most of its frame (stamped at emit time
+instead, a 2 s load whose last statement set `'play'` was a play hitch).
+
+- `report` prints `phases: load 9000 ms · 1469 roads → 6.127 ms/road` and
+  each phase's sections as `createSidewalks 23060 ms x3747 (6.154 ms/call)`.
+- `compare` reads `phase <p> ms`, `phase <p> ms/<unit>`, and per section
+  `total ms`, `calls`, `ms/call` as rows against their noise floors, and
+  states which factor of each section moved: `same call count, 31x ms/call
+  → the work PER CALL changed (look inside it)` versus `same ms/call, 32x
+  calls → it is CALLED more (look at its callers)` — two bugs with two
+  fixes that the total alone cannot tell apart (within 10% reads as the
+  same). A phase whose sides worked on different sizes has its absolute
+  rows marked `unlike` (never significant, never a regression), the
+  per-unit row is the comparison, and the section verdict reads calls per
+  unit. Per unit assumes cost linear in the unit; runs of one build at two
+  sizes check that.
+- `check` budgets `perf.budget.<phase>.phase_ms` and
+  `perf.budget.<phase>.ms_per.<unit>` (§7.1) — the latter the one budget
+  that holds across inputs.
+
+A phase run twice in one run (a reload, a second level) reads as its mean
+span; per unit is total ms over total units. A tier-1 host may write the
+same `phase-span` records to its ledger.
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)
@@ -1000,6 +1046,8 @@ judges profile.json's session) reads EVERY record of the run in that phase:
 | `draw_calls`, `triangles`, `programs` | median / median / max | |
 | `section.<name>` | the host's loop section, median ms per frame (§3.2b) | |
 | `rate.<name>` | a counter's rate (§3.11) — `{min}` or `{max}`, never a bare number | |
+| `phase_ms` | the phase's duration — mean closed span (§3.15) | |
+| `ms_per.<unit>` | the phase's ms per unit of work the page declared (`__sloptimizeScale`; the unit singular or as declared) | |
 | `hitches_per_h` | RELATIVE hitches per hour — only beside a `median_ms`/`p95_ms` budget for the phase | |
 
 Hitch detection is relative (a frame over twice the rolling median), so a
@@ -1023,7 +1071,9 @@ run file's windows where it has them, from heartbeats otherwise.
 
 `compare <base> <new> --fail-on-regression` is the relative gate: exit 1
 when any directional metric moved significantly the worse way (frame ms,
-draw calls, triangles, hitches/h, sections, frames over a bar; a rate
+draw calls, triangles, hitches/h, sections, frames over a bar, a phase's
+duration, ms per unit and a section's ms/call — not a phase that worked on
+a different size, which is `unlike`; a rate
 falling, unless its budget is `{max}`; function shares are composition,
 never a regression); exit 5 with fewer than `--min-runs` (default 3) runs a
 side, or with any directional metric measured by fewer runs than that;
@@ -1236,6 +1286,11 @@ degraded:
 - **EffectComposer/custom-pipeline hosts** inherit the inspector's
   interception gap; the recorder degrades to rAF-delta-only sampling there
   and `doctor` names it.
+- **Hot lines need line structure and survive no inlining.** A minified
+  one-line bundle puts every tick on line 1 (no lines printed); a function
+  V8 inlined samples as its caller, its line the call site (SPEC-attach §2).
+- **Cost per unit assumes linear cost.** `ms/road` compares two saves only
+  if load is linear in roads; runs of one build at two sizes check it (§3.15).
 - **Multiplayer** is out of scope for the same reason it is out of scope for
   the inspector's pause: you cannot pause or restore the server.
 

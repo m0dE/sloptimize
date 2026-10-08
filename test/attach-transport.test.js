@@ -62,7 +62,7 @@ test('a rotation the target never answers is rejected when the socket closes, an
   ws.answer = false;
   ws.binding({ type: 'hitch', at: '2026-09-09T00:00:00Z', frameMs: 300, classification: [{ guess: 'long-script' }] });
   await new Promise((r) => setTimeout(r, 5));
-  assert.equal(ws.sent.at(-1), 'Profiler.stop', 'the rotation is in flight, unanswered');
+  assert.ok(ws.sent.includes('Profiler.stop'), 'the rotation is in flight, unanswered');
   ws.drop();
   await s.closed;
   await new Promise((r) => setTimeout(r, 5));

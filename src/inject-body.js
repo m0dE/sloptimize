@@ -71,8 +71,9 @@ function emit(obj) {
   // Stamped here, not at each call site: per-site stamping is how gpu-create,
   // gpu-queue-lag, wrap-error and armed all went out with no phase, and a
   // load — mostly creates — was invisible to `--phase load`.
-  const phase = pagePhase();
-  if (phase !== undefined) obj.phase = phase;
+  // A record that says its own phase keeps it: a closing `phase-span` is the
+  // phase that ENDED, emitted from inside the assignment that left it.
+  if (!('phase' in obj)) { const phase = pagePhase(); if (phase !== undefined) obj.phase = phase; }
   try { __sloptimizeEmit(JSON.stringify(obj)); } catch { /* binding gone */ }
 }
 
@@ -290,9 +291,86 @@ try {
 // (emit() stamps it) carries `phase`, so the footprint splits by it and
 // `sloptimize issues --phase steady` reads one phase. Unset: no field.
 function pagePhase() {
-  const p = globalThis.__sloptimizePhase;
+  return phaseName(globalThis.__sloptimizePhase);
+}
+function phaseName(p) {
   return typeof p === 'string' && p ? p.replace(/[|,=\s]+/g, '_').slice(0, 40) : undefined;
 }
+
+// ── Phase spans (SPEC §3.15): a phase's duration, its size, its sections ────
+// The phase global is an accessor, so every assignment is timed where it
+// happens — a load that sets 'load', runs 25 s inside one frame and sets
+// 'play' is a 25 s span, though no rAF ever saw it. Two optional calls hang
+// figures on the span the page is in:
+//   __sloptimizeScale('roads', 1469)               what the phase worked on
+//   __sloptimizeSection('createSidewalks', ms, n)  named work, with its call count
+// (report a phase's sections before leaving it: they belong to the span
+// that is open when they arrive). A span closes on the phase change; the
+// open one is snapshotted with the profile window and the heartbeat.
+const bootId = Date.now().toString(36);
+let spanSeq = 0, phaseValue;
+// Recent phase changes, [t, phase]: a hitch is filed under the phase that
+// covered most of its frame. Stamped at emit time instead, a 2 s load whose
+// last statement sets 'play' was a play hitch.
+const phaseLog = [[-Infinity, undefined]];
+function phaseOver(from, to) {
+  // No accessor (a frozen global), or a game that replaced it with a plain
+  // property: the log is stale, and the phase read now is all there is.
+  if (phaseLog[phaseLog.length - 1][1] !== pagePhase()) return pagePhase();
+  const cover = new Map();
+  for (let i = 0; i < phaseLog.length; i++) {
+    const a = Math.max(phaseLog[i][0], from), b = Math.min(i + 1 < phaseLog.length ? phaseLog[i + 1][0] : Infinity, to);
+    if (b > a) cover.set(phaseLog[i][1], (cover.get(phaseLog[i][1]) ?? 0) + (b - a));
+  }
+  let best = pagePhase(), most = -1;
+  for (const [p, ms] of cover) if (ms > most) { best = p; most = ms; }
+  return best;
+}
+const newSpan = (phase) => ({ id: `${bootId}.${++spanSeq}`, phase, t0: performance.now(), scale: null, sections: null, dirty: false });
+let openSpan = newSpan(undefined);
+function spanRecord(s, open) {
+  const rec = { type: 'phase-span', at: new Date().toISOString(), phase: s.phase, span: s.id, ms: +(performance.now() - s.t0).toFixed(1), tier: 0 };
+  if (open) rec.open = true;
+  if (s.scale) rec.scale = { ...s.scale };
+  if (s.sections) rec.sections = Object.fromEntries([...s.sections].map(([k, v]) => [k, [+v[0].toFixed(3), v[1]]]));
+  return rec;
+}
+function snapshotSpan() {
+  if (!openSpan.dirty) return;
+  openSpan.dirty = false;
+  emit(spanRecord(openSpan, true));
+}
+try {
+  Object.defineProperty(globalThis, '__sloptimizePhase', {
+    configurable: true,
+    get() { return phaseValue; },
+    set(v) {
+      phaseValue = v;
+      const p = phaseName(v);
+      if (p === openSpan.phase) return;
+      const ended = openSpan;
+      openSpan = newSpan(p);
+      phaseLog.push([openSpan.t0, p]);
+      if (phaseLog.length > 16) phaseLog.shift();
+      // The unnamed boot span is only worth a record when the host hung something on it.
+      if (ended.phase !== undefined || ended.scale || ended.sections) emit(spanRecord(ended, false));
+    },
+  });
+} catch { /* a frozen global: the phase still reads, unspanned */ }
+globalThis.__sloptimizeScale = function (unit, n) {
+  const v = Number(n);
+  if (typeof unit !== 'string' || !unit || !Number.isFinite(v) || v <= 0) return;
+  (openSpan.scale ??= {})[unit.slice(0, 40)] = v;
+  openSpan.dirty = true;
+};
+globalThis.__sloptimizeSection = function (name, ms, calls = 1) {
+  const t = Number(ms), c = Number(calls);
+  if (typeof name !== 'string' || !name || !Number.isFinite(t) || t < 0 || !Number.isFinite(c) || c < 0) return;
+  const m = (openSpan.sections ??= new Map()), k = name.slice(0, 40);
+  const e = m.get(k);
+  if (e) { e[0] += t; e[1] += c; } else if (m.size < 200) m.set(k, [t, c]);
+  openSpan.dirty = true;
+};
 
 /** The renderer the game's own context reports, once it has one. Read off
  *  the game's context, never a probe context of ours. */
@@ -401,7 +479,7 @@ const BEAT_MS = 60_000;
 function tick(ts) {
   requestAnimationFrame(tick);
   if (lastRaf < 0) { lastRaf = ts; return; }
-  const frameMs = ts - lastRaf;
+  const frameMs = ts - lastRaf, frameFrom = lastRaf;
   lastRaf = ts;
   frameMsRing[head] = frameMs;
   head = (head + 1) % RING;
@@ -419,8 +497,12 @@ function tick(ts) {
   const median = rollingMedian();
   if (frameMs > ABS_HITCH_MS || (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS))) {
     emit({
-      type: 'hitch', at: new Date().toISOString(), frame: frameNo,
+      type: 'hitch', at: new Date().toISOString(), frame: frameNo, phase: phaseOver(frameFrom, ts),
       frameMs: +frameMs.toFixed(1), medianMs: +median.toFixed(2),
+      // The frame's interval on the page's performance.now() clock: attach
+      // maps it onto the sampler's clock and attributes the hitch from the
+      // samples inside it — its own profile, not a neighbour's.
+      frameSpan: [+frameFrom.toFixed(1), +ts.toFixed(1)],
       // insideRenderMs is unknowable at this tier without the engine; the
       // draw share and long-task ms are the honest stand-ins, and the node
       // side attaches profiler topFrames.
@@ -451,6 +533,7 @@ function tick(ts) {
       tier: 0 });
     win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0);
     updateConditions();
+    snapshotSpan();
   }
   if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
     let rows = [];
@@ -486,6 +569,7 @@ try {
     }
     beat.frames = 0; beat.draws = 0; beat.tris = 0;
     emit(rec);
+    snapshotSpan();
   }, BEAT_MS);
 } catch { /* no timers */ }
 requestAnimationFrame(tick);

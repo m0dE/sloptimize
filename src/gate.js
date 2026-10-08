@@ -29,6 +29,7 @@
 import { emptyTally, foldTally, ratesOf } from './runs.js';
 import { CONDITION_FIELDS } from './conditions.js';
 import { UNIFORM_RATIO } from './compare.js';
+import { phaseSpans, spanTable, oneOf } from './spans.js';
 
 const median = (v) => {
   if (!v.length) return undefined;
@@ -47,6 +48,7 @@ const METRICS = {
   median_ms: 'median frame (ms)', p95_ms: 'p95 frame (ms)', worst_ms: 'worst frame (ms)',
   draw_calls: 'draw calls', triangles: 'triangles', programs: 'programs',
   hitches_per_h: 'hitches/h (relative: 2× rolling median)',
+  phase_ms: 'the phase\'s duration (ms, its span — SPEC §3.15)',
 };
 
 /**
@@ -55,6 +57,9 @@ const METRICS = {
  * `{min}` says so explicitly (`{min}` for a rate: more is better).
  * Section budgets: `perf.budget.<phase>.section.<name>` (the host's own loop
  * sections, ms per frame). Rates: `perf.budget.<phase>.rate.<name>`.
+ * Cost per unit of work: `perf.budget.<phase>.ms_per.<unit>` — the phase's
+ * ms over the size the page declared (`__sloptimizeScale('roads', n)`; the
+ * unit singular or as declared), the one budget that holds across inputs.
  * @returns {{rows:object[], errors:string[]}}
  */
 export function parseBudgets(budgets = {}) {
@@ -77,6 +82,12 @@ export function parseBudgets(budgets = {}) {
     const dot = rest.indexOf('.');
     if (dot < 0) { errors.push(`${key}: unknown budget — global keys are ${Object.keys(LEGACY).map((k) => `perf.budget.${k}`).join(', ')}; per phase, perf.budget.<phase>.<metric>`); continue; }
     const phase = rest.slice(0, dot), metric = rest.slice(dot + 1);
+    if (metric.startsWith('ms_per.')) {
+      const name = metric.slice('ms_per.'.length);
+      if (!name) { errors.push(`${key}: name the unit — perf.budget.<phase>.ms_per.<unit>, the unit the page declared with __sloptimizeScale`); continue; }
+      rows.push({ key, phase, metric: 'ms_per', name, ...lim });
+      continue;
+    }
     if (metric.startsWith('section.') || metric.startsWith('rate.')) {
       const kind = metric.startsWith('section.') ? 'section' : 'rate';
       const name = metric.slice(kind.length + 1);
@@ -91,7 +102,7 @@ export function parseBudgets(budgets = {}) {
       rows.push({ key, phase, metric: 'frames_over', bar: +over[1], ...lim });
       continue;
     }
-    if (!Object.hasOwn(METRICS, metric)) { errors.push(`${key}: unknown metric "${metric}" — ${[...Object.keys(METRICS), 'frames_over_<N>ms_per_min', 'section.<name>', 'rate.<name>'].join(', ')}`); continue; }
+    if (!Object.hasOwn(METRICS, metric)) { errors.push(`${key}: unknown metric "${metric}" — ${[...Object.keys(METRICS), 'frames_over_<N>ms_per_min', 'section.<name>', 'rate.<name>', 'ms_per.<unit>'].join(', ')}`); continue; }
     rows.push({ key, phase, metric, ...lim });
   }
   // The relative hitch count inverts under a uniform slowdown: only beside a
@@ -163,6 +174,8 @@ export function runPhaseMetrics(records = [], run = null) {
     if (typeof p.maxMs === 'number' && !(b.windowMax >= p.maxMs)) b.windowMax = p.maxMs;
     if (p.counters) foldTally(b.tally, p.counters);
   }
+  // Phases as spans: the duration and the cost per declared unit (spans.js).
+  const spans = spanTable(phaseSpans(records));
   const out = new Map();
   for (const [k, b] of ph) {
     if (!b.medians.length) b.medians.push(...b.hb.medians);
@@ -204,6 +217,9 @@ export function runPhaseMetrics(records = [], run = null) {
     if (b.sections.size) m.sections = Object.fromEntries([...b.sections].map(([n, v]) => [n, r2(median(v))]));
     const rates = ratesOf(b.tally);
     if (rates) m.rates = rates;
+    const sp = spans.get(k);
+    if (sp?.ms !== undefined) m.phase_ms = sp.ms;
+    if (sp && Object.keys(sp.perUnit).length) m.perUnit = sp.perUnit;
     out.set(k, m);
   }
   return out;
@@ -219,6 +235,10 @@ function readRow(row, m) {
   if (row.metric === 'worst_ms') return m.worst;   // {lo, hi} — judged as an interval
   if (row.metric === 'section') return m.sections?.[row.name];
   if (row.metric === 'rate') return m.rates?.values[row.name];
+  if (row.metric === 'ms_per') {
+    const u = Object.keys(m.perUnit ?? {}).find((x) => x === row.name || oneOf(x) === row.name || oneOf(x) === oneOf(row.name));
+    return u === undefined ? undefined : m.perUnit[u];
+  }
   return m[row.metric];
 }
 
@@ -290,6 +310,7 @@ export function judgeBudgets(rows, runs) {
       const res = { budget: label, phase, metric: row.metric, ...(row.max !== undefined ? { max: row.max } : {}), ...(row.min !== undefined ? { min: row.min } : {}) };
       if (row.metric === 'hitches_per_h') res.rule = 'relative (frame > 2× rolling median)';
       if (row.metric === 'frames_over') res.rule = `absolute (frame > ${row.bar} ms)`;
+      if (row.metric === 'ms_per') res.rule = `the phase's ms per ${oneOf(row.name)} the page declared`;
       if (row.metric === 'rate') {
         const r = runs.map((x) => (phase === null ? undefined : x.get(phase)?.rates)).find(Boolean);
         if (r) res.rule = `per ${r.per} (${r.denominator === 'wall' ? 'wall time — no game clock' : `the game's ${r.denominator.slice(6)} clock`})`;
@@ -299,10 +320,13 @@ export function judgeBudgets(rows, runs) {
         res.verdict = phase !== null && !phases.has(phase) ? `unmeasured — no record in phase ${phase} (phases: ${real.join(', ') || 'none'})` : 'unmeasured';
         results.push(res); continue;
       }
-      const v = r2(median(vals));
+      // A cost per unit is often well under 0.01 ms: rounded to 2 decimals it
+      // reads 0 and passes any ceiling. Significant figures for it instead.
+      const v = row.metric === 'ms_per' ? +median(vals).toPrecision(4) : r2(median(vals));
       res.value = v;
       res.n = vals.length;   // the runs that measured it — a build's other runs may not have had the phase
-      if (vals.length > 1) res.runs = { n: vals.length, lo: r2(Math.min(...vals)), hi: r2(Math.max(...vals)) };
+      const rr = row.metric === 'ms_per' ? (x) => +x.toPrecision(4) : r2;
+      if (vals.length > 1) res.runs = { n: vals.length, lo: rr(Math.min(...vals)), hi: rr(Math.max(...vals)) };
       const over = row.max !== undefined && v > row.max, under = row.min !== undefined && v < row.min;
       res.verdict = over ? `over by ${(row.max > 0 ? v / row.max : Infinity).toFixed(1)}x` : under ? `under by ${(v > 0 ? row.min / v : Infinity).toFixed(1)}x` : 'inside';
       res.breached = over || under;
@@ -323,7 +347,7 @@ export function worseDirection(metric, rateDir = {}) {
   if (metric.startsWith('fn ')) return 0;
   const rate = /^rate (.+?) \//.exec(metric);
   if (rate) return rateDir[rate[1]] === 'max' ? 1 : -1;
-  if (/ ms$/.test(metric) || metric === 'draw calls' || metric === 'triangles' || metric === 'hitches/h' || /^frames over /.test(metric)) return 1;
+  if (/ ms$/.test(metric) || / ms\/\S+$/.test(metric) || metric === 'draw calls' || metric === 'triangles' || metric === 'hitches/h' || /^frames over /.test(metric)) return 1;
   return 0;
 }
 

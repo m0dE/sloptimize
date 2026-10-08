@@ -94,6 +94,40 @@ export function ratesOf(acc) {
   return null;
 }
 
+/** A function's hot LINES, heaviest first: `[{line, share}]`, share of the
+ *  function's own self ticks, ≥5% each, at most `limit`. Empty when the only
+ *  line is the one the function starts on — a minified bundle puts
+ *  everything on line 1, and naming it again says nothing. `ticks` is a Map
+ *  of 1-based line → ticks; `fnLine` 1-based. */
+export function hotLines(ticks, fnLine, limit = 3) {
+  let sum = 0;
+  for (const v of ticks.values()) sum += v;
+  if (!(sum > 0)) return [];
+  const rows = [...ticks].sort((a, b) => b[1] - a[1]).filter(([, v]) => v / sum >= 0.05).slice(0, limit)
+    .map(([line, v]) => ({ line, share: +(v / sum).toFixed(2) }));
+  return rows.length === 1 && rows[0].line === fnLine ? [] : rows;
+}
+
+/**
+ * The bucket's heaviest functions by SELF time, each with its hot lines —
+ * the "which statement inside the top function" a report prints under it.
+ * `intervalUs` turns samples into ms.
+ * @returns {{fn:string, url:string, line:number, selfMs?:number, share:number, lines:{line:number, share:number}[]}[]}
+ */
+export function heaviestSelf(bucket, limit = 3, intervalUs) {
+  const js = bucket.samples - bucket.program - bucket.gc;
+  if (!(js > 0)) return [];
+  return [...bucket.fns.values()].filter((r) => r.self > 0).sort((a, b) => b.self - a.self).slice(0, limit).map((r) => ({
+    fn: r.fn, url: r.url, line: r.line + 1,
+    ...(intervalUs ? { selfMs: +(r.self * intervalUs / 1000).toFixed(1) } : {}),
+    share: +(r.self / js).toFixed(3),
+    lines: r.lines ? hotLines(r.lines, r.line + 1) : [],
+  }));
+}
+
+/** Hot lines kept per function, for this many of a phase's heaviest. */
+const LINE_FNS = 25, LINE_ROWS = 6;
+
 /**
  * @param {{session:string, build?:string, intervalUs?:number}} meta
  */
@@ -144,6 +178,17 @@ export function createRunFold(meta) {
       if (!r) { const [url, line, col, fn] = k.split('\t'); r = { fn, url, line: +line, col: +col, self: 0, total: 0 }; b.fns.set(k, r); }
       return r;
     };
+    // V8's per-line ticks of each leaf node (1-based lines, one entry per
+    // code version — they sum): which statement inside a function its self
+    // time went to.
+    for (const n of profile.nodes) {
+      if (!n.positionTicks?.length) continue;
+      const k = fnKey(n);
+      if (!k) continue;
+      const r = row(k);
+      r.lines ??= new Map();
+      for (const t of n.positionTicks) if (Number.isFinite(t?.line) && t.ticks > 0) r.lines.set(t.line, (r.lines.get(t.line) ?? 0) + t.ticks);
+    }
     for (const id of profile.samples) {
       const n = byId.get(id);
       const name = n?.callFrame?.functionName;
@@ -200,8 +245,15 @@ export function createRunFold(meta) {
       const t = tallyJSON(b.tally);
       if (t) p.counters = t;
       // Heaviest first by inclusive samples; one array per function keeps a
-      // long run's file small: [fn, url, line, col, self, total].
-      p.fns = [...b.fns.values()].sort((x, y) => y.total - x.total).map((r) => [r.fn, r.url, r.line, r.col, r.self, r.total]);
+      // long run's file small: [fn, url, line, col, self, total, lines?] —
+      // `lines` ({line: ticks}, its LINE_ROWS heaviest) only on the
+      // LINE_FNS heaviest by self time: the functions anyone reads lines of.
+      const withLines = new Set([...b.fns.values()].filter((r) => r.self > 0 && r.lines?.size).sort((x, y) => y.self - x.self).slice(0, LINE_FNS));
+      p.fns = [...b.fns.values()].sort((x, y) => y.total - x.total).map((r) => {
+        const a = [r.fn, r.url, r.line, r.col, r.self, r.total];
+        if (withLines.has(r)) a.push(Object.fromEntries([...r.lines].sort((x, y) => y[1] - x[1]).slice(0, LINE_ROWS)));
+        return a;
+      });
       out.phases[k] = p;
     }
     return out;
@@ -240,10 +292,14 @@ export function runBucket(runs, phases = null) {
     out.samples += p.samples ?? 0; out.idle += p.idle ?? 0; out.program += p.program ?? 0; out.gc += p.gc ?? 0;
     if (p.frame && (p.samples ?? 0) > frameFrom) { out.frame = p.frame; frameFrom = p.samples ?? 0; }
     if (p.counters) foldTally(out.tally, p.counters);
-    for (const [fn, url, line, col, self, total] of p.fns ?? []) {
+    for (const [fn, url, line, col, self, total, lines] of p.fns ?? []) {
       const key = `${url}\t${line}\t${col}\t${fn}`;
       const r = out.fns.get(key) ?? out.fns.set(key, { fn, url, line, col, self: 0, total: 0 }).get(key);
       r.self += self; r.total += total;
+      if (lines && typeof lines === 'object') {
+        r.lines ??= new Map();
+        for (const [l, t] of Object.entries(lines)) if (typeof t === 'number') r.lines.set(+l, (r.lines.get(+l) ?? 0) + t);
+      }
     }
   }
   return out;

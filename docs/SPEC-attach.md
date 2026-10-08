@@ -74,6 +74,39 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   and clusters on the verdict alone. (Field report: a 687.5 ms frame
   printed `top _aStarLoop 11.2ms` — 1.6% — and nearly sent an agent to
   optimise A*.)
+- **Attribute from the frame's own samples**: a hitch carries `frameSpan`
+  (its interval on the page's `performance.now()` clock). Once per document
+  the pipeline maps that clock onto the sampler's — a `performance.now()`
+  read batched on either side of a `Profiler.stop`, kept when the two reads
+  fall within 20 ms — keeps the last 4 chunks, and cuts each hitch out of
+  them by sample time: `profileWindow: 'frame'`, `frameSampledMs`, and
+  shares that are the frame's own. A stop cannot cut a frame where it ends
+  (it waits for the page's current task: a stop sent 300 ms into a 2 s task
+  is answered at 2 s), so with long frames back to back the chunk a hitch
+  rotates holds the NEXT frame too and reading chunks makes every
+  attribution one frame late; slicing ends that. No mapping, or a slice
+  under half the frame: the chunk, as before (`rolling-chunk`). Stop and
+  start are sent together — awaited in turn, the start waited out the next
+  task and left every frame after a rotation unsampled.
+- **Name the line**: each `topFrames` entry carries `lines` — `[{line,
+  share}]`, the function's self ticks by 1-based source line from V8's
+  `positionTicks`, ≥5% each, top 3 (omitted when the only line is the
+  function's own: a minified bundle's line 1). A function V8 inlined into
+  its caller samples as the caller, and its line is the call site. The
+  run file keeps the same per-line ticks for each phase's 25 heaviest
+  functions, and `report` prints the run's heaviest self time with them.
+- **Do not give up on the longest frames**: a frame of ≥150 ms
+  (`ATTRIBUTE_LONG_FRAME_MS`, `attributeLongFrameMs`) ignores the cooldown.
+  A load of back-to-back 400 ms frames came back all `unattributed
+  (cooldown)` — four worst frames and a 25 s one — and those are the frames
+  most worth explaining and cheapest to profile (the frame is already lost:
+  a stop is ~1% of 400 ms). One stop of a ≤10 s chunk at 10 ms is ≤1000
+  samples, nowhere near a 150 ms frame of its own, so the loop the cooldown
+  closes stays closed. Measured on test/fixtures/long-frames.html (12
+  back-to-back 300 ms frames, each running a function of its own): before,
+  8 of 11 `cooldown` and the 3 attributed named a neighbour's function;
+  after, 12/12 from their own samples, each naming its own function
+  (test/long-frames-e2e.mjs).
 - **Watch the instances**: the recorder defines `__THREE_DEVTOOLS__`
   before page scripts (listening on an existing one instead), so every
   three.js `Scene` announces itself; every 120 frames it checks visible
@@ -149,7 +182,8 @@ poses as a tier-1 measurement.
   and ~450 simulated cars, ran at 12 fps under attach with its own loop
   still at 6–9 ms): the sampler runs at 10 ms, a hitch rotates it only
   when the stall is ≥80 ms and no rotation ran in the last second of page
-  time, and an unread window rolls itself over every 10 s. A hitch the
+  time (a frame of ≥150 ms ignores the cooldown, §2), and an unread
+  window rolls itself over every 10 s. A hitch the
   gate skips is still recorded, marked `unattributed: below-floor |
   cooldown`, and counted onto the next attributed record as
   `skippedSinceLast` — the §2 "rate-limited with loud drop counts",

@@ -41,6 +41,17 @@ The playbook, in order:
    A hitch line that reads `unattributed (heaviest JS … = 2% of the frame)`
    is NOT a lead on that function — the stall was GC, native work or
    unsampled; do not go optimise the name it printed.
+   A top frame followed by `— :84931 61% · :84944 22%` names the LINES its
+   self time went to: read that statement before the rest of the function
+   (a big update() has one hot loop, and guessing which from the code
+   around it is how fixes go wrong twice). A line that is the function's
+   caller's call site means V8 inlined the callee there.
+   For a regression in a named phase of work, have the game report
+   `__sloptimizeSection(name, ms, calls)` and read compare's verdict: same
+   call count with more ms/call means look INSIDE the function; more calls
+   at the same ms/call means look at its CALLERS. Compare loads of different
+   sizes per unit (`__sloptimizeScale('roads', n)` → `ms/road`), never in
+   absolute ms — those rows read `unlike`.
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
 7. Record the fix once the new build has ledger evidence:
