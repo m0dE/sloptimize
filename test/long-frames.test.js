@@ -206,3 +206,33 @@ test('report prints the hot lines under a hitch\'s top frame and under the run\'
   assert.match(out, /top update@index-BU6aIbGf\.js:84908 312ms \(80% of frame\) — :84931 61% · :84944 22%/);
   assert.match(out, /heaviest self time \(whole run\):\n {4}update@index-BU6aIbGf\.js:84908 800ms \(100% of JS\) {2}:84931 60% {2}:84944 40%/);
 });
+
+test('a chunk is credited to its phases by sample time once the clock and the phase edges are known', async () => {
+  const h = harness();
+  await h.p.start();
+  h.chunks.push(chunk(0, 500, [{ fn: 'boot', line: 1, from: 0, to: 500 }]));
+  h.reads.push(500.5, 501.5);
+  h.chunks[0].endTime = (501 + OFF) * 1000;
+  await h.p.onRecord(hitch(0, 500));                 // calibrates the clock
+  // The page: 'load' from 600 to 1000, then 'play' — one chunk spans all of it.
+  await h.p.onRecord({ type: 'phase-span', at: at(1000), phase: 'load', span: 'x.1', ms: 400, t0: 600, t1: 1000, next: 'play' });
+  h.chunks.push(chunk(500, 1400, [{ fn: 'loadCity', line: 5, from: 600, to: 1000 }, { fn: 'tick', line: 9, from: 1000, to: 1400 }]));
+  await h.p.stop();
+  const run = JSON.parse(readFileSync(join(h.dir, 'runs', `${h.p.session}.json`), 'utf8'));
+  const fns = (ph) => (run.phases[ph]?.fns ?? []).map((f) => f[0]);
+  assert.deepEqual(fns('load'), ['loadCity']);
+  assert.deepEqual(fns('play'), ['tick']);
+  assert.ok(!fns('?').includes('loadCity'), 'nothing of the load is credited elsewhere');
+});
+
+test('a frame no held chunk covers is not-sampled — never attributed from a chunk of another time', async () => {
+  const h = harness();
+  await h.p.start();
+  h.chunks.push(chunk(5000, 5500, [{ fn: 'later', line: 1, from: 5000, to: 5500 }]));
+  h.reads.push(5500.5, 5501.5);
+  h.chunks[0].endTime = (5501 + OFF) * 1000;
+  await h.p.onRecord(hitch(100, 400));               // long gone: 5 s before the chunk began
+  const [l] = h.lines();
+  assert.equal(l.unattributed, 'not-sampled');
+  assert.deepEqual(l.topFrames, []);
+});

@@ -40,7 +40,7 @@ export function phaseSpans(records) {
     const prev = by.get(k);
     // A closed span is final; an open snapshot never replaces it.
     if (prev && !prev.open && r.open) continue;
-    by.set(k, { session: r.session, span: r.span, phase: r.phase, ms: r.ms, open: r.open === true, scale: r.scale, sections: r.sections, at: r.at });
+    by.set(k, { session: r.session, span: r.span, phase: r.phase, ms: r.ms, ...(typeof r.frames === 'number' ? { frames: r.frames } : {}), open: r.open === true, scale: r.scale, sections: r.sections, at: r.at });
   }
   return [...by.values()];
 }
@@ -74,6 +74,9 @@ export function spanTable(spans) {
   for (const [k, a] of acc) {
     const row = { spans: a.closed.length, open: a.open, scale: {}, perUnit: {}, sections: new Map() };
     if (a.closed.length) row.ms = r2(a.closed.reduce((n, s) => n + s.ms, 0) / a.closed.length);
+    // The phase's mean frame: its time over the frames drawn in it.
+    const framed = a.closed.filter((s) => s.frames > 0);
+    if (framed.length) { row.frames = framed.reduce((n, s) => n + s.frames, 0); row.frameMs = r2(framed.reduce((n, s) => n + s.ms, 0) / row.frames); }
     const units = new Map();
     for (const s of a.closed) for (const [u, n] of Object.entries(s.scale ?? {})) {
       if (!(typeof n === 'number' && n > 0)) continue;

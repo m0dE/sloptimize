@@ -326,10 +326,16 @@ function phaseOver(from, to) {
   for (const [p, ms] of cover) if (ms > most) { best = p; most = ms; }
   return best;
 }
-const newSpan = (phase) => ({ id: `${bootId}.${++spanSeq}`, phase, t0: performance.now(), scale: null, sections: null, dirty: false });
+const newSpan = (phase) => ({ id: `${bootId}.${++spanSeq}`, phase, t0: performance.now(), frames: 0, scale: null, sections: null, dirty: false });
 let openSpan = newSpan(undefined);
-function spanRecord(s, open) {
-  const rec = { type: 'phase-span', at: new Date().toISOString(), phase: s.phase, span: s.id, ms: +(performance.now() - s.t0).toFixed(1), tier: 0 };
+function spanRecord(s, open, next) {
+  // `frames`: rAF callbacks inside the span — ms / frames is the phase's mean
+  // frame, however few frames it had (a 120-frame window may never close).
+  // `t0`/`t1` on the page clock and the phase that came `next`: attach credits
+  // each profiler sample to the phase it fell in, by time.
+  const t1 = open ? performance.now() : next.t0;
+  const rec = { type: 'phase-span', at: new Date().toISOString(), phase: s.phase, span: s.id, ms: +(t1 - s.t0).toFixed(1), frames: s.frames, t0: +s.t0.toFixed(1), tier: 0 };
+  if (!open) { rec.t1 = +t1.toFixed(1); rec.next = next.phase ?? null; }
   if (open) rec.open = true;
   if (s.scale) rec.scale = { ...s.scale };
   if (s.sections) rec.sections = Object.fromEntries([...s.sections].map(([k, v]) => [k, [+v[0].toFixed(3), v[1]]]));
@@ -353,7 +359,7 @@ try {
       phaseLog.push([openSpan.t0, p]);
       if (phaseLog.length > 16) phaseLog.shift();
       // The unnamed boot span is only worth a record when the host hung something on it.
-      if (ended.phase !== undefined || ended.scale || ended.sections) emit(spanRecord(ended, false));
+      if (ended.phase !== undefined || ended.scale || ended.sections) emit(spanRecord(ended, false, openSpan));
     },
   });
 } catch { /* a frozen global: the phase still reads, unspanned */ }
@@ -371,6 +377,53 @@ globalThis.__sloptimizeSection = function (name, ms, calls = 1) {
   if (e) { e[0] += t; e[1] += c; } else if (m.size < 200) m.set(k, [t, c]);
   openSpan.dirty = true;
 };
+
+// ── Sim ticks (SPEC §3.16): the state digest per tick, for equivalence ────
+// `__sloptimizeTick(tick, digest, values?)` — a hash of the sim's state (a
+// string/number, or named parts {agents, signals}) and, for tolerant
+// comparison, summary numbers. Buffered and sent in batches; attach writes
+// them to ticks/<session>.jsonl, never the ledger. `__sloptimizeSim({seed,
+// tickHz, save})` says what the run simulates. A sim in a Worker posts its
+// digests to the page, which calls these.
+const tickBuf = [];
+function cleanD(d) {
+  if (typeof d === 'string') return d.slice(0, 128);
+  if (typeof d === 'number') return Number.isFinite(d) ? d : undefined;
+  if (typeof d === 'bigint') return d.toString();
+  if (!d || typeof d !== 'object') return undefined;
+  const o = {};
+  let n = 0;
+  for (const k in d) { if (n++ >= 32) break; const v = d[k]; if (typeof v === 'string') o[k] = v.slice(0, 128); else if (typeof v === 'number' && Number.isFinite(v)) o[k] = v; else if (typeof v === 'bigint') o[k] = v.toString(); }
+  return n ? o : undefined;
+}
+function flushTicks() {
+  if (tickBuf.length) emit({ type: 'ticks', at: new Date().toISOString(), entries: tickBuf.splice(0) });
+}
+globalThis.__sloptimizeTick = function (tick, digest, values) {
+  const t = Number(tick);
+  if (!Number.isFinite(t)) return;
+  const d = cleanD(digest);
+  let v;
+  if (values && typeof values === 'object') { v = {}; let n = 0; for (const k in values) { if (n >= 32) break; const x = values[k]; if (typeof x === 'number' && Number.isFinite(x)) { v[k] = x; n++; } } if (!n) v = undefined; }
+  if (d === undefined && v === undefined) return;
+  tickBuf.push(v === undefined ? [t, d] : [t, d === undefined ? null : d, v]);
+  if (tickBuf.length >= 120) flushTicks();
+};
+globalThis.__sloptimizeSim = function (meta) {
+  if (!meta || typeof meta !== 'object') return;
+  emit({ type: 'sim', at: new Date().toISOString(), seed: meta.seed, tickHz: meta.tickHz, save: meta.save, tier: 0 });
+};
+// ── Knobs (SPEC §3.17): what a sweep turns ──────────────────────────────────
+// `__sloptimizeKnob('cars', (n) => sim.setCarCount(n))` — `sloptimize sweep`
+// calls the setter with each level's N.
+const knobs = Object.create(null);
+globalThis.__sloptimizeKnobs = knobs;
+globalThis.__sloptimizeKnob = function (name, set) {
+  if (typeof name === 'string' && name && typeof set === 'function') knobs[name.slice(0, 40)] = set;
+};
+
+// Attach calls this as it stops: the last ticks and the open span are not lost.
+globalThis.__sloptimizeFlush = function () { flushTicks(); snapshotSpan(); };
 
 /** The renderer the game's own context reports, once it has one. Read off
  *  the game's context, never a probe context of ours. */
@@ -482,6 +535,7 @@ function tick(ts) {
   const frameMs = ts - lastRaf, frameFrom = lastRaf;
   lastRaf = ts;
   frameMsRing[head] = frameMs;
+  openSpan.frames++;
   head = (head + 1) % RING;
   if (count < RING) count++;
   frameNo++;
@@ -534,6 +588,7 @@ function tick(ts) {
     win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0);
     updateConditions();
     snapshotSpan();
+    flushTicks();
   }
   if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
     let rows = [];
@@ -570,6 +625,7 @@ try {
     beat.frames = 0; beat.draws = 0; beat.tris = 0;
     emit(rec);
     snapshotSpan();
+    flushTicks();
   }, BEAT_MS);
 } catch { /* no timers */ }
 requestAnimationFrame(tick);
@@ -577,6 +633,6 @@ requestAnimationFrame(tick);
 // rAF entirely; without this the first frame back would report the whole
 // hidden span as one hitch. Re-seed the clock on either edge.
 try {
-  document.addEventListener('visibilitychange', () => { lastRaf = -1; });
+  document.addEventListener('visibilitychange', () => { lastRaf = -1; flushTicks(); });
 } catch { /* no document */ }
 emit({ type: 'armed', at: new Date().toISOString(), url: location.href });

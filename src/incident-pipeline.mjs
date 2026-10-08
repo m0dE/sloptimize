@@ -11,6 +11,7 @@ import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold, hotLines } from './runs.js';
+import { createTickLog } from './ticks.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -200,12 +201,17 @@ export const SAMPLING_INTERVAL_US = 10_000;
 export const ATTRIBUTE_FLOOR_MS = 80;
 export const ATTRIBUTE_COOLDOWN_MS = 1000;
 export const ATTRIBUTE_LONG_FRAME_MS = 150;
+/** A worker's sampler stop is given this long before its chunk is skipped. */
+const WORKER_STOP_MS = 3000;
 /** A clock mapping is kept only when both reads fell within this. */
 export const CLOCK_MAX_ERROR_MS = 10;
 /** Chunks held for slicing: a frame spans at most the chunk it ended in and
  *  the one before (a stop waits for the task, so it lands a frame late), and
  *  two more cover a roll and a hitch queued behind another. */
 const KEEP_CHUNKS = 4;
+/** …and beyond that, as many as fit this many samples (~60 s at 10 ms): a
+ *  record chain running behind a burst of long frames must still find them. */
+const KEEP_SAMPLES = 6000;
 export const ATTRIBUTE_MIN_SHARE = 0.1;
 export const PROFILE_WINDOW_MS = 10_000;
 const RUN_WRITE_MS = 5000;
@@ -241,6 +247,10 @@ export const SOFTWARE_GPU = /swiftshader|llvmpipe|softpipe|software|basic render
  *   heartbeat carries the JS heap (Runtime.getHeapUsage, cheap); `gc` forces a collection first so the
  *   reading is the post-GC floor, `snapshots` writes heap/<session>-start|end.heapsnapshot. Both pause
  *   the page, so both are conditions of the run.
+ * @param {(sessionId:string, method:string, params?:object)=>Promise<any>} [opts.sendTo]  CDP call on a CHILD
+ *   session (flat mode). Given, the page's workers are auto-attached and profiled too (SPEC §3.18):
+ *   each its own thread in the run file. Absent (or `workers: false`), the page alone, as before.
+ * @param {boolean} [opts.workers]           default true when sendTo is given
  * @param {()=>number} [opts.now]             wall clock, for records without an `at`
  * @param {Function} [opts.setTimeout] @param {Function} [opts.clearTimeout]  injectable for tests
  */
@@ -290,10 +300,38 @@ export function createIncidentPipeline(opts) {
     appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp(rec)) + '\n');
   }
   const runPath = join(dir, 'runs', `${session.replace(/[^\w.-]/g, '_')}.json`);
+  // The sim's per-tick digests (SPEC §3.16): their own file, never the ledger.
+  let tickLog = null;
+  const ticks = () => (tickLog ??= createTickLog({ dir, session, build, drive: conditions.drive }));
   let pagePhase, runWrittenAt = -Infinity;
-  function foldChunk(profile) {
+  // Phase edges on the page clock, [t, phase from t on], from closed spans.
+  const edges = [];
+  /** A chunk into the run file. With the clock mapped and the page's phase
+   *  edges known, each sample is credited to the phase it fell in — a 3 s
+   *  phase inside a 10 s window owns its samples, with no rotation at the
+   *  edge (a rotation waits out the page's task: one per edge put the record
+   *  chain a frame behind per edge). Otherwise, the whole chunk to the phase
+   *  the page was last heard in (≤ one window misfiled at an edge). */
+  function foldChunk(profile, thread) {
     if (!run || !profile) return;
-    run.addProfile(profile, pagePhase, now());
+    if (!clock || !edges.length || !Array.isArray(profile.samples) || typeof profile.startTime !== 'number') {
+      run.addProfile(profile, pagePhase, now(), thread);
+    } else {
+      const parts = new Map();
+      let t = profile.startTime;
+      const deltas = profile.timeDeltas ?? [];
+      for (let i = 0; i < profile.samples.length; i++) {
+        t += deltas[i] ?? 0;
+        const ms = t / 1000 - clock.offsetMs;
+        let ph;   // before the first edge we know of: the unnamed boot phase
+        // A sample covers (t − Δ, t]: one landing ON an edge is the phase before it.
+        for (const [et, ep] of edges) { if (et < ms) ph = ep; else break; }
+        const k = ph ?? '';
+        const part = parts.get(k) ?? parts.set(k, { phase: ph, samples: [], timeDeltas: [], us: 0 }).get(k);
+        part.samples.push(profile.samples[i]); part.timeDeltas.push(deltas[i] ?? 0); part.us += deltas[i] ?? 0;
+      }
+      for (const p of parts.values()) run.addProfile({ nodes: profile.nodes, samples: p.samples, timeDeltas: p.timeDeltas, startTime: 0, endTime: p.us }, p.phase, now(), thread);
+    }
     writeRun(false);
   }
   function writeRun(force) {
@@ -312,6 +350,73 @@ export function createIncidentPipeline(opts) {
   let skippedSinceLast = 0;      // hitches the gate left unattributed since then
   let windowTimer = null;
   let coverageTaken = false;
+  // ── Worker threads (SPEC §3.18) ─────────────────────────────────────────
+  // A game that moves its simulation into a Worker takes the work out of the
+  // page's sampler: the report shows a healthy main thread and nothing of the
+  // sim beside it. With a child-session transport, every dedicated or shared
+  // worker the page starts is auto-attached PAUSED (so its first instruction
+  // is sampled), given a sampler of its own at the page's interval, released,
+  // and rolled on its own chain — never the record chain: a worker's stop
+  // waits for ITS current task, and a hitch must not wait on the sim.
+  // Anything else that auto-attaches (an out-of-process iframe) is released
+  // untouched: a paused target the attach forgot is a hung page.
+  const sendTo = typeof opts.sendTo === 'function' && opts.workers !== false && !coverage ? opts.sendTo : null;
+  const workers = new Map();   // sessionId → { name }
+  let workerChain = Promise.resolve(), workerTimer = null;
+  const WORKER_TYPES = new Set(['worker', 'shared_worker']);
+  function threadName(info) {
+    const title = typeof info.title === 'string' && info.title && !/^[a-z][\w+.-]*:/i.test(info.title) ? info.title : '';
+    const base = title || String(info.url ?? '').replace(/[?#].*$/, '').split('/').pop() || 'anonymous';
+    let name = `worker[${base.slice(0, 40)}]`;
+    const taken = new Set([...workers.values()].map((w) => w.name));
+    for (let i = 2; taken.has(name); i++) name = `worker[${base.slice(0, 36)}#${i}]`;
+    return name;
+  }
+  async function attachWorker({ sessionId, targetInfo = {}, waitingForDebugger }) {
+    try {
+      if (!WORKER_TYPES.has(targetInfo.type) || !profiling) return;
+      await sendTo(sessionId, 'Profiler.enable');
+      await sendTo(sessionId, 'Profiler.setSamplingInterval', { interval: samplingIntervalUs });
+      await sendTo(sessionId, 'Profiler.start');
+      // A worker's own workers (a sim that farms out pathfinding).
+      try { await sendTo(sessionId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); } catch { /* not supported here */ }
+      const name = threadName(targetInfo);
+      workers.set(sessionId, { name });
+      log(`profiling ${name}`);
+      // The run is now measured with a sampler in the worker too: a
+      // condition (a worker-profiled run does not compare with a page-only one).
+      conditions.sampler = { ...(conditions.sampler ?? {}), workers: [...new Set([...(conditions.sampler?.workers ?? []), name.replace(/#\d+\]$/, ']')])].sort() };
+      writeConditions();
+      armWorkers();
+    } catch (e) { log(`worker ${targetInfo.url ?? sessionId} not profiled: ${e?.message ?? e}`); }
+    finally {
+      if (waitingForDebugger) { try { await sendTo(sessionId, 'Runtime.runIfWaitingForDebugger'); } catch { /* gone */ } }
+    }
+  }
+  /** Stop/start every worker's sampler (batched, as the page's) and fold the
+   *  chunks into their threads; `final` stops without restarting. A worker
+   *  that does not answer within the bound is skipped this round. */
+  function rotateWorkers(final = false) {
+    const run1 = async () => {
+      await Promise.all([...workers].map(async ([sid, w]) => {
+        const calls = [sendTo(sid, 'Profiler.stop'), ...(final ? [] : [sendTo(sid, 'Profiler.start')])];
+        let timer;
+        const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
+        clearT(timer);
+        const profile = res?.[0]?.profile;
+        if (profile) foldChunk(profile, w.name);
+      }));
+      writeRun(final);
+    };
+    workerChain = workerChain.then(run1, run1).catch(() => {});
+    return workerChain;
+  }
+  function armWorkers() {
+    if (workerTimer !== null || !(windowMs > 0)) return;
+    const tick = () => { workerTimer = setT(() => { void rotateWorkers().then(() => { if (workerTimer !== null) tick(); }); }, windowMs); workerTimer?.unref?.(); };
+    tick();
+  }
+
   // The page clock → sampler clock mapping, per document (header: a hitch's
   // own samples), and the chunks a frame is cut out of.
   let clock = null, clockTries = 0;
@@ -334,6 +439,8 @@ export function createIncidentPipeline(opts) {
   const scriptCtx = new Map();   // scriptId → executionContextId
   let mainFrame = null, docCtx = null;
   function onEvent(method, params) {
+    if (sendTo && method === 'Target.attachedToTarget' && params?.sessionId) { void attachWorker(params); return; }
+    if (sendTo && method === 'Target.detachedFromTarget' && params?.sessionId) { workers.delete(params.sessionId); return; }
     if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
       appendFileSync(snapshot.path, params.chunk);
       snapshot.bytes += params.chunk.length;
@@ -432,15 +539,30 @@ export function createIncidentPipeline(opts) {
     await send('Profiler.start');
     profiling = true;
     arm();
+    if (sendTo) {
+      try { await send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }); }
+      catch (e) { log(`workers not profiled: ${e?.message ?? e}`); }
+    }
   }
   // stop() twice (a signal during the loop's own stop) is one stop.
   let stopping = null;
   function stop() { return (stopping ??= doStop()); }
   async function doStop() {
     disarm();
+    // The page's buffered ticks and open span, before anything stops: the
+    // records cross the binding ahead of the reply, and the chain writes them.
+    if (!coverage) {
+      try { await send('Runtime.evaluate', { expression: 'globalThis.__sloptimizeFlush && globalThis.__sloptimizeFlush()' }); } catch { /* target gone */ }
+      // Bounded: a rotation the target never answers must not hold the stop.
+      let timer;
+      await Promise.race([chain.catch(() => {}), new Promise((r) => { timer = setT(r, WORKER_STOP_MS); timer?.unref?.(); })]);
+      clearT(timer);
+    }
     if (snapTimer !== null) { clearT(snapTimer); snapTimer = null; }
     if (heapOpts.snapshots) await (chain = chain.then(() => takeSnapshot('end')).catch(() => {}));
     if (coverage && !coverageTaken) { coverageTaken = true; await writeCoverage(); }
+    if (workerTimer !== null) { clearT(workerTimer); workerTimer = null; }
+    if (workers.size) await rotateWorkers(true);
     if (!profiling) { writeRun(true); return; }
     profiling = false;
     try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
@@ -471,7 +593,12 @@ export function createIncidentPipeline(opts) {
           clock = { offsetMs: profile.endTime / 1000 - (before + after) / 2, errMs: +((after - before) / 2).toFixed(2) };
         }
       }
-      if (profile?.samples) { held.push(profile); if (held.length > KEEP_CHUNKS) held.shift(); }
+      if (profile?.samples) {
+        held.push(profile);
+        let n = 0;
+        for (const c of held) n += c.samples.length;
+        while (held.length > KEEP_CHUNKS && n > KEEP_SAMPLES) n -= held.shift().samples.length;
+      }
       foldChunk(profile);
       return profile;
     } catch { return null; }
@@ -523,8 +650,21 @@ export function createIncidentPipeline(opts) {
     }
     // A closing span names the phase that ENDED; the next record says the new one.
     if (typeof rec.phase === 'string' && rec.type !== 'phase-span') pagePhase = rec.phase;
+    // A closed span is a phase EDGE on the page clock (header: a hitch's own
+    // samples): every chunk is credited to its phases by sample time.
+    if (rec.type === 'phase-span' && !rec.open && typeof rec.t0 === 'number' && typeof rec.t1 === 'number') {
+      if (!edges.some((e) => e[0] === rec.t0)) edges.push([rec.t0, rec.phase]);
+      edges.push([rec.t1, rec.next ?? undefined]);
+      edges.sort((x, y) => x[0] - y[0]);
+      if (edges.length > 64) edges.splice(0, edges.length - 64);
+    }
     // A new document has its own time origin: map its clock afresh.
-    if (rec.type === 'armed') { clock = null; clockTries = 0; held.length = 0; }
+    if (rec.type === 'armed') { clock = null; clockTries = 0; held.length = 0; edges.length = 0; }
+    if (rec.type === 'ticks') {
+      try { ticks().ticks(rec.entries); } catch (e) { log(`ticks not written: ${e?.message ?? e}`); }
+      return;
+    }
+    if (rec.type === 'sim') { try { ticks().sim(rec); } catch { /* the ledger line below still says it */ } }
     if (rec.type === 'gpu-create') {
       lastCreateStackHead = (rec.stack || '').split('\n')[0]?.trim() ?? null;
       appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
@@ -571,6 +711,11 @@ export function createIncidentPipeline(opts) {
       if (clock && Array.isArray(rec.frameSpan) && rec.frameSpan.length === 2 && rec.frameMs > 0) {
         const cut = sliceFrame(held, rec.frameSpan, clock.offsetMs);
         if (cut.sampledMs >= 0.5 * rec.frameMs) { source = cut.parts; rec.profileWindow = 'frame'; rec.frameSampledMs = cut.sampledMs; }
+        else if (profile && !(profile.endTime >= (rec.frameSpan[0] + clock.offsetMs) * 1000 && profile.startTime <= (rec.frameSpan[1] + clock.offsetMs) * 1000)) {
+          // The chunk provably holds ANOTHER time: naming its functions
+          // would name a different frame's cause. Said, not guessed.
+          source = null; rec.profileWindow = 'none'; rec.unattributed = 'not-sampled';
+        }
       }
       rec.topFrames = topFramesFromProfile(source);
       if (skippedSinceLast > 0) { rec.skippedSinceLast = skippedSinceLast; skippedSinceLast = 0; }

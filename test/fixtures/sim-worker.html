@@ -1,0 +1,25 @@
+<!doctype html><title>sim worker</title><body>
+<script>
+// The many-agent endgame: the simulation in a Worker, the page only drawing.
+// The worker is saturated (a 15 ms step every 16 ms); the main thread is
+// light. A page-only profile reads this as healthy.
+const src = `
+function stepAgents(n) {
+  const until = performance.now() + 15;
+  let x = 0;
+  while (performance.now() < until) x += Math.sqrt(x + n);   // the per-agent update
+  return x;
+}
+let tick = 0;
+setInterval(() => { stepAgents(9000); postMessage(++tick); }, 16);
+`;
+const sim = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { name: 'sim' });
+let ticks = 0;
+sim.onmessage = (e) => { ticks = e.data; };
+function draw() {
+  requestAnimationFrame(draw);
+  const until = performance.now() + 2;
+  while (performance.now() < until) {}
+}
+requestAnimationFrame(draw);
+</script></body>

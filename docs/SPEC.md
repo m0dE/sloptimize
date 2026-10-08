@@ -769,6 +769,114 @@ A phase run twice in one run (a reload, a second level) reads as its mean
 span; per unit is total ms over total units. A tier-1 host may write the
 same `phase-span` records to its ledger.
 
+### 3.16 Behavioural equivalence — the first tick two builds disagree
+
+A many-agent game's biggest optimisations — staggering half the per-agent
+update, moving the sim into a Worker — rest on "the simulation is
+identical", and a field team's plan said in writing there was no way to
+check it (an earlier refactor had shipped on an unverified claim). Seeding
+is the game's; comparing is ours. The game pushes, per tick:
+
+```js
+window.__sloptimizeSim({ seed: 42, tickHz: 60, save: 'bench-city' }); // what the run simulates
+window.__sloptimizeTick(tick, { agents: h1, signals: h2 }, { delivered, meanSpeed }); // digest (named parts) + summary values
+```
+
+The page batches ticks (120, the profile window, the heartbeat, a hidden
+page, and attach's stop all flush) and attach writes them to
+`ticks/<session>.jsonl` — never the ledger: one header line, then `{t, d,
+v}` per tick. `createTickLog` (`sloptimize/ticks`) writes the same file
+from a headless Node sim, faster than real time; a sim in a Worker posts its
+digests to the page, which calls `__sloptimizeTick`.
+
+`sloptimize equivalence <A> <B> [--ticks N]` (a build — its newest run —, a
+session, or a tick-log path):
+- **exact** (default when both sides carry digests): `identical through tick
+  5000`, or `first divergence at tick 1841 (identical through 1840)` with
+  both digests and, for named parts, which differ (`differs: agents
+  (identical: rng)`).
+- **`--tolerant`** — for changes that alter state ON PURPOSE (a stagger, a
+  LOD sim, a reordered float sum; exact reports tick 1): windowed means of
+  each summary value (`--window 60` ticks) within a relative `--tolerance`
+  (0.02): `within`, or `meanSpeed drifts 13% from tick 1800`.
+- **refused** (exit 3) when the runs simulated different things — seed,
+  tick rate or save differ. Said, not refused: a seed or tick rate not
+  declared on both sides (a sim stepped by frame time diverges whenever
+  the frame rates differ), and a drive script on either side (its input is
+  wall-clock timed; input that reaches the sim diverges whatever the code
+  did — apply input by tick, or none).
+- **cannot judge** (exit 5) when fewer than `--ticks` ticks are in both logs
+  and nothing diverged — never "identical".
+
+Exit codes: 0 identical/within · 1 diverged/drifted · 3 refused · 4 no tick
+log · 5 too few common ticks. MCP: `check_equivalence`.
+
+### 3.17 Scaling sweeps — cost against N, per phase, with a fitted exponent
+
+One agent count says which phase is biggest, never which is worst BEHAVED:
+a 2 ms quadratic phase beats a 20 ms linear one as soon as the player builds
+a bigger city. The game registers a knob, `window.__sloptimizeKnob('cars',
+(n) => sim.setCarCount(n))`, and `sloptimize sweep --knob cars --values
+1000,3000,5000,9000 --launch <url> [--runs 2] [--settle 5] [--duration 20]`
+measures each level, smallest first, in its own attached session (the page
+reloads per level, so no pool or cache grown at 9k leaks into the 1k
+reading): a drive waits for the knob, sets it, settles in `sweep-settle`,
+then measures in phase `sweep` with N as the phase's scale (§3.15). Rows:
+
+| row | from |
+|---|---|
+| `frame ms` | the measured span's mean frame (its ms / its frames) |
+| `section <name> ms/call` | the host's `__sloptimizeSection` — called once a tick, ms per tick |
+| `fn <name> ms/frame` | a function's sampled self time per frame of the span (the 8 heaviest at the largest level) |
+| `thread <name> ms/frame` | a worker's busy share of the frame (§3.18) |
+
+Each row gets the log-log least-squares exponent over every run with its
+95% interval, the slope of every adjacent step (a fixed overhead flattens
+the first; the last predicts the next size), and a shape only as strong as
+the interval: `linear` (≤1.2), `SUPER-LINEAR`, `QUADRATIC or worse` (≥1.8 —
+n·log n over a decade reads ~1.15), `bending upward`, or `noisy — more runs
+a level` (interval wider than 0.6) / `two levels: …`. The frame row answers
+"how many agents": holds the budget (`--frame-budget`, 16.7 ms) through N,
+over at M, crossing interpolated only from a level clearly under it (a
+vsync-locked frame sits AT the budget and gives no slope), extrapolated past
+the last level only from the last step and labelled EXTRAPOLATED. Saved to
+`sweeps/<id>.json`; `sweep --show [id]` re-reads; MCP `get_sweep`. Phase
+edges rotate the sampler (their own 1 s cooldown), so a phase shorter than
+the 10 s window still owns its samples.
+
+An exponent BUDGET (`perf.budget.exponent.<metric>`) is deliberately not
+built yet: it needs real sweeps to show how wide the interval runs.
+
+### 3.18 Worker threads — profiling where the simulation went
+
+A game that moves its sim into a Worker took the work out of the page's
+sampler: the report showed a healthy 6 ms main thread and nothing of the 16
+ms of sim beside it. With a child-session transport (attach over CDP, and
+`attachInApp` in Electron), the pipeline sends `Target.setAutoAttach
+{waitForDebuggerOnStart, flatten}`; each dedicated or shared worker arrives
+PAUSED, gets a sampler at the page's interval, and is released
+(`Runtime.runIfWaitingForDebugger` always, even when its sampler failed — a
+paused worker is a hung game; an out-of-process iframe is released
+untouched). Workers roll on their own chain every window and at stop, never
+on the record chain — a worker's stop waits for ITS current task — and each
+stop is given 3 s. Each folds into the run file as a thread of its phase
+(`phases.<p>.threads["worker[sim]"]`: samples, busy and wall ms, functions
+with hot lines); the worker's name is its `new Worker(url, {name})`, else
+its script's file name. The workers sampled join the conditions
+(`sampler.workers`): a worker-profiled run does not compare with a
+page-only one. `attach --no-workers` turns it off.
+
+`report` prints `threads: frame 16.7 ms · main 3.6 ms/frame (22% busy) ·
+worker[sim] 16.4 ms/frame (98% busy)` — busy is sampled non-idle time over
+the chunks' wall time, ms/frame is busy × the frame median — each worker's
+heaviest functions, and a verdict: `worker-bound` (a worker ≥85% busy while
+main is under 60%: a faster main thread will not raise the ceiling),
+`sim-behind` (the same, and the game clock — `__sloptimizeClock`, §3.11 —
+running under 0.95× real time: a decoupled sim slowing while the frames
+stay smooth), `main-bound`, or headroom. `compare` reads `thread <name>
+busy %` and `ms/frame` rows and each worker function's share of its own
+thread (`fn worker[sim]:step@sim.js %thread`).
+
 ## 4. Census and attribution
 
 ### 4.1 Static census (`census.json`)
@@ -1289,6 +1397,13 @@ degraded:
 - **Hot lines need line structure and survive no inlining.** A minified
   one-line bundle puts every tick on line 1 (no lines printed); a function
   V8 inlined samples as its caller, its line the call site (SPEC-attach §2).
+- **Equivalence needs a deterministic sim.** sloptimize compares digests;
+  seeding the RNG and stepping at a fixed rate are the game's (§3.16).
+- **A scaling exponent from four levels is a local shape**, printed with its
+  interval; past the largest level it is an extrapolation and says so (§3.17).
+- **Worker attribution is per run, not per hitch.** A main-thread hitch is
+  attributed from the page's samples; the worker's share of that frame is
+  not cut out of its chunks (§3.18).
 - **Cost per unit assumes linear cost.** `ms/road` compares two saves only
   if load is linear in roads; runs of one build at two sizes check it (§3.15).
 - **Multiplayer** is out of scope for the same reason it is out of scope for

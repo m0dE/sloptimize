@@ -35,7 +35,11 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
+}
+/** A worker thread's share of a phase: the same sample fold, no frames. */
+function emptyThread() {
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0 };
 }
 
 // ── Game counters (SPEC §3.11): totals over the game's OWN clock ────────────
@@ -128,6 +132,19 @@ export function heaviestSelf(bucket, limit = 3, intervalUs) {
 /** Hot lines kept per function, for this many of a phase's heaviest. */
 const LINE_FNS = 25, LINE_ROWS = 6;
 
+/** A function table as a run file stores it: heaviest first by inclusive
+ *  samples, one array per function — [fn, url, line, col, self, total,
+ *  lines?] — `lines` ({line: ticks}, its LINE_ROWS heaviest) only on the
+ *  LINE_FNS heaviest by self time: the functions anyone reads lines of. */
+function fnsJSON(fns) {
+  const withLines = new Set([...fns.values()].filter((r) => r.self > 0 && r.lines?.size).sort((x, y) => y.self - x.self).slice(0, LINE_FNS));
+  return [...fns.values()].sort((x, y) => y.total - x.total).map((r) => {
+    const a = [r.fn, r.url, r.line, r.col, r.self, r.total];
+    if (withLines.has(r)) a.push(Object.fromEntries([...r.lines].sort((x, y) => y[1] - x[1]).slice(0, LINE_ROWS)));
+    return a;
+  });
+}
+
 /**
  * @param {{session:string, build?:string, intervalUs?:number}} meta
  */
@@ -145,9 +162,16 @@ export function createRunFold(meta) {
    *  when the chunk ended: a chunk is ≤ the rolling window, so a phase edge
    *  misfiles at most one window's samples). `atMs` is the wall clock when it
    *  was stopped — a profile's own times are the target's monotonic clock. */
-  function addProfile(profile, phase, atMs = Date.now()) {
+  function addProfile(profile, phase, atMs = Date.now(), thread) {
     if (!profile || !Array.isArray(profile.nodes) || !Array.isArray(profile.samples)) return;
-    const b = bucket(phase);
+    // A worker's chunk (SPEC §3.18) folds into its own thread of the phase;
+    // the page's into the phase itself.
+    const pb = bucket(phase);
+    const b = thread ? (pb.threads.get(thread) ?? pb.threads.set(thread, emptyThread()).get(thread)) : pb;
+    // Busy against wall: the chunk's span, and the sampled time not idle —
+    // what says a thread is saturated, whatever its samples were doing.
+    if (typeof profile.endTime === 'number' && typeof profile.startTime === 'number' && profile.endTime > profile.startTime) b.wallUs += profile.endTime - profile.startTime;
+    const deltas = profile.timeDeltas ?? [];
     const byId = new Map(profile.nodes.map((n) => [n.id, n]));
     const parent = new Map();
     for (const n of profile.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
@@ -189,11 +213,13 @@ export function createRunFold(meta) {
       r.lines ??= new Map();
       for (const t of n.positionTicks) if (Number.isFinite(t?.line) && t.ticks > 0) r.lines.set(t.line, (r.lines.get(t.line) ?? 0) + t.ticks);
     }
-    for (const id of profile.samples) {
+    for (let i = 0; i < profile.samples.length; i++) {
+      const id = profile.samples[i];
       const n = byId.get(id);
       const name = n?.callFrame?.functionName;
       if (name === '(idle)') { b.idle++; continue; }
       b.samples++;
+      b.busyUs += deltas[i] ?? 0;
       if (name === '(program)') { b.program++; continue; }
       if (name === '(garbage collector)') { b.gc++; continue; }
       const stack = stackOf(id);
@@ -248,12 +274,15 @@ export function createRunFold(meta) {
       // long run's file small: [fn, url, line, col, self, total, lines?] —
       // `lines` ({line: ticks}, its LINE_ROWS heaviest) only on the
       // LINE_FNS heaviest by self time: the functions anyone reads lines of.
-      const withLines = new Set([...b.fns.values()].filter((r) => r.self > 0 && r.lines?.size).sort((x, y) => y.self - x.self).slice(0, LINE_FNS));
-      p.fns = [...b.fns.values()].sort((x, y) => y.total - x.total).map((r) => {
-        const a = [r.fn, r.url, r.line, r.col, r.self, r.total];
-        if (withLines.has(r)) a.push(Object.fromEntries([...r.lines].sort((x, y) => y[1] - x[1]).slice(0, LINE_ROWS)));
-        return a;
-      });
+      p.fns = fnsJSON(b.fns);
+      if (b.wallUs > 0) { p.busyMs = +(b.busyUs / 1000).toFixed(1); p.wallMs = +(b.wallUs / 1000).toFixed(1); }
+      // Worker threads (SPEC §3.18), each folded like the page.
+      if (b.threads.size) {
+        p.threads = {};
+        for (const [name, t] of b.threads) {
+          p.threads[name] = { samples: t.samples, idle: t.idle, program: t.program, gc: t.gc, busyMs: +(t.busyUs / 1000).toFixed(1), wallMs: +(t.wallUs / 1000).toFixed(1), fns: fnsJSON(t.fns) };
+        }
+      }
       out.phases[k] = p;
     }
     return out;
@@ -284,7 +313,7 @@ export function readRuns(dir) {
  * (medians do not sum).
  */
 export function runBucket(runs, phases = null) {
-  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), frame: undefined, tally: emptyTally() };
+  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyMs: 0, wallMs: 0, threads: new Map(), frame: undefined, tally: emptyTally() };
   let frameFrom = -1;
   const all = (Array.isArray(runs) ? runs : [runs]).flatMap((run) => Object.entries(run?.phases ?? {}));
   for (const [k, p] of all) {
@@ -292,17 +321,27 @@ export function runBucket(runs, phases = null) {
     out.samples += p.samples ?? 0; out.idle += p.idle ?? 0; out.program += p.program ?? 0; out.gc += p.gc ?? 0;
     if (p.frame && (p.samples ?? 0) > frameFrom) { out.frame = p.frame; frameFrom = p.samples ?? 0; }
     if (p.counters) foldTally(out.tally, p.counters);
-    for (const [fn, url, line, col, self, total, lines] of p.fns ?? []) {
-      const key = `${url}\t${line}\t${col}\t${fn}`;
-      const r = out.fns.get(key) ?? out.fns.set(key, { fn, url, line, col, self: 0, total: 0 }).get(key);
-      r.self += self; r.total += total;
-      if (lines && typeof lines === 'object') {
-        r.lines ??= new Map();
-        for (const [l, t] of Object.entries(lines)) if (typeof t === 'number') r.lines.set(+l, (r.lines.get(+l) ?? 0) + t);
-      }
+    foldFns(out.fns, p.fns);
+    out.busyMs += p.busyMs ?? 0; out.wallMs += p.wallMs ?? 0;
+    for (const [name, t] of Object.entries(p.threads ?? {})) {
+      const o = out.threads.get(name) ?? out.threads.set(name, { samples: 0, idle: 0, program: 0, gc: 0, busyMs: 0, wallMs: 0, fns: new Map() }).get(name);
+      for (const k of ['samples', 'idle', 'program', 'gc', 'busyMs', 'wallMs']) o[k] += t[k] ?? 0;
+      foldFns(o.fns, t.fns);
     }
   }
   return out;
+}
+
+function foldFns(into, rows) {
+  for (const [fn, url, line, col, self, total, lines] of rows ?? []) {
+    const key = `${url}\t${line}\t${col}\t${fn}`;
+    const r = into.get(key) ?? into.set(key, { fn, url, line, col, self: 0, total: 0 }).get(key);
+    r.self += self; r.total += total;
+    if (lines && typeof lines === 'object') {
+      r.lines ??= new Map();
+      for (const [l, t] of Object.entries(lines)) if (typeof t === 'number') r.lines.set(+l, (r.lines.get(+l) ?? 0) + t);
+    }
+  }
 }
 
 // ── "did the run touch the change?" ─────────────────────────────────────────

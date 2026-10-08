@@ -231,6 +231,25 @@ saves compare per unit, and `compare` says which factor of a section moved:
 callers)`, a different bug with a different fix. `check` takes
 `perf.budget.load.ms_per.road`, a budget that holds across inputs.
 
+For many-agent games (RTS, swarm, traffic, physics, tower defence) three more
+tools (SPEC §3.16–3.18):
+
+- **`sloptimize equivalence <A> <B>`** — the game reports a state digest per
+  tick (`__sloptimizeTick(tick, {agents, rng})`, `__sloptimizeSim({seed,
+  tickHz})`), and two builds come back `identical through tick 5000` or
+  `first divergence at tick 1841 — differs: agents`. `--tolerant` for changes
+  that alter state on purpose (a staggered update): windowed means of summary
+  values within a tolerance. The proof an optimised or worker-moved sim still
+  behaves the same.
+- **`sloptimize sweep --knob cars --values 1000,3000,5000,9000`** — the game
+  registers `__sloptimizeKnob('cars', n => …)`; each level is measured in its
+  own session and every section and hot function is fitted against N:
+  `junction ~n^1.56 [1.42–1.7] SUPER-LINEAR`, plus where the frame crosses
+  its budget. The worst-behaved phase, not just the biggest.
+- **Workers are profiled too** — every Worker the page starts is sampled as
+  its own thread: `threads: main 3.6 ms/frame (22% busy) · worker[sim] 16.4
+  ms/frame (98% busy) → worker-bound`. No game code.
+
 Inside the function a hitch names, attach names the LINE — V8's per-line
 ticks, already in the profile it reads: `top update@index.js:84908 312ms
 (80% of frame) — :84931 61% · :84944 22%`. Each hitch is attributed from the

@@ -52,6 +52,15 @@ The playbook, in order:
    at the same ms/call means look at its CALLERS. Compare loads of different
    sizes per unit (`__sloptimizeScale('roads', n)` → `ms/road`), never in
    absolute ms — those rows read `unlike`.
+   Before claiming a sim change is "identical" (a refactor, a move into a
+   Worker), `sloptimize equivalence <before> <after>` (MCP:
+   `check_equivalence`) over the game's per-tick digests: only `identical`
+   through the ticks you asked for is proof; a stagger or LOD change is
+   checked with `--tolerant`. A `threads:` line reading `worker-bound` means
+   the main thread is no longer the ceiling — work the worker's heaviest
+   function, not the frame. For which phase to optimise in a many-agent
+   game, `sloptimize sweep` (MCP: `get_sweep`): a SUPER-LINEAR phase beats a
+   bigger linear one as N grows; never quote a `noisy` exponent.
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
 7. Record the fix once the new build has ledger evidence:

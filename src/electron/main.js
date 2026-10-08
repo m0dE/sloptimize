@@ -195,18 +195,20 @@ export async function attachInApp(opts = {}) {
   if (opts.trace && !contentTracing) log('trace requested but contentTracing not provided — skipping GPU traces');
 
   const send = (method, params = {}) => dbg.sendCommand(method, params);
+  // Workers are child sessions; webContents.debugger takes their sessionId.
+  const sendTo = (sessionId, method, params = {}) => dbg.sendCommand(method, params, sessionId);
   const pipeline = createIncidentPipeline({
-    dir, log, send, regime, build: opts.build, attributeMinShare: opts.minShare,
+    dir, log, send, sendTo, workers: opts.workers, regime, build: opts.build, attributeMinShare: opts.minShare,
     conditions: pageKnobs({ headless: false, slots: opts.slots, host: 'electron',
       browser: process.versions?.chrome ? `Chrome/${process.versions.chrome}${process.versions.electron ? ` Electron/${process.versions.electron}` : ''}` : undefined }),
     onNewCluster: tracer ? async (rec) => { const f = await tracer.cut(rec); if (f) rec.trace = f; } : undefined,
   });
 
   let detached = false;
-  const onMessage = (_event, method, params) => {
+  const onMessage = (_event, method, params, sessionId) => {
     if (method === 'Runtime.bindingCalled' && params?.name === '__sloptimizeEmit') {
       try { void pipeline.onRecord(JSON.parse(params.payload)); } catch { /* one bad record */ }
-    } else pipeline.onEvent(method, params);
+    } else pipeline.onEvent(method, params, sessionId);
   };
   const onDetach = () => { detached = true; };
   dbg.attach('1.3');

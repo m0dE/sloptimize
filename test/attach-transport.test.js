@@ -35,7 +35,7 @@ const open = (over = {}) => attach({ wsUrl: 'ws://fake/devtools/page/1', WebSock
 test('attach over an explicit wsUrl runs the CDP sequence and exposes `closed`', async () => {
   const s = await open();
   assert.deepEqual(FakeWS.last.sent, ['Runtime.enable', 'Page.enable', 'Runtime.addBinding', 'Page.addScriptToEvaluateOnNewDocument',
-    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Page.reload']);
+    'Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start', 'Target.setAutoAttach', 'Page.reload']);
   assert.ok(s.closed instanceof Promise);
   await s.close();
 });

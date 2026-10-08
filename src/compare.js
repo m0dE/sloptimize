@@ -34,6 +34,7 @@ import { stableFile } from './footprint.js';
 import { runBucket, emptyTally, foldTally, ratesOf } from './runs.js';
 import { runConditions, compareConditions } from './conditions.js';
 import { phaseSpans, spanTable, oneOf, sectionVerdict } from './spans.js';
+import { threadRows } from './threads.js';
 
 function median(vals) {
   if (vals.length === 0) return undefined;
@@ -113,6 +114,12 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
       if (e.calls > 0) { put(`section ${k} calls`, e.calls); put(`section ${k} ms/call`, e.perCall); }
     }
   }
+  // Threads (SPEC §3.18): each one's busy share and ms of the frame, so a
+  // sim that moved into a worker is a row of its own, not a disappearance.
+  for (const t of bucket ? threadRows(bucket, m['frame median ms']) : []) {
+    put(`thread ${t.name} busy %`, +(t.busy * 100).toFixed(1));
+    if (t.perFrameMs !== undefined) put(`thread ${t.name} ms/frame`, t.perFrameMs);
+  }
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;
   if (bucket && js > 0) {
@@ -125,10 +132,26 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
       fnShares.set(k, (fnShares.get(k) ?? 0) + r.self / js);
     }
   }
+  // A worker's functions, each under its thread and a share of THAT thread's
+  // JS: a sim worker's step() is not a slice of the page. Rows of their own;
+  // the page's composition check reads the page's shares only.
+  let workerFnShares;
+  if (bucket?.threads?.size) {
+    workerFnShares = new Map();
+    for (const [name, t] of bucket.threads) {
+      const tjs = t.samples - t.program - t.gc;
+      if (!(tjs > 0)) continue;
+      for (const r of t.fns.values()) {
+        if (!r.self) continue;
+        const k = `${name}:${r.fn}@${stableFile(r.url) || '?'}`;
+        workerFnShares.set(k, (workerFnShares.get(k) ?? 0) + r.self / tjs);
+      }
+    }
+  }
   const tier = records.some((r) => r.tier === 0) || run ? 0 : records.some((r) => r.type === 'heartbeat' || r.type === 'profile') ? 1 : undefined;
   const conditions = runConditions([...records, ...conditionLines], run);
   const spans = Object.keys(scales).length || Object.keys(sectionPhase).length ? { scales, sectionPhase } : undefined;
-  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, conditions, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}), ...(spans ? { spans } : {}) };
+  return { session, ...(tier !== undefined ? { tier } : {}), metrics: m, conditions, ...(fnShares ? { fnShares } : {}), ...(sectionShares ? { sectionShares } : {}), ...(spans ? { spans } : {}), ...(workerFnShares?.size ? { workerFnShares } : {}) };
 }
 
 function spread(vals) {
@@ -190,6 +213,16 @@ export function compareSides(A, B, { phaseScoped = false } = {}) {
       .sort((x, y) => Math.max(mb.get(y) ?? 0, ma.get(y) ?? 0) - Math.max(mb.get(x) ?? 0, ma.get(x) ?? 0))
       .slice(0, FN_ROWS);
     for (const k of keys) rows.push(row(`fn ${k} %js`, fa.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2)), fb.map((r) => +((r.fnShares.get(k) ?? 0) * 100).toFixed(2))));
+  }
+  // Worker functions (SPEC §3.18): the same rows, each a share of its thread.
+  const wa = A.runs.filter((r) => r.workerFnShares), wb = B.runs.filter((r) => r.workerFnShares);
+  if (wa.length && wb.length) {
+    const ma = meanShares(wa.map((r) => r.workerFnShares)), mb = meanShares(wb.map((r) => r.workerFnShares));
+    const keys = [...new Set([...ma.keys(), ...mb.keys()])]
+      .filter((k) => Math.max(ma.get(k) ?? 0, mb.get(k) ?? 0) >= FN_ROW_SHARE)
+      .sort((x, y) => Math.max(mb.get(y) ?? 0, ma.get(y) ?? 0) - Math.max(mb.get(x) ?? 0, ma.get(x) ?? 0))
+      .slice(0, FN_ROWS);
+    for (const k of keys) rows.push(row(`fn ${k} %thread`, wa.map((r) => +((r.workerFnShares.get(k) ?? 0) * 100).toFixed(2)), wb.map((r) => +((r.workerFnShares.get(k) ?? 0) * 100).toFixed(2))));
   }
   // Composition: sections when the host measured them (exact), else the
   // sampled function shares. `within` is the largest distance between two
