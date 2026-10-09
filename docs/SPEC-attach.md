@@ -100,13 +100,31 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   A load of back-to-back 400 ms frames came back all `unattributed
   (cooldown)` — four worst frames and a 25 s one — and those are the frames
   most worth explaining and cheapest to profile (the frame is already lost:
-  a stop is ~1% of 400 ms). One stop of a ≤10 s chunk at 10 ms is ≤1000
-  samples, nowhere near a 150 ms frame of its own, so the loop the cooldown
-  closes stays closed. Measured on test/fixtures/long-frames.html (12
+  a stop is ~1% of 400 ms). Measured on test/fixtures/long-frames.html (12
   back-to-back 300 ms frames, each running a function of its own): before,
   8 of 11 `cooldown` and the 3 attributed named a neighbour's function;
   after, 12/12 from their own samples, each naming its own function
   (test/long-frames-e2e.mjs).
+- **The restart is the cost, so the profiler is anchored** (0.10.1). 0.10.0
+  argued the exemption safe by sizing the STOP (~2 ms) and missed the START:
+  with no profile running, V8 walks the whole heap to log every compiled
+  function — 35 ms at 16 MB, 270 ms at 158 MB, 1069 ms at 629 MB. A 9000-car
+  traffic sim attached at 520 ms frames against 60 ms unattached (the app's
+  own frame timer unmoved at 45–49 ms, the time "native"): each restart made
+  the next frame long, which restarted the profiler again. So the pipeline
+  keeps an ANCHOR profile running (the console's `profile()`, through
+  `Runtime.evaluate` with the command-line API; re-started when a document
+  arms — a navigation ends it — and replaced every 5 min so its samples stay
+  few; one per worker too), and a rotation's start then costs ~1 ms
+  (865 ms → 1 ms on a 513 MB heap). Every start is TIMED (the gap between
+  the stop's reply and the start's): one over 25 ms re-anchors; if it stays
+  expensive the cooldown and the window stretch to 50× it (the recorder
+  under 2% of the run) and a long frame skips the cooldown only at 10× it.
+  The run file's `recorder` block (restarts, total and longest ms, anchored)
+  is printed by `report`, loudly past 2% of the run or 50 ms a restart.
+  test/heavy-heap-e2e.mjs (a 400 MB heap, 40 ms frames): 0.10.0 ran at a
+  583 ms rAF median with 45 hitches in 30 s; anchored, 33 ms and 4, the
+  longest restart 0.3 ms.
 - **Watch the instances**: the recorder defines `__THREE_DEVTOOLS__`
   before page scripts (listening on an existing one instead), so every
   three.js `Scene` announces itself; every 120 frames it checks visible

@@ -1,0 +1,24 @@
+<!doctype html><title>heavy heap</title><body>
+<script>
+// A big-sim heap (~400 MB of small objects) with 40 ms frames and a 300 ms
+// one every ~3 s. V8 walks the whole heap on every profiler start; with the
+// recorder restarting the profiler per long frame, that walk became the
+// frame (a 9000-car sim: 60 ms frames unattached, 520 ms attached). The page
+// keeps its own probe — rAF intervals and its own work per frame — so the
+// e2e can hold the recorder's numbers against the page's.
+const MB = Number(new URLSearchParams(location.search).get('mb')) || 400;
+const world = [];
+for (let i = 0; i < MB * 12500; i++) world.push({ x: i, y: i * 2, v: [i], next: null });
+window.__probe = { intervals: [], work: [] };
+let last = -1, frame = 0;
+function busy(ms) { const end = performance.now() + ms; let x = 0; while (performance.now() < end) x += Math.sqrt(x + 1); return x; }
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (last >= 0) window.__probe.intervals.push(ts - last);
+  last = ts;
+  const t0 = performance.now();
+  busy(++frame % 180 === 0 ? 300 : 40);
+  window.__probe.work.push(performance.now() - t0);
+}
+requestAnimationFrame(loop);
+</script></body>

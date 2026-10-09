@@ -32,7 +32,8 @@ const hitch = (at = '2026-09-09T00:00:00Z') => ({ type: 'hitch', at, frameMs: 12
 test('start/stop drive the profiler over send; stop is idempotent', async () => {
   const h = harness();
   await h.p.start();
-  assert.deepEqual(h.calls, ['Profiler.enable', 'Profiler.setSamplingInterval', 'Profiler.start']);
+  // The anchor profile (Runtime.evaluate of the console's profile()) before the sampler.
+  assert.deepEqual(h.calls, ['Profiler.enable', 'Profiler.setSamplingInterval', 'Runtime.evaluate', 'Profiler.start']);
   await h.p.stop(); await h.p.stop();
   assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 1);
 });
@@ -149,18 +150,21 @@ test('an unread window rolls itself over so Profiler.stop never serializes a ses
     clearTimeout: (id) => cleared.push(id),
   });
   await h.p.start();
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0].ms, 10000);
-  await timers[0].fn();
-  assert.deepEqual(h.calls.slice(3).filter((c) => c.startsWith('Profiler.')), ['Profiler.stop', 'Profiler.start']);
+  // The window's timers; the anchor profile's replacement (5 min) is the other.
+  const win = () => timers.filter((t) => t.ms === 10000);
+  assert.equal(win().length, 1);
+  assert.ok(timers.some((t) => t.ms === 5 * 60_000), 'the anchor is replaced on a timer');
+  const calls0 = h.calls.length;
+  await win()[0].fn();
+  assert.deepEqual(h.calls.slice(calls0).filter((c) => c.startsWith('Profiler.')), ['Profiler.stop', 'Profiler.start']);
   assert.ok(!existsSync(join(h.dir, 'perf.jsonl')), 'a roll writes nothing');
-  assert.equal(timers.length, 2, 're-armed');
+  assert.equal(win().length, 2, 're-armed');
   // A hitch's rotation re-arms the window too: the window measures unread time.
   await h.p.onRecord(hitch(atMs(0)));
-  assert.equal(timers.length, 3);
+  assert.equal(win().length, 3);
   await h.p.stop();
-  assert.ok(cleared.includes(3));
-  await timers[2].fn();
+  assert.ok(cleared.includes(timers.indexOf(win()[2]) + 1));
+  await win()[2].fn();
   assert.equal(h.calls.filter((c) => c === 'Profiler.stop').length, 3, 'a roll after stop is a no-op');
 });
 
