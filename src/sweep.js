@@ -30,11 +30,13 @@
 //   section <n> ms/call    the host's __sloptimizeSection (called once a
 //                          tick: ms per tick)
 //   fn <n> ms/frame        a function's sampled self time per frame of the span
-//   thread <n> ms/frame    a worker's busy share of the frame (SPEC §3.18)
+//   thread <n> ms/task     a worker's mean task (SPEC §3.18) — its own
+//                          loop's tick; `busy %` when its tasks are too
+//                          short for the sampler or it never idles
 
 import { runBucket } from './runs.js';
 import { phaseSpans, spanTable } from './spans.js';
-import { threadRows } from './threads.js';
+import { threadRows, taskReadable } from './threads.js';
 import { stableFile } from './footprint.js';
 
 export const SWEEP_PHASE = 'sweep';
@@ -89,7 +91,12 @@ export function levelMetrics(records, run) {
       fns[k] = (fns[k] ?? 0) + r.self * run.intervalUs / 1000 / frames;
     }
   }
-  for (const tr of bucket ? threadRows(bucket, m['frame ms']) : []) if (tr.name !== 'main' && tr.perFrameMs !== undefined) m[`thread ${tr.name} ms/frame`] = tr.perFrameMs;
+  // A worker by its tasks (its own loop has no frame), else by its busy share.
+  for (const tr of bucket ? threadRows(bucket, m['frame ms']) : []) {
+    if (tr.name === 'main') continue;
+    if (taskReadable(tr.task)) m[`thread ${tr.name} ms/task`] = tr.task.meanMs;
+    else m[`thread ${tr.name} busy %`] = +(tr.busy * 100).toFixed(1);
+  }
   return { metrics: m, fns };
 }
 

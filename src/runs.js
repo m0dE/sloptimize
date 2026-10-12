@@ -37,9 +37,25 @@ function median(vals) {
 function emptyBucket() {
   return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
 }
-/** A worker thread's share of a phase: the same sample fold, no frames. */
+/** A worker thread's share of a phase: the same sample fold, no frames —
+ *  and its TASKS: a worker on its own loop has no frame to be "per". */
 function emptyThread() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0 };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, tasks: emptyTasks() };
+}
+/** Busy stretches between idle samples: a decoupled worker's ticks. `hist`
+ *  counts them by length in samples; `open` are the ones a chunk edge cut
+ *  (a worker that never idles has only those). */
+function emptyTasks() { return { n: 0, us: 0, maxUs: 0, samples: 0, open: 0, hist: new Map() }; }
+function addTasks(into, t) {
+  if (!t) return;
+  into.n += t.n ?? 0; into.us += t.us ?? (t.ms ?? 0) * 1000; into.samples += t.samples ?? 0; into.open += t.open ?? 0;
+  const max = t.maxUs ?? (t.maxMs ?? 0) * 1000;
+  if (max > into.maxUs) into.maxUs = max;
+  for (const [k, c] of t.hist instanceof Map ? t.hist : Object.entries(t.hist ?? {})) into.hist.set(+k, (into.hist.get(+k) ?? 0) + c);
+}
+function tasksJSON(t) {
+  if (!t.n && !t.open) return undefined;
+  return { n: t.n, ms: +(t.us / 1000).toFixed(1), maxMs: +(t.maxUs / 1000).toFixed(1), samples: t.samples, open: t.open, hist: Object.fromEntries([...t.hist].sort((a, b) => a[0] - b[0])) };
 }
 
 // ── Game counters (SPEC §3.11): totals over the game's OWN clock ────────────
@@ -214,19 +230,32 @@ export function createRunFold(meta) {
       r.lines ??= new Map();
       for (const t of n.positionTicks) if (Number.isFinite(t?.line) && t.ticks > 0) r.lines.set(t.line, (r.lines.get(t.line) ?? 0) + t.ticks);
     }
+    // A worker's tasks: each run of busy samples between idle ones. The
+    // runs a chunk edge cuts are counted apart — their length is unknown.
+    let runUs = 0, runN = 0, atStart = true;
+    const endRun = (edge) => {
+      if (thread && runN > 0) {
+        const t = b.tasks;
+        if (atStart || edge) t.open++;
+        else { t.n++; t.us += runUs; t.samples += runN; if (runUs > t.maxUs) t.maxUs = runUs; t.hist.set(runN, (t.hist.get(runN) ?? 0) + 1); }
+      }
+      runUs = 0; runN = 0; atStart = false;
+    };
     for (let i = 0; i < profile.samples.length; i++) {
       const id = profile.samples[i];
       const n = byId.get(id);
       const name = n?.callFrame?.functionName;
-      if (name === '(idle)') { b.idle++; continue; }
+      if (name === '(idle)') { b.idle++; endRun(false); continue; }
       b.samples++;
       b.busyUs += deltas[i] ?? 0;
+      runUs += deltas[i] ?? 0; runN++;
       if (name === '(program)') { b.program++; continue; }
       if (name === '(garbage collector)') { b.gc++; continue; }
       const stack = stackOf(id);
       if (stack.length) row(stack[0]).self++;
       for (const k of stack) row(k).total++;
     }
+    endRun(true);
     seen(atMs);
   }
 
@@ -291,7 +320,8 @@ export function createRunFold(meta) {
       if (b.threads.size) {
         p.threads = {};
         for (const [name, t] of b.threads) {
-          p.threads[name] = { samples: t.samples, idle: t.idle, program: t.program, gc: t.gc, busyMs: +(t.busyUs / 1000).toFixed(1), wallMs: +(t.wallUs / 1000).toFixed(1), fns: fnsJSON(t.fns) };
+          const tasks = tasksJSON(t.tasks);
+          p.threads[name] = { samples: t.samples, idle: t.idle, program: t.program, gc: t.gc, busyMs: +(t.busyUs / 1000).toFixed(1), wallMs: +(t.wallUs / 1000).toFixed(1), ...(tasks ? { tasks } : {}), fns: fnsJSON(t.fns) };
         }
       }
       out.phases[k] = p;
@@ -338,8 +368,9 @@ export function runBucket(runs, phases = null) {
     foldFns(out.fns, p.fns);
     out.busyMs += p.busyMs ?? 0; out.wallMs += p.wallMs ?? 0;
     for (const [name, t] of Object.entries(p.threads ?? {})) {
-      const o = out.threads.get(name) ?? out.threads.set(name, { samples: 0, idle: 0, program: 0, gc: 0, busyMs: 0, wallMs: 0, fns: new Map() }).get(name);
+      const o = out.threads.get(name) ?? out.threads.set(name, { samples: 0, idle: 0, program: 0, gc: 0, busyMs: 0, wallMs: 0, fns: new Map(), tasks: emptyTasks() }).get(name);
       for (const k of ['samples', 'idle', 'program', 'gc', 'busyMs', 'wallMs']) o[k] += t[k] ?? 0;
+      addTasks(o.tasks, t.tasks);
       foldFns(o.fns, t.fns);
     }
   }

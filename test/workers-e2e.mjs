@@ -27,4 +27,18 @@ const lines = out.split('\n').filter((l) => /threads:|→ |worker\[sim\] heavies
 for (const l of lines) console.log(`  ${l.trim()}`);
 check(/worker-bound: worker\[sim\]/.test(out), 'report: worker-bound');
 check(/worker\[sim\] heaviest: stepAgents/.test(out), 'report names the worker\'s heaviest function');
+
+// A decoupled sim on its own loop: 57 ms a tick every 75 ms. Read per task,
+// and with no game clock the verdict must not read its idle time as headroom.
+const DIR2 = `${DIR}-decoupled`;
+rmSync(DIR2, { recursive: true, force: true });
+const s2 = await attach({ launch: `${url}?step=57&every=75`, headless: true, port: 9336, dir: DIR2, log: () => {} });
+await new Promise((r) => setTimeout(r, 14000));
+await s2.close();
+const out2 = execFileSync(process.execPath, [fileURLToPath(new URL('../bin/sloptimize.mjs', import.meta.url)), 'report', '--dir', DIR2], { encoding: 'utf8' });
+for (const l of out2.split('\n').filter((x) => /threads:|→ /.test(x))) console.log(`  ${l.trim()}`);
+const m = out2.match(/worker\[sim\] (\d+(?:\.\d+)?) ms\/task/);
+check(m && Math.abs(Number(m[1]) - 57) <= 12, `report: the worker per task (${m?.[1] ?? '?'} ms; 57 ms a tick)`);
+check(!/worker\[sim\] [\d.]+ ms\/frame/.test(out2), 'report: no ms/frame for a worker');
+check(/cannot judge sim-behind: no __sloptimizeClock/.test(out2), 'report: cannot judge sim-behind without a clock');
 process.exit(fail ? 1 : 0);

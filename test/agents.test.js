@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { buildInjectScript } from '../src/attach.mjs';
 import { createTickLog, readTickLog, equivalence, digestDiff } from '../src/ticks.js';
 import { fitExponent, shapeOf, sweepTable, levelDrive } from '../src/sweep.js';
-import { threadRows, threadVerdict, clockRateOf } from '../src/threads.js';
+import { threadRows, threadVerdict, clockRateOf, taskText } from '../src/threads.js';
 import { createRunFold, runBucket } from '../src/runs.js';
 import { createIncidentPipeline } from '../src/incident-pipeline.mjs';
 
@@ -186,12 +186,56 @@ test('threads: busy per thread and per frame, and the verdict names the ceiling'
   fold.addFrame({ phase: 'play', frame: { medianMs: 16.2 } });
   const b = runBucket(JSON.parse(JSON.stringify(fold.toJSON())));
   const rows = threadRows(b, 16.2);
-  assert.deepEqual(rows.map((r) => [r.name, r.busy, r.perFrameMs]), [['main', 0.22, 3.6], ['worker[sim]', 0.97, 15.7]]);
+  // Main per frame; the worker has no frame to be "per" — its one busy stretch ran into the chunk's edge.
+  assert.deepEqual(rows.map((r) => [r.name, r.busy, r.perFrameMs]), [['main', 0.22, 3.6], ['worker[sim]', 0.97, undefined]]);
+  assert.deepEqual(rows[1].task, { n: 0, neverIdle: true });
   assert.equal(threadVerdict(rows).verdict, 'worker-bound');
   assert.equal(threadVerdict(rows, { clockRate: 0.8 }).verdict, 'sim-behind', 'a decoupled sim falling behind is its own symptom');
   assert.equal(threadVerdict([{ name: 'main', busy: 0.9 }, { name: 'worker[a]', busy: 0.3 }]).verdict, 'main-bound');
   assert.equal(threadVerdict([{ name: 'main', busy: 0.9 }]), null, 'no worker, no thread verdict');
   assert.equal(clockRateOf({ clock: { seconds: 48, name: 'sim' }, wallSec: 60 }), 0.8);
+});
+
+/** A worker on its own loop: `taskMs` busy, then idle, repeated over `wallMs` (10 ms samples). */
+const ticking = (fn, taskMs, periodMs, wallMs) => {
+  const nodes = [{ id: 1, callFrame: { functionName: '(root)' } }, { id: 2, callFrame: { functionName: '(idle)' } }, { id: 3, callFrame: { functionName: fn, url: 'sim.js', lineNumber: 4 } }];
+  const n = Math.round(wallMs / 10), per = Math.round(periodMs / 10), busy = Math.round(taskMs / 10);
+  // Starts idle, so the first task is whole.
+  return { nodes, samples: Array.from({ length: n }, (_, i) => ((i % per) >= per - busy && i < n - 1 ? 3 : 2)), timeDeltas: Array(n).fill(10_000), startTime: 0, endTime: wallMs * 1000 };
+};
+
+test('a worker on its own loop is read per TASK, and without a game clock the verdict says it cannot judge sim-behind', () => {
+  // dmitriy's field case: 57 ms a tick, 78% busy — "6.2 ms/frame, no thread saturated" read as headroom.
+  const fold = createRunFold({ session: 'S', intervalUs: 10_000 });
+  fold.addProfile(chunk('draw', 3000, 10_000), 'play');
+  fold.addProfile(ticking('stepAgents', 60, 77, 10_010), 'play', Date.now(), 'worker[sim]');
+  fold.addFrame({ phase: 'play', frame: { medianMs: 8 } });
+  const json = JSON.parse(JSON.stringify(fold.toJSON()));
+  assert.ok(json.phases.play.threads['worker[sim]'].tasks.n >= 120);
+  const rows = threadRows(runBucket(json), 8);
+  const w = rows[1];
+  assert.equal(w.perFrameMs, undefined);
+  assert.equal(w.task.p50Ms, 60);
+  assert.ok(w.task.perSec > 12 && w.task.perSec < 14, `perSec ${w.task.perSec}`);
+  assert.match(taskText(w.task), /^60 ms\/task × 1\d\.\d\/s$/);
+  const v = threadVerdict(rows);
+  assert.equal(v.verdict, 'unjudged');
+  assert.match(v.text, /cannot judge sim-behind: no __sloptimizeClock/);
+  assert.match(v.text, /worker\[sim\] 75%, 60 ms\/task/);
+  // A declared 20 Hz tick (50 ms) the task outgrew.
+  const o = threadVerdict(rows, { tickHz: 20 });
+  assert.equal(o.verdict, 'over-tick');
+  assert.match(o.text, /60 ms a task against a 50 ms tick \(20 Hz\)/);
+  // The clock settles it either way — and behind is behind at 78% busy.
+  assert.equal(threadVerdict(rows, { clockRate: 0.83 }).verdict, 'sim-behind');
+  assert.equal(threadVerdict(rows, { clockRate: 1 }).verdict, 'headroom');
+  // Tasks under two samples are only "short".
+  const fast = createRunFold({ session: 'F', intervalUs: 10_000 });
+  fast.addProfile(chunk('draw', 3000, 10_000), 'play');
+  fast.addProfile(ticking('step', 10, 30, 3000), 'play', Date.now(), 'worker[w]');
+  const fr = threadRows(runBucket(JSON.parse(JSON.stringify(fast.toJSON()))), 8)[1];
+  assert.equal(fr.task.coarse, true);
+  assert.match(taskText(fr.task), /^tasks ≤20 ms/);
 });
 
 test('workers: auto-attached paused, sampled, released — and anything else released untouched', async () => {

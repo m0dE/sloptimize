@@ -191,8 +191,10 @@ if (cmd === 'report') {
       const bucket = phBucket;
       const rows = T.threadRows(bucket, bucket.frame?.medianMs);
       if (rows.length) {
-        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
-        const v = T.threadVerdict(rows, { clockRate: T.clockRateOf(acc) });
+        // Main per frame; a worker per TASK — a worker on its own loop has no frame.
+        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : r.task ? `${T.taskText(r.task)} ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
+        const tickHz = ledger.filter((r) => r.type === 'sim' && r.session === profile.session && r.tickHz > 0).at(-1)?.tickHz;
+        const v = T.threadVerdict(rows, { clockRate: T.clockRateOf(acc), tickHz });
         if (v) console.log(`    → ${v.text}`);
         for (const r of rows.filter((x) => x.name !== 'main')) {
           const t = bucket.threads.get(r.name);
