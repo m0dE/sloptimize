@@ -130,13 +130,23 @@ if (cmd === 'report') {
     // What the recorder itself cost (SPEC-attach §2, restart): V8 walks the
     // heap on every profiler start, so on a big heap the instrument can be
     // the stall it records. Said on every report; loud past 2% or 50 ms.
-    if (file?.recorder?.restarts > 0) {
+    // The page-side half — the instance-slot watch's checks — is counted
+    // with it: a field run's heaviest JS was that watch while this line said 0%.
+    if (file?.recorder?.restarts > 0 || file?.recorder?.page) {
       const r = file.recorder;
       const runMs = Date.parse(file.to) - Date.parse(file.from);
-      const share = runMs > 0 ? r.restartMs / runMs : undefined;
-      console.log(`  recorder: ${r.restarts} profiler restart${r.restarts === 1 ? '' : 's'}, ${r.restartMs} ms in total, the longest ${r.maxRestartMs} ms${share !== undefined ? ` — ${pct(share)} of the run` : ''}${r.anchored ? '' : ' (no anchor profile: every restart walks the heap)'}`);
-      if ((share ?? 0) >= 0.02 || r.maxRestartMs >= 50) {
-        console.log(`  ⚠ the recorder's own profiler restarts cost ${share !== undefined ? pct(share) : 'a large share'} of this run (up to ${r.maxRestartMs} ms each) — frame times and hitches here INCLUDE them; compare with the page's own frame timer, or re-measure with a newer sloptimize`);
+      const slotsMs = r.page?.slotsMs ?? 0;
+      const totalMs = (r.restartMs ?? 0) + slotsMs;
+      const share = runMs > 0 ? totalMs / runMs : undefined;
+      const parts = [];
+      if (r.restarts > 0) parts.push(`${r.restarts} profiler restart${r.restarts === 1 ? '' : 's'}, ${r.restartMs} ms in total, the longest ${r.maxRestartMs} ms${r.anchored ? '' : ' (no anchor profile: every restart walks the heap)'}`);
+      if (r.page) parts.push(`instance-slot watch ${slotsMs} ms in the page${r.page.slotsMaxEvery > 120 ? ` (backed off to every ${r.page.slotsMaxEvery} frames)` : ''}`);
+      console.log(`  recorder: ${parts.join(' · ')}${share !== undefined ? ` — ${pct(share)} of the run` : ''}`);
+      if ((r.restartMs ?? 0) / (runMs || Infinity) >= 0.02 || r.maxRestartMs >= 50) {
+        console.log(`  ⚠ the recorder's own profiler restarts cost ${runMs > 0 ? pct(r.restartMs / runMs) : 'a large share'} of this run (up to ${r.maxRestartMs} ms each) — frame times and hitches here INCLUDE them; compare with the page's own frame timer, or re-measure with a newer sloptimize`);
+      }
+      if (runMs > 0 && slotsMs / runMs >= 0.01) {
+        console.log(`  ⚠ the instance-slot watch cost ${pct(slotsMs / runMs)} of this run — it is in these frame times; attach --no-slots measures without it (and without ghost-slot detection)`);
       }
     }
     // Phases as spans (SPEC §3.15): how long each took, per unit of what it

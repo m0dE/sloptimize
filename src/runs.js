@@ -150,6 +150,7 @@ function fnsJSON(fns) {
  */
 export function createRunFold(meta) {
   const phases = new Map();
+  const pageCost = { slotsMs: 0, slotsEvery: 0 };
   let fromMs = Infinity, toMs = -Infinity;
   let conditions = null;
   const bucket = (phase) => {
@@ -237,6 +238,12 @@ export function createRunFold(meta) {
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
     if (typeof rec.frame?.maxMs === 'number' && !(b.maxMs >= rec.frame.maxMs)) b.maxMs = rec.frame.maxMs;
     foldTally(b.tally, rec);
+    // The recorder's own in-page time (the instance-slot watch): the
+    // recorder's cost, not the game's, and the report counts it as such.
+    if (typeof rec.recorder?.slotsMs === 'number' && rec.recorder.slotsMs >= 0) {
+      pageCost.slotsMs += rec.recorder.slotsMs;
+      if (rec.recorder.slotsEvery > pageCost.slotsEvery) pageCost.slotsEvery = rec.recorder.slotsEvery;
+    }
     // Frames over fixed bars and the visible seconds they were counted in —
     // summed, so a gate can read frames over 100 ms per minute of the phase.
     if (rec.over && typeof rec.window?.seconds === 'number') {
@@ -258,7 +265,10 @@ export function createRunFold(meta) {
       const ph = [...phases.keys()].filter((k) => k !== '?').sort();
       out.conditions = { ...conditions, ...(ph.length ? { phases: ph } : {}) };
     }
-    if (recorder) out.recorder = recorder;
+    if (recorder || pageCost.slotsEvery > 0) {
+      out.recorder = { ...(recorder ?? {}) };
+      if (pageCost.slotsEvery > 0) out.recorder.page = { slotsMs: +pageCost.slotsMs.toFixed(1), slotsMaxEvery: pageCost.slotsEvery };
+    }
     out.phases = {};
     for (const [k, b] of phases) {
       const p = { samples: b.samples, idle: b.idle, program: b.program, gc: b.gc };

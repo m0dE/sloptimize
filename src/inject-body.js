@@ -517,8 +517,13 @@ function ringPct(p) {
 // MEAN frame, not whichever single frame the timer landed on.
 const PROFILE_EVERY = 120;
 // The slot watch, offset half a window from the profile so the two never
-// share a frame.
-const SLOTS_EVERY = 120, SLOTS_AT = 60;
+// share a frame — and every 120 frames only while it is cheap: a check that
+// costs more than SLOTS_SHARE of the frames since the last one doubles the
+// interval (up to 16×), and a cheap one halves it back. Its time rides each
+// profile record (`recorder.slotsMs`), so the report counts it as the
+// recorder's cost instead of the game's.
+const SLOTS_EVERY = 120, SLOTS_AT = 60, SLOTS_SHARE = 0.005;
+let slotsEvery = SLOTS_EVERY, slotsDue = SLOTS_AT, slotsMsWin = 0, slotsWinFrames = 0;
 const win = { frames: 0, draws: 0, tris: 0, ms: 0, max: 0, over: new Array(16).fill(0) };
 // Frames over FIXED bars, per window: the absolute count a hitch budget needs.
 // Detection is relative (2× the rolling median), so a build that is uniformly
@@ -584,15 +589,26 @@ function tick(ts) {
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       ...(takeCounters() ?? {}),
+      // The recorder's own in-page time this window: the instance-slot watch.
+      ...(SLOTS_ON ? { recorder: { slotsMs: +slotsMsWin.toFixed(2), slotsEvery } } : {}),
       tier: 0 });
+    slotsMsWin = 0;
     win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0);
     updateConditions();
     snapshotSpan();
     flushTicks();
   }
-  if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
+  slotsWinFrames++;
+  if (SLOTS_ON && --slotsDue <= 0) {
     let rows = [];
-    try { rows = slotWatch.check(performance.now()); } catch { /* a mesh we could not read */ }
+    const t0 = performance.now();
+    try { rows = slotWatch.check(t0); } catch { /* a mesh we could not read */ }
+    const ms = performance.now() - t0;
+    slotsMsWin += ms;
+    const share = ms / Math.max(1, slotsWinFrames * median);
+    if (share > SLOTS_SHARE && slotsEvery < 16 * SLOTS_EVERY) slotsEvery *= 2;
+    else if (share < SLOTS_SHARE / 4 && slotsEvery > SLOTS_EVERY) slotsEvery /= 2;
+    slotsDue = slotsEvery; slotsWinFrames = 0;
     for (const r of rows) emit({ type: 'instance-slots', at: new Date().toISOString(), ...r, tier: 0 });
   }
 }
