@@ -151,7 +151,7 @@ if (cmd === 'report') {
     // the stall it records. Said on every report; loud past 2% or 50 ms.
     // The page-side half — the instance-slot watch's checks — is counted
     // with it: a field run's heaviest JS was that watch while this line said 0%.
-    if (file?.recorder?.restarts > 0 || file?.recorder?.page) {
+    if (file?.recorder?.restarts > 0 || file?.recorder?.page?.slotsMs > 0) {
       const r = file.recorder;
       const runMs = Date.parse(file.to) - Date.parse(file.from);
       const slotsMs = r.page?.slotsMs ?? 0;
@@ -159,7 +159,7 @@ if (cmd === 'report') {
       const share = runMs > 0 ? totalMs / runMs : undefined;
       const parts = [];
       if (r.restarts > 0) parts.push(`${r.restarts} profiler restart${r.restarts === 1 ? '' : 's'}, ${r.restartMs} ms in total, the longest ${r.maxRestartMs} ms${r.anchored ? '' : ' (no anchor profile: every restart walks the heap)'}`);
-      if (r.page) parts.push(`instance-slot watch ${slotsMs} ms in the page${r.page.slotsMaxEvery > 120 ? ` (backed off to every ${r.page.slotsMaxEvery} frames)` : ''}`);
+      if (r.page && slotsMs > 0) parts.push(`instance-slot watch ${slotsMs} ms in the page${r.page.slotsMaxEvery > 120 ? ` (backed off to every ${r.page.slotsMaxEvery} frames)` : ''}`);
       console.log(`  recorder: ${parts.join(' · ')}${share !== undefined ? ` — ${pct(share)} of the run` : ''}`);
       if ((r.restartMs ?? 0) / (runMs || Infinity) >= 0.02 || r.maxRestartMs >= 50) {
         console.log(`  ⚠ the recorder's own profiler restarts cost ${runMs > 0 ? pct(r.restartMs / runMs) : 'a large share'} of this run (up to ${r.maxRestartMs} ms each) — frame times and hitches here INCLUDE them; compare with the page's own frame timer, or re-measure with a newer sloptimize`);
@@ -936,7 +936,9 @@ if (cmd === 'timeline') {
   let session = null, restored = false;
   const restore = () => {
     if (restored) return; restored = true;
-    try { git('checkout', '-q', original); console.log(`[timeline] restored ${original}`); }
+    // -f: the tree was clean when the run began, so any change to a tracked
+    // file now is a build's output (a lockfile, generated source).
+    try { git('checkout', '-q', '-f', original); console.log(`[timeline] restored ${original}`); }
     catch (e) { console.error(`sloptimize timeline: could not restore ${original}: ${String(e.stderr || e.message).trim()} — run git checkout ${original}`); }
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
@@ -944,7 +946,9 @@ if (cmd === 'timeline') {
     for (const sha of commits) {
       const step = { sha, subject: git('log', '-1', '--format=%s', sha), date: git('log', '-1', '--format=%cI', sha), sessions: [] };
       saved.steps.push(step);
-      git('checkout', '-q', '--detach', sha);
+      const dirt = git('status', '--porcelain', '--untracked-files=no');
+      if (dirt) console.log(`[timeline] the last build changed tracked files (${dirt.split('\n').length}) — discarded before checking out ${sha.slice(0, 10)}`);
+      git('checkout', '-q', '-f', '--detach', sha);
       if (buildCmd) {
         mkdirSync(join(tdir, id), { recursive: true });
         const logPath = join(tdir, id, `${sha.slice(0, 12)}.build.log`);
@@ -961,7 +965,7 @@ if (cmd === 'timeline') {
             dir: DIR, headless: args.includes('--headless'), build: sha.slice(0, 12), waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined,
             slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), drive: drivePath ?? TL.stepDrive({ settleS, measureS }), log: () => {} });
           await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
-          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
           step.sessions.push(session.session);
           console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}/${runs} — session ${session.session}  ${step.subject.slice(0, 60)}`);
         } catch (e) {
@@ -1037,13 +1041,17 @@ if (cmd === 'sweep') {
     waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined, slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), log: () => {} };
   const id = new Date().toISOString().replace(/[:.]/g, '-');
   const saved = { type: 'sweep', v: 1, id, knob, runs, settleS, measureS, ...(base.build ? { build: base.build } : {}), levels: [] };
+  // A signal stops the level's session first: an --exec'd app is its own
+  // process group, and the terminal's Ctrl-C never reaches it.
+  let live = null;
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (live) await Promise.race([live.close(), new Promise((r) => setTimeout(r, 8000))]); process.exit(130); });
   // Smallest first: the order a player grows the city in.
   for (const value of [...new Set(values)].sort((a, b) => a - b)) {
     const level = { value, sessions: [] };
     for (let i = 0; i < runs; i++) {
       let session;
       try {
-        session = await attach({ ...base, execVars: { value }, drive: S.levelDrive(knob, value, { settleS, measureS, viaLaunch }) });
+        session = live = await attach({ ...base, execVars: { value }, drive: S.levelDrive(knob, value, { settleS, measureS, viaLaunch }) });
         console.log(`[sweep] ${knob}=${value} run ${i + 1}/${runs} — session ${session.session}`);
         await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
       } catch (e) {
@@ -1061,7 +1069,8 @@ if (cmd === 'sweep') {
         }
         process.exit(4);
       }
-      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
+      live = null;
       level.sessions.push(session.session);
     }
     saved.levels.push(level);
@@ -1329,7 +1338,7 @@ if (cmd === 'attach') {
   // Bounded: a target that never answers the final Profiler.stop must not
   // keep us alive — but an end heap snapshot or a coverage collection of a
   // big page takes as long as it takes, and cutting it loses the file.
-  const stopLimitMs = opts.heap.snapshots || opts.coverage ? 15 * 60_000 : 5000;
+  const stopLimitMs = opts.heap.snapshots || opts.coverage ? 15 * 60_000 : 8000;
   const stop = async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, stopLimitMs))]); };
   const bye = async (why, code = 0) => {
     if (closing) return; closing = true;

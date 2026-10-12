@@ -209,6 +209,16 @@ window.__sloptimizeClock('sim', simMs, 1000);   // how much game time passed
 — and `report`, `compare` and `check` read it as a rate per game-second.
 Per wall second, a build that renders faster covers more game time and
 flatters itself; `report` says so when no clock was given (SPEC §3.11).
+The clock is also what lets the thread verdict say `sim-behind` for a sim
+in a Worker; without it, the report says it cannot judge.
+
+An attached frame is a rAF interval — vsync-quantized, recorder included —
+and never comparable with the app's own frame timer. One more line hands
+that timer over, so the two are read side by side (SPEC §3.20):
+
+```js
+window.__sloptimizeFrame(bodyMs);   // once a frame: what the app's own timer read
+```
 
 A one-off phase — a load, a level transition — is timed as a span from the
 `__sloptimizePhase` assignments, and two more optional lines make it a
@@ -247,8 +257,17 @@ tools (SPEC §3.16–3.18):
   `junction ~n^1.56 [1.42–1.7] SUPER-LINEAR`, plus where the frame crosses
   its budget. The worst-behaved phase, not just the biggest.
 - **Workers are profiled too** — every Worker the page starts is sampled as
-  its own thread: `threads: main 3.6 ms/frame (22% busy) · worker[sim] 16.4
-  ms/frame (98% busy) → worker-bound`. No game code.
+  its own thread, read per frame for main and per TASK for a worker on its
+  own loop: `threads: main 3.6 ms/frame (22% busy) · worker[sim] 57 ms/task
+  × 14/s (78% busy) → cannot judge sim-behind: no __sloptimizeClock`. No
+  game code; `__sloptimizeClock` turns "cannot judge" into a verdict.
+- **`sloptimize timeline --range A..B --build-cmd "<cmd>" --launch <url>`** —
+  one attached run per commit over the same window, read as a `CLIFF at
+  <sha>` (that commit is the regression) or a `STAIRCASE` (several commits,
+  no single revert), with each moving step's profile diff in ms/frame.
+- **`--exec "<cmd with {port} {tmp}>"`** — attach, sweep and timeline start
+  a target from its own launch line (an Electron harness with a data dir and
+  a spec file), not only a URL; a sweep's `{value}` lets the launcher set N.
 
 Inside the function a hitch names, attach names the LINE — V8's per-line
 ticks, already in the profile it reads: `top update@index.js:84908 312ms

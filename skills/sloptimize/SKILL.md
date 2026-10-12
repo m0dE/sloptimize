@@ -60,7 +60,14 @@ The playbook, in order:
    the main thread is no longer the ceiling — work the worker's heaviest
    function, not the frame. For which phase to optimise in a many-agent
    game, `sloptimize sweep` (MCP: `get_sweep`): a SUPER-LINEAR phase beats a
-   bigger linear one as N grows; never quote a `noisy` exponent.
+   bigger linear one as N grows; never quote a `noisy` exponent. A worker on
+   its own loop is read per TASK (`57 ms/task × 14/s`), and `cannot judge
+   sim-behind` means the game reports no `__sloptimizeClock` — not headroom.
+   For "when did this get slow?", `sloptimize timeline --range A..B
+   --build-cmd "<cmd>" --launch <url>` (MCP: `get_timeline`): a CLIFF names
+   the commit; a STAIRCASE means no single revert brings it back. A launcher
+   that is not a URL (Electron with a data dir): `--exec "<cmd {port}
+   {tmp}>"` on attach, sweep and timeline.
 6. `sloptimize check` against `.sloptimize/budgets.json` — "fast enough" is
    an exit code, and distance-to-budget is part of every verdict you report.
 7. Record the fix once the new build has ledger evidence:

@@ -829,7 +829,7 @@ then measures in phase `sweep` with N as the phase's scale (§3.15). Rows:
 | `frame ms` | the measured span's mean frame (its ms / its frames) |
 | `section <name> ms/call` | the host's `__sloptimizeSection` — called once a tick, ms per tick |
 | `fn <name> ms/frame` | a function's sampled self time per frame of the span (the 8 heaviest at the largest level) |
-| `thread <name> ms/frame` | a worker's busy share of the frame (§3.18) |
+| `thread <name> ms/task` | a worker's mean task — its own loop's tick (§3.18); `busy %` when its tasks are too short for the sampler, merge, or it never idles |
 
 Each row gets the log-log least-squares exponent over every run with its
 95% interval, the slope of every adjacent step (a fixed overhead flattens
@@ -844,6 +844,12 @@ the last level only from the last step and labelled EXTRAPOLATED. Saved to
 `sweeps/<id>.json`; `sweep --show [id]` re-reads; MCP `get_sweep`. Phase
 edges rotate the sampler (their own 1 s cooldown), so a phase shorter than
 the 10 s window still owns its samples.
+
+A target that is not a URL — an Electron harness with a data dir and a
+spec file — is started by `--exec "<cmd>"` (attach's launcher, §3.19's
+too): `{port}`, `{tmp}` (a fresh data dir, removed after) and `{value}`, the
+level's N. With `{value}` in the command the launcher sets the level and no
+page knob is needed.
 
 An exponent BUDGET (`perf.budget.exponent.<metric>`) is deliberately not
 built yet: it needs real sweeps to show how wide the interval runs.
@@ -868,15 +874,107 @@ its script's file name. The workers sampled join the conditions
 page-only one. `attach --no-workers` turns it off.
 
 `report` prints `threads: frame 16.7 ms · main 3.6 ms/frame (22% busy) ·
-worker[sim] 16.4 ms/frame (98% busy)` — busy is sampled non-idle time over
-the chunks' wall time, ms/frame is busy × the frame median — each worker's
-heaviest functions, and a verdict: `worker-bound` (a worker ≥85% busy while
-main is under 60%: a faster main thread will not raise the ceiling),
-`sim-behind` (the same, and the game clock — `__sloptimizeClock`, §3.11 —
-running under 0.95× real time: a decoupled sim slowing while the frames
-stay smooth), `main-bound`, or headroom. `compare` reads `thread <name>
-busy %` and `ms/frame` rows and each worker function's share of its own
-thread (`fn worker[sim]:step@sim.js %thread`).
+worker[sim] 57 ms/task (p95 64) × 13/s (78% busy)` — busy is sampled
+non-idle time over the chunks' wall time; main's ms/frame is busy × the
+frame median. A worker is read by its TASKS instead: a worker that runs its
+own loop has no frame to be "per", and a field report read "worker 6.2
+ms/frame (78% busy) → no thread saturated" for a sim spending 57 ms a tick
+and falling behind its clock. A task is a run of busy samples between idle
+ones (the run file keeps them per thread as a histogram by length; a run a
+chunk edge cuts is counted apart, as `open`). Read honestly: tasks of ≤2
+samples are only `tasks ≤20 ms`; a saturated worker's idle gaps are mostly
+shorter than one sample, so its tasks merge — said as `back-to-back tasks`,
+never as one long task; a worker with only cut runs `never idle`.
+
+Each worker's heaviest functions follow, and a verdict:
+- `sim-behind` — the game clock (`__sloptimizeClock`, §3.11) runs under
+  0.95× real time, at ANY busy share: a tick that outgrew its budget falls
+  behind with idle time between ticks;
+- `worker-bound` — a worker ≥85% busy while main is under 60%;
+- `main-bound`;
+- with a clock that keeps real time, `headroom`;
+- with no clock, `over-tick` when a declared `__sloptimizeSim({tickHz})`
+  budget is shorter than the worker's median task, else `unjudged`: "cannot
+  judge sim-behind: no __sloptimizeClock" — idle time is not headroom for a
+  decoupled sim.
+
+`compare` reads `thread <name> busy %`, main's `ms/frame`, a worker's
+`ms/task`, and each worker function's share of its own thread (`fn
+worker[sim]:step@sim.js %thread`).
+
+### 3.19 Timelines — a metric across commits, a cliff or a staircase
+
+A 12-day regression was found by hand: check out, build, launch, attach,
+write the number down, next commit. `sloptimize timeline --commits a,b,c |
+--range A..B [--every N] [--build-cmd "<cmd {commit}>"] --launch <url> |
+--exec "<cmd {port} {tmp} {commit}>" [--runs 1] [--settle 5] [--duration
+20] [--metric <name>] [--repo <dir>]` does the loop: a dirty working tree is
+refused, each commit is checked out detached, built (output to
+`timelines/<id>/<sha>.build.log`; a failed build is a step marked
+`build-failed` and skipped over), launched and attached with the commit as
+its build id, settled in `timeline-settle` and measured in phase
+`timeline` — the same window every time — and HEAD is restored whatever
+happens, signals included. `--drive <script> [--phase p]` measures a
+scripted workload instead.
+
+The default metric is the app's own frame body (`__sloptimizeFrame`,
+§3.20) when every step has it, else `main busy ms/frame` — sampled
+main-thread work per frame of the span: a tier-0 frame interval is
+vsync-quantized, and 2 ms and 8 ms of work both present at 16.7. The noise
+floor is measured: twice the spread of a commit's own runs (`--runs ≥2`),
+else three times the typical step of a range of ≥5 commits (most commits
+change nothing), else an assumed 10% of the median, said as assumed. Then:
+`CLIFF at <sha>` (one step ≥60% of the change: that commit is the
+regression), `STAIRCASE` (≥2 steps above the floor, none dominant: no single
+revert brings it back), one step plus drift, `DRIFT` (no step above the
+floor), or `flat`. Each step that moved gets its profile diff: functions in
+ms/frame, self AND inclusive (a cost inside a shared helper shows only as
+its caller's inclusive time), plus sections and threads. Saved to
+`timelines/<id>.json`; `timeline --show [id]` re-reads; MCP `get_timeline`.
+Exit 0 measured, 2 bad usage or a dirty tree, 4 fewer than two commits
+measured.
+
+### 3.20 Frame pacing, the host's frame timer, and what three compiles under
+
+**Pacing.** A reduced-rate sim alternates short and long frames — tier 1 on
+a field build read 5 ms / 60 ms, one long in two: a 15.4 ms median and 205
+"hitches" for one steady pattern. Both recorders judge every 60 frames over
+the last 120 (`framePacing`, cadence.js): two clusters at least 2.5× apart,
+the long one ≥25 ms and tight (p90/p10 ≤1.5), the long frames on a stride
+(≥80% of the gaps within one frame of the median gap). A change is said
+only when two windows agree, as one `pacing` record (`state: on|off`,
+`lowMs`, `highMs`, `every`, `meanMs`, `p95Ms`, `bandMs`); while it holds, a
+frame inside the long band is PACED, not a hitch — a stall past the band
+still is. Profiles and summaries carry `frame.meanMs` beside the median;
+`report` prints the pacing line once.
+
+**The host's frame timer.** An attached run's frame is a rAF interval, never
+comparable with the app's own timer. `window.__sloptimizeFrame(bodyMs)`,
+once a frame, hands it over: each profile carries `frame.bodyMs`
+(median), `bodyP95Ms`, `bodyMeanMs`, `bodyFrames`; the run file and
+`compare` read it as `frame body ms`; `report` prints it as the number to
+set beside the app's unattached measurements.
+
+**checkShaderErrors.** three.js's `renderer.debug.checkShaderErrors` is on
+by default and makes every program link wait on a synchronous status read.
+The recorder reads it (and three's revision) off the renderer three hands
+the devtools hook; it joins the conditions (a mention) and `report` warns,
+counting the shader-compile hitches it inflates — measure with it off
+before reading compile hitches as the shipped cost.
+
+### 3.21 Function identity — which `update`
+
+V8 names a class method by its own name: Car.update, CarManager.update and
+TrainConsist.update all sample as `update`. The run file keeps them apart by
+position, but `compare` and `sweep` key functions by name and hash-stripped
+file — positions move between builds — so in a bundle the three were one
+row. At stop, for every name several functions of one script answer to, the
+script's source is read once (through the page, else file:// or HTTP) and
+each is named by its innermost enclosing class (`Car.update`) or, outside
+one, by line (`update:812`) — a single linear scan aware of strings,
+templates, comments and regex literals (qualify.js). Unshared names stay as
+V8 gave them. A run qualified this way compares against an older one by
+the old bare name only where the name was not shared.
 
 ## 4. Census and attribution
 

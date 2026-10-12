@@ -59,7 +59,10 @@ export function taskStats(tasks, wallMs, busy = 0) {
     p95Ms: +(at(0.95) * msPerSample).toFixed(1),
     ...(wallMs > 0 ? { perSec: +(tasks.n / (wallMs / 1000)).toFixed(1) } : {}),
     ...(p50 <= COARSE_SAMPLES ? { coarse: true, underMs: +(COARSE_SAMPLES * msPerSample).toFixed(0) } : {}),
-    ...(busy >= SATURATED ? { merged: true, gapMs: +msPerSample.toFixed(0) } : {}),
+    // Merged: the idle gap a task this long leaves at this busy share is
+    // under half a sample (or the thread is ≥90% busy) — the sampler cannot
+    // see where one task ends, so these are stretches of several.
+    ...(busy >= 0.9 || (busy > 0 && (p50 * msPerSample * (1 - busy)) / busy < 0.5 * msPerSample) ? { merged: true, gapMs: +msPerSample.toFixed(0) } : {}),
   };
 }
 
@@ -115,6 +118,9 @@ export function threadVerdict(rows, { clockRate, tickHz } = {}) {
   const clocked = typeof clockRate === 'number' && clockRate > 0;
   // Behind is behind, saturated or not: a sim whose tick outgrew its budget
   // falls behind with idle time between ticks.
+  if (clocked && clockRate < BEHIND && main.busy >= SATURATED && top.busy < SATURATED) {
+    return { verdict: 'main-bound', thread: 'main', text: `main-bound: main ${pct(main.busy)} busy, ${top.name} ${pct(top.busy)}${tasks(top)} — and the game clock runs at ${clockRate.toFixed(2)}× real time: the main thread is what holds the sim back` };
+  }
   if (clocked && clockRate < BEHIND) {
     return { verdict: 'sim-behind', thread: top.name, text: `sim falling behind: the game clock runs at ${clockRate.toFixed(2)}× real time — ${top.name} ${pct(top.busy)} busy${tasks(top)}; the frames can look smooth while the simulation slows` };
   }

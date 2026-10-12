@@ -104,22 +104,33 @@ export function createSlotWatch(opts = {}) {
   }
 
   /** Visible InstancedMeshes: visibility is inherited, a hidden group's
-   *  children never draw. */
-  function scan() {
-    const found = [];
-    for (let k = scenes.length - 1; k >= 0; k--) {
-      const root = scenes[k].deref ? scenes[k].deref() : scenes[k];
-      if (!root) { scenes.splice(k, 1); continue; }
-      const stack = [root];
-      while (stack.length) {
-        const node = stack.pop();
-        if (!node || node.visible === false) continue;
-        if (node.isInstancedMesh) found.push(node);
-        const kids = node.children;
-        if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
+   *  children never draw. The walk is bounded by the check's budget and
+   *  resumes on the next check: a scene of 100k nodes is a few checks'
+   *  walk, never one long frame. True when a walk completed. */
+  let walk = null;
+  function scanStep(t0) {
+    if (!walk) {
+      const stack = [];
+      for (let k = scenes.length - 1; k >= 0; k--) {
+        const root = scenes[k].deref ? scenes[k].deref() : scenes[k];
+        if (!root) { scenes.splice(k, 1); continue; }
+        stack.push(root);
       }
+      walk = { stack, found: [] };
     }
-    return found;
+    const { stack, found } = walk;
+    let n = 0;
+    while (stack.length) {
+      if ((++n & 1023) === 0 && clock() - t0 > budgetMs) return false;
+      const node = stack.pop();
+      if (!node || node.visible === false) continue;
+      if (node.isInstancedMesh) found.push(node);
+      const kids = node.children;
+      if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
+    }
+    meshes = found;
+    walk = null;
+    return true;
   }
 
   function track(mesh) {
@@ -133,7 +144,8 @@ export function createSlotWatch(opts = {}) {
     // (bundled, unreachable at tier 0) is never touched.
     const orig = mesh.setMatrixAt;
     if (typeof orig === 'function' && !orig.__sloptimize) {
-      const w = function (i, m) { if (i >= 0 && i < st.cap) st.written[i] = 1; return orig.call(this, i, m); };
+      // The state is looked up per call: a replaced buffer gets a new one.
+      const w = function (i, m) { const s = state.get(this); if (s && i >= 0 && i < s.cap) s.written[i] = 1; return orig.call(this, i, m); };
       w.__sloptimize = true;
       mesh.setMatrixAt = w;
     }
@@ -184,7 +196,8 @@ export function createSlotWatch(opts = {}) {
     const t0 = clock();
     // The scene walk is the expensive half: redone every fifth check, and
     // meshes added in between are found then.
-    if (checks++ % 5 === 0) { meshes = scan(); if (cursor >= meshes.length) cursor = 0; }
+    if (walk || checks % 5 === 0) { if (scanStep(t0) && cursor >= meshes.length) cursor = 0; }
+    checks++;
     const rows = [];
     const n = meshes.length;
     let done = 0;

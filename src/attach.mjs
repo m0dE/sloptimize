@@ -148,9 +148,11 @@ async function discoverTarget(port, fetchImpl = fetch) {
 // The whole process group is stopped at close: an Electron app is several
 // processes, and one left holding the port fails the next run.
 
-/** The command with its placeholders filled; an unknown one is an error. */
+/** The command with its placeholders filled; one with no value here is an error. */
+export const EXEC_VARS = ['port', 'tmp', 'value', 'commit'];
 export function fillExec(cmd, vars) {
-  return String(cmd).replace(/\{(\w+)\}/g, (m, k) => {
+  // Only the four names, and never a shell's own `${VAR}`.
+  return String(cmd).replace(/(?<!\$)\{(port|tmp|value|commit)\}/g, (m, k) => {
     if (vars[k] === undefined) throw new Error(`--exec: {${k}} has no value here (known: ${Object.keys(vars).filter((x) => vars[x] !== undefined).map((x) => `{${x}}`).join(' ')})`);
     return String(vars[k]);
   });
@@ -199,7 +201,8 @@ export async function attach(opts = {}) {
   let child = null, execTmp = null, execTail = '', execExit = null;
   if (opts.exec) {
     if (opts.launch) throw new Error('--exec and --launch are two ways to start the target: pick one');
-    execTmp = /\{tmp\}/.test(opts.exec) ? mkdtempSync(join(tmpdir(), 'sloptimize-exec-')) : null;
+    fillExec(opts.exec, { port, tmp: '-', ...(opts.execVars ?? {}) });   // a bad command fails before anything is created
+    execTmp = /(?<!\$)\{tmp\}/.test(opts.exec) ? mkdtempSync(join(tmpdir(), 'sloptimize-exec-')) : null;
     const cmd = fillExec(opts.exec, { port, tmp: execTmp ?? undefined, ...(opts.execVars ?? {}) });
     child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     // The last of what it said, for the error when it dies before attaching.
@@ -218,11 +221,44 @@ export async function attach(opts = {}) {
     log(`launched ${bin} → ${opts.launch}`);
   }
 
+  // A launched browser is gone before close() returns: the next run of
+  // `--runs N` launches on the same port and must not find this one. A
+  // child that already died of a signal has exitCode null and signalCode set.
+  async function killChild() {
+    const cleanup = () => { if (execTmp) { try { rmSync(execTmp, { recursive: true, force: true }); } catch { /* still held */ } execTmp = null; } };
+    // An --exec'd group can outlive its leader (a launcher that backgrounds
+    // the app): alive is "any process left in the group".
+    const groupAlive = () => { try { process.kill(-child.pid, 0); return true; } catch { return false; } };
+    const leaderGone = !child || child.exitCode !== null || child.signalCode !== null;
+    if (!child || (leaderGone && !(opts.exec && process.platform !== 'win32' && groupAlive()))) { cleanup(); return; }
+    const exited = leaderGone ? Promise.resolve() : new Promise((r) => child.once('exit', r));
+    // An --exec'd command is a process group (a shell, an Electron and its helpers).
+    const kill = (sig) => { try { if (opts.exec && process.platform !== 'win32') process.kill(-child.pid, sig); else child.kill(sig); } catch { /* gone */ } };
+    kill('SIGTERM');
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
+    if (!leaderGone && child.exitCode === null && child.signalCode === null) kill('SIGKILL');
+    // The group's helpers outlive its leader by a moment and still write to
+    // {tmp}: wait until none is left (bounded), then remove it.
+    if (opts.exec && process.platform !== 'win32') {
+      for (let i = 0; i < 30; i++) {
+        try { process.kill(-child.pid, 0); } catch { break; }
+        if (i === 20) kill('SIGKILL');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    cleanup();
+  }
+  // Anything that fails from here on stops what was started: a launched
+  // group left holding the port would be attached to by the next run.
+  try {
+  return await (async () => {
   let wsUrl;
   try {
     const found = opts.wsUrl ? Promise.resolve(opts.wsUrl) : waitForTarget(port, opts.waitMs ?? (opts.exec ? 60_000 : child ? 15_000 : 0));
     // An --exec'd app that exits before its endpoint appears is said as that.
     wsUrl = execExit ? await Promise.race([found, execExit.then(({ code, signal }) => {
+      // Exit 0 with the group still alive: the launcher backgrounded the app — keep waiting.
+      if (code === 0 && process.platform !== 'win32') { try { process.kill(-child.pid, 0); return found; } catch { /* the whole group is gone */ } }
       throw new Error(`the --exec command exited (${signal ?? `code ${code}`}) before a DevTools endpoint appeared on :${port}${execTail.trim() ? ` — it said: ${execTail.trim().split('\n').slice(-4).join(' | ')}` : ''}`);
     })]) : await found;
   } catch (e) { await killChild(); throw e; }
@@ -259,29 +295,6 @@ export async function attach(opts = {}) {
   // the old one, which still answers `document.readyState === 'complete'`.
   let settleArmed;
   const armed = new Promise((r) => { settleArmed = r; });
-  // A launched browser is gone before close() returns: the next run of
-  // `--runs N` launches on the same port and must not find this one. A
-  // child that already died of a signal has exitCode null and signalCode set.
-  async function killChild() {
-    const cleanup = () => { if (execTmp) { try { rmSync(execTmp, { recursive: true, force: true }); } catch { /* still held */ } execTmp = null; } };
-    if (!child || child.exitCode !== null || child.signalCode !== null) { cleanup(); return; }
-    const exited = new Promise((r) => child.once('exit', r));
-    // An --exec'd command is a process group (a shell, an Electron and its helpers).
-    const kill = (sig) => { try { if (opts.exec && process.platform !== 'win32') process.kill(-child.pid, sig); else child.kill(sig); } catch { /* gone */ } };
-    kill('SIGTERM');
-    await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
-    if (child.exitCode === null && child.signalCode === null) kill('SIGKILL');
-    // The group's helpers outlive its leader by a moment and still write to
-    // {tmp}: wait until none is left (bounded), then remove it.
-    if (opts.exec && process.platform !== 'win32') {
-      for (let i = 0; i < 30; i++) {
-        try { process.kill(-child.pid, 0); } catch { break; }
-        if (i === 20) kill('SIGKILL');
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
-    cleanup();
-  }
   const pipeline = createIncidentPipeline({ dir, log, send, sendTo: sendOn, workers: opts.workers, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser, drive: drive?.meta }) });
   const onRecord = pipeline.onRecord;
@@ -350,4 +363,6 @@ export async function attach(opts = {}) {
     session: pipeline.session,
     build: pipeline.build,
   };
+  })();
+  } catch (e) { await killChild(); throw e; }
 }

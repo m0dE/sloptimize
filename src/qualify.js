@@ -88,10 +88,11 @@ export function enclosingClasses(src, positions) {
       let j = i;
       while (j < n && ID.test(src[j])) j++;
       const word = src.slice(i, j);
-      if (word === 'class' && src[i - 1] !== '.') {
-        // `class Name extends Base {` — the name, if any, is the next identifier.
-        let k = j;
-        while (k < n && /\s/.test(src[k])) k++;
+      let k = j;
+      if (word === 'class') while (k < n && /\s/.test(src[k])) k++;
+      // `class Name extends Base {` — not `obj.class`, not a `class:` key.
+      if (word === 'class' && src[i - 1] !== '.' && src[k] !== ':' && (src[k] === '{' || ID.test(src[k] ?? ''))) {
+        // The name, if any, is the next identifier.
         let name = null;
         if (ID.test(src[k] ?? '')) {
           let e = k;

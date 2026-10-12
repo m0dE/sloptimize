@@ -49,6 +49,8 @@ const TOOLS = [
       tolerant: { type: 'boolean' }, tolerance: { type: 'number', description: 'relative, default 0.02' }, window: { type: 'number', description: 'ticks per window, default 60' } }, required: ['a', 'b'] } },
   { name: 'get_sweep', description: 'The latest (or a named) scaling sweep (SPEC §3.17, recorded with `sloptimize sweep --knob <name> --values a,b,c`): every metric — frame, each host section ms/call, hot functions, worker threads — against the knob\'s N, with the fitted exponent, its 95% interval, the slope of each step and a shape (linear / SUPER-LINEAR / QUADRATIC or worse / noisy), plus the N where the frame crosses its budget. The phase that is worst BEHAVED is the one to fix before the player builds a bigger city — not necessarily the biggest.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } } } },
+  { name: 'get_timeline', description: 'The latest (or a named) commit timeline (SPEC §3.19, recorded with `sloptimize timeline --range A..B --build-cmd "<cmd>" --launch <url>`): one attached run per commit over the same window, read as a CLIFF (one commit carries most of the change — the regression), a STAIRCASE (several commits each moved it — no single revert), drift or flat, against a noise floor measured from the commits themselves, with each moving step\'s profile diff (functions in ms/frame, self and inclusive).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' } } } },
   { name: 'check_touched', description: 'Did the measured run EXECUTE the change under test? For each changed file (default: git diff of the working tree, else the last commit), whether any profiler sample of the attach run landed in it. Call before trusting any before/after: a clean A/B on a benchmark that never ran the new code path proves nothing. Bundled builds need `maps` to credit samples to sources.',
     inputSchema: { type: 'object', properties: { changed: { type: 'array', items: { type: 'string' } }, since: { type: 'string', description: 'git rev to diff against' },
       build: { type: 'string' }, session: { type: 'string' }, maps: { type: 'array', items: { type: 'string' }, description: 'source map paths of bundled scripts' }, phase: { type: 'string' } } } },
@@ -152,6 +154,7 @@ async function callTool(name, args = {}) {
     return cliJson(argv);
   }
   if (name === 'get_sweep') return cliJson(['sweep', '--show', ...(args.id ? [String(args.id)] : [])]);
+  if (name === 'get_timeline') return cliJson(['timeline', '--show', ...(args.id ? [String(args.id)] : [])]);
   if (name === 'check_coverage') {
     const argv = ['coverage'];
     if (args.session) argv.push('--session', String(args.session)); else if (args.build) argv.push('--build', String(args.build));

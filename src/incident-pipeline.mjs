@@ -717,39 +717,44 @@ export function createIncidentPipeline(opts) {
     if (anchorTitle) { try { await send('Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(anchorTitle)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
     // Same-named functions of one script, told apart (qualify.js) — after the
     // measurement, so the source reads cost the run nothing.
-    if (opts.qualify !== false) { try { await qualifyFns(); } catch (e) { log(`function names not qualified: ${e?.message ?? e}`); } }
+    // The run is written first: a caller that stops waiting must not lose it.
     run?.setRecorder(recorderJSON());
     writeRun(true);
+    if (opts.qualify !== false) {
+      try { if (await qualifyFns(Date.now() + 3000)) writeRun(true); } catch (e) { log(`function names not qualified: ${e?.message ?? e}`); }
+    }
   }
   /** A script's source: through the page (any scheme it can load, an app://
    *  included), else from disk (file://) or over HTTP. Null when unreadable. */
-  async function sourceOf(url) {
+  async function sourceOf(url, limitMs = 2000) {
     const bounded = (p, ms) => { let t; return Promise.race([p, new Promise((r) => { t = setT(() => r(null), ms); t?.unref?.(); })]).finally(() => clearT(t)); };
     try {
-      const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), 5000);
+      const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), limitMs);
       if (typeof r?.result?.value === 'string') return r.result.value;
     } catch { /* the page is gone */ }
     try {
       if (url.startsWith('file:')) return readFileSync(fileURLToPath(url), 'utf8');
-      if (/^https?:/.test(url)) { const res = await bounded(fetch(url), 5000); if (res?.ok) return await res.text(); }
+      if (/^https?:/.test(url)) { const res = await bounded(fetch(url), limitMs); if (res?.ok) return await res.text(); }
     } catch { /* unreadable */ }
     return null;
   }
-  async function qualifyFns() {
-    if (!run) return;
+  /** @returns {Promise<boolean>} anything renamed. Sources past `deadline` are not read. */
+  async function qualifyFns(deadline = Infinity) {
+    if (!run) return false;
     const shared = sharedNames([run.fnRows()]);
-    if (!shared.size) return;
+    if (!shared.size) return false;
     const names = new Map();   // `${url}\t${line}\t${col}\t${fn}` → qualified
     let n = 0;
     for (const [url, fns] of [...shared].slice(0, 20)) {
       const rows = run.fnRows().filter(([fn, u]) => u === url && fns.has(fn));
       const uniq = [...new Map(rows.map((r) => [`${r[2]}\t${r[3]}\t${r[0]}`, r])).values()];
-      const src = await sourceOf(url);
+      const src = Date.now() < deadline ? await sourceOf(url, Math.max(200, Math.min(2000, deadline - Date.now()))) : null;
       const cls = src ? enclosingClasses(src, uniq.map(([, , line, col]) => [line, col])) : uniq.map(() => null);
       uniq.forEach(([fn, u, line, col], k) => { names.set(`${u}\t${line}\t${col}\t${fn}`, qualifiedName(fn, cls[k], line)); n++; });
     }
     run.renameFns((fn, url, line, col) => names.get(`${url}\t${line}\t${col}\t${fn}`));
     if (n) log(`${n} same-named functions qualified by class or line (${[...shared.values()].flatMap((x) => [...x]).slice(0, 5).join(', ')}${shared.size > 5 ? ', …' : ''})`);
+    return n > 0;
   }
   /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
    *  measures UNREAD time. */
@@ -788,7 +793,7 @@ export function createIncidentPipeline(opts) {
         while (held.length > KEEP_CHUNKS && n > KEEP_SAMPLES) n -= held.shift().samples.length;
       }
       foldChunk(profile);
-      resolveGated();
+      try { resolveGated(); } catch (e) { log(`hitch pattern skipped: ${e?.message ?? e}`); }
       return profile;
     } catch { return null; }
   }
