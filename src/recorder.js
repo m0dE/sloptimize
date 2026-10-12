@@ -24,6 +24,7 @@
 // them, and the catalogue would say the session's worst frame was 92 ms.
 
 import { classifyHitch } from './classify.js';
+import { framePacing, pacingMoved } from './cadence.js';
 
 const RING = 600;                 // ~10s at 60fps (SPEC §3.1)
 const MAX_RECORDS_PER_SESSION = 500;
@@ -75,6 +76,31 @@ export function createRecorder(opts = {}) {
     let i = records.length;
     while (i > 0 && (mintSeq.get(records[i - 1]) ?? 0) > s) i--;
     records.splice(i, 0, rec);
+  }
+  // Frame pacing (cadence.js): a reduced-rate loop's long frames are its
+  // step, not hitches — judged every 60 frames over the last 120, said once
+  // as a `pacing` record (and again when it changes or ends), and a frame
+  // inside the long band is counted as paced instead of minted.
+  let pacing = null, pacingSeen = null, pacingCheck = 60, pacedFrames = 0;
+  function updatePacing() {
+    const vals = [];
+    for (let i = Math.min(count, 120) - 1; i >= 0; i--) {
+      const idx = prevIdx(i);
+      if (!pausedLane[idx]) vals.push(lanes.frameMs[idx]);
+    }
+    const p = framePacing(vals);
+    // A change is said only when two windows agree on it: a window that
+    // straddles the change describes neither side.
+    const agreed = !pacingMoved(pacingSeen, p);
+    pacingSeen = p;
+    if (!agreed) return;
+    if (!pacingMoved(pacing, p)) { if (p) pacing = p; return; }
+    const rec = p ? { type: 'pacing', at: new Date().toISOString(), state: 'on', ...p }
+      : { type: 'pacing', at: new Date().toISOString(), state: 'off', pacedFrames };
+    if (lastPhase) rec.phase = lastPhase;
+    if (!p) pacedFrames = 0;
+    pacing = p;
+    records.push(minted(rec));
   }
   let lastPhase;   // most recent s.phase seen by frame(), for emit()'s stamping
   let lastCtx;     // most recent s.ctx seen by frame(), for emit()'s stamping
@@ -130,9 +156,11 @@ export function createRecorder(opts = {}) {
       if (pending !== null && t - pending.openedAt >= MIN_RECORD_GAP_MS) flushPending();
 
       if (s.paused) return;
+      if (--pacingCheck <= 0) { pacingCheck = 60; updatePacing(); }
       const median = rollingMedian();
       const threshold = Math.max(2 * median, budgetFrameMs * 1.5);
       if (s.frameMs <= threshold || count < 30) return;
+      if (pacing && s.frameMs <= pacing.bandMs[1]) { pacedFrames++; return; }
 
       // A hitch. Rate limits first (SPEC §3.3): silence must mean nothing
       // was dropped, so the drops are counted and reported — the window's
@@ -207,7 +235,12 @@ export function createRecorder(opts = {}) {
       };
       if (median !== null) {
         s.frame.medianMs = +median.toFixed(2);
+        // The mean beside the median: a paced loop's median describes no frame.
+        let sum = 0;
+        for (const x of sortedMs) sum += x;
+        s.frame.meanMs = +(sum / sortedMs.length).toFixed(2);
         s.frame.p95Ms = +pct(sortedMs, 0.95).toFixed(2);
+        if (pacing) s.frame.pacing = { lowMs: pacing.lowMs, highMs: pacing.highMs, every: pacing.every };
         s.frame.fps = median > 0 ? Math.round(1000 / median) : 0;
         const inside = sortedNonPaused('insideRenderMs');
         s.frame.insideRenderMs = +pct(inside, 0.5).toFixed(2);

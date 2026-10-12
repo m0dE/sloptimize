@@ -97,7 +97,15 @@ if (cmd === 'report') {
   const pct = (x) => `${x >= 0.1 ? Math.round(x * 100) : +(x * 100).toFixed(1)}%`;
   if (lastBeat) console.log(`  feed: last heartbeat @ ${lastBeat.at}  build=${lastBeat.build ?? '?'}  phase=${lastBeat.phase ?? '?'}  median ${fmt(lastBeat.medianFrameMs, 'ms')} p95 ${fmt(lastBeat.p95Ms, 'ms')}`);
   if (profile.frame?.medianMs !== undefined) {
-    console.log(`  frame median ${fmt(profile.frame.medianMs, 'ms')}  p95 ${fmt(profile.frame.p95Ms, 'ms')}  (~${fmt(profile.frame.fps, 'fps')})  inside-render ${fmt(profile.frame.insideRenderMs, 'ms')}`);
+    console.log(`  frame median ${fmt(profile.frame.medianMs, 'ms')}${profile.frame.meanMs !== undefined ? `  mean ${profile.frame.meanMs}ms` : ''}  p95 ${fmt(profile.frame.p95Ms, 'ms')}  (~${fmt(profile.frame.fps, 'fps')})  inside-render ${fmt(profile.frame.insideRenderMs, 'ms')}`);
+  }
+  // Frame pacing (cadence.js): a reduced-rate loop's long frames, said once
+  // — they are its step, and were not filed as hitches while it held.
+  {
+    const { pacingText } = await import('../src/cadence.js');
+    const pace = ledger.filter((r) => r.type === 'pacing' && (!profile.session || r.session === profile.session || r.session === undefined)).at(-1);
+    if (pace?.state === 'on') console.log(`  frame pacing: ${pacingText(pace)} — a steady reduced-rate pattern, reported once here: frames in its ${pace.bandMs?.[0]}–${pace.bandMs?.[1]} ms band are not counted as hitches; read the mean and p95, not the median`);
+    else if (pace?.state === 'off') console.log(`  frame pacing ended @ ${pace.at}${pace.pacedFrames ? ` (${pace.pacedFrames} paced frames not counted as hitches)` : ''}`);
   }
   if (profile.render) {
     // Tier 0 counts at the WebGL/WebGPU API, averaged over its sample window;
