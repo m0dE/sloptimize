@@ -134,6 +134,41 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   plus one clearing record when they go. Verified against three.js 0.183
   in headless Chromium: a cull that stopped writing 95 of 200 slots read
   `95 untouched for 10s`; the fixed page emitted nothing.
+- **…and count what watching costs** (0.11.0). A field run (~9k car slots,
+  6.7k instanced houses) found the watch's `check` the heaviest JS of the
+  session — 13.2 s self, 21% of sampled JS — while the recorder line read
+  0%. Now a slot's TRANSLATION is compared and kept (3 floats, in a reused
+  buffer — no copy of the matrix buffer per check); a mesh with nothing
+  active for 3 visits is visited one check in 4; a check stops at 2 ms and
+  the next resumes round-robin; and a check that costs more than 0.5% of
+  the frames since the last doubles the interval (to 16×). Its time rides
+  each profile record (`recorder.slotsMs`), the run file's
+  `recorder.page.slotsMs`, and `report`'s recorder line — loudly past 1%,
+  with `--no-slots` named.
+- **Hitches on a clock** (0.11.0). 70–78 ms hitches exactly 15.0 s apart
+  were each `unattributed (below-floor)`. The pipeline keeps every gated
+  hitch (below the floor, or in the cooldown) and, at each window roll,
+  cuts its frame out of the chunks just stopped — no rotation of its own —
+  keeping the few samples detached from the chunk. When the newest 240
+  gated hitches hold a period (periodic.js: the spacing most of them share
+  with a neighbour, within 2% or 50 ms; ≥4 members spanning ≥3 periods),
+  the members' samples are POOLED and written as one `hitch-pattern` record
+  (`periodMs`, `occurrences`, `frameMs` min/median/max, `gates`, `pooled`,
+  `topFrames` with shares of the pooled frames, `sampled`) — again when the
+  pattern doubles, and at stop. `report` prints `↻ hitches every 15.0 s —
+  timer-driven: … pooled over N frames: top serializeWorld 98%` and marks
+  member hitches with the period; an older ledger still gets the cadence
+  from hitch times. Real Chromium (test/periodic-e2e.mjs): a 70 ms
+  setInterval every 3 s, 8 below-floor hitches, found at 3.00 s and
+  attributed to its function at 98%.
+- **Same-named methods apart**, at stop (SPEC §3.21): `Car.update`, not
+  three costs in one `update` row.
+- **A launcher of your own**: `attach --exec "<cmd>"` instead of
+  `--launch <url>` — `{port}`, `{tmp}` (a fresh data dir, removed after),
+  `{value}` (a sweep level), `{commit}` (a timeline step); the process
+  group is stopped and waited for at close, and one that dies before its
+  DevTools endpoint appears is said with its last output
+  (test/exec-e2e.mjs).
 - **Keep the whole run**: every profiler chunk (hitch rotation, window
   roll, final stop) folds into `runs/<session>.json` before it is dropped
   — self and inclusive samples per function, per page phase, plus the

@@ -1,0 +1,19 @@
+<!doctype html><title>timer hitch</title><body>
+<script>
+// A timer-driven hitch below the attribution floor: every 3 s an "autosave"
+// takes ~70 ms on the main thread. Each one alone is under 80 ms and is
+// never attributed; together they are one cause on a clock.
+function serializeWorld() {
+  const until = performance.now() + 70;
+  let s = '';
+  while (performance.now() < until) s = JSON.stringify({ a: Math.random(), s: s.slice(0, 64) });
+  return s.length;
+}
+setInterval(serializeWorld, 3000);
+function draw() {
+  requestAnimationFrame(draw);
+  const until = performance.now() + 2;
+  while (performance.now() < until) {}
+}
+requestAnimationFrame(draw);
+</script></body>

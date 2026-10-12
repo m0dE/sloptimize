@@ -172,3 +172,51 @@ test('pipeline: stop() twice is one stop — one end snapshot, one ledger line',
   assert.equal(lines.filter((r) => r.type === 'heap-snapshot').length, 1);
   assert.equal(readFileSync(join(dir, 'heap', 'S-end.heapsnapshot'), 'utf8'), '{}');
 });
+
+// ── 0.11.0 review fixes ──────────────────────────────────────────────────────
+import { threadVerdict as tv } from '../src/threads.js';
+import { createSlotWatch as watch } from '../src/instance-slots.js';
+import { enclosingClasses as encl } from '../src/qualify.js';
+import { fillExec as fill } from '../src/attach.mjs';
+
+test('a clock behind while MAIN is saturated and the worker idles is main-bound, not "sim falling behind" blamed on the worker', () => {
+  const v = tv([{ name: 'main', busy: 0.95 }, { name: 'worker[audio]', busy: 0.05 }], { clockRate: 0.8 });
+  assert.equal(v.verdict, 'main-bound');
+  assert.match(v.text, /0\.80× real time: the main thread is what holds the sim back/);
+});
+
+test('slot watch: a replaced instance buffer is tracked again, setMatrixAt writes included', () => {
+  const w = watch({ budgetMs: Infinity });
+  const mesh = { isInstancedMesh: true, name: 'cars', visible: true, count: 4, instanceMatrix: { array: new Float32Array(64) }, children: [] };
+  mesh.setMatrixAt = function (i, m) { this.instanceMatrix.array.set(m, i * 16); };
+  w.observe({ isScene: true, visible: true, children: [mesh] });
+  w.check(0); w.check(1);
+  mesh.instanceMatrix = { array: new Float32Array(16 * 8) }; mesh.count = 8;
+  w.check(2);   // sees the new size: starts over
+  w.check(3);   // first look at the new buffer
+  // Every slot rewritten in place with the same matrix, every check: written, never stale.
+  let rows = [];
+  for (let k = 0; k < 8; k++) { for (let i = 0; i < 7; i++) mesh.setMatrixAt(i, new Float32Array(16)); mesh.instanceMatrix.array[7 * 16 + 12] += 1; rows = rows.concat(w.check(10 + k)); }
+  assert.deepEqual(rows, [], 'all eight slots active through the new wrapper state');
+});
+
+test('slot watch: the scene walk is bounded by the budget and resumes', () => {
+  let t = 0;
+  const w = watch({ budgetMs: 1, now: () => (t += 0.5) });
+  const kids = Array.from({ length: 5000 }, () => ({ visible: true, children: [] }));
+  const mesh = { isInstancedMesh: true, name: 'm', visible: true, count: 1, instanceMatrix: { array: new Float32Array(16) }, children: [] };
+  w.observe({ isScene: true, visible: true, children: [mesh, ...kids] });
+  w.check(0);
+  assert.equal(w.meshes(), 0, 'one check walks part of the scene');
+  for (let k = 1; k < 10 && w.meshes() === 0; k++) w.check(k);
+  assert.equal(w.meshes(), 1, 'the walk completes over the next checks');
+});
+
+test('qualify: a `class:` key is not a class header', () => {
+  const src = 'class Car {\n  update() { const o = { class: "x" }; if (a) { b(); } }\n  draw() {}\n}';
+  assert.deepEqual(encl(src, [[2, 2]]), ['Car']);
+});
+
+test('--exec: a shell ${VAR} and unknown braces pass through untouched', () => {
+  assert.equal(fill('cd ${HOME} && app --port={port} {notours}', { port: 9 }), 'cd ${HOME} && app --port=9 {notours}');
+});

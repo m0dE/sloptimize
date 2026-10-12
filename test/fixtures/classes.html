@@ -1,0 +1,11 @@
+<!doctype html><title>three updates</title><body>
+<script>
+// Three classes, one method name: V8 samples all three as `update`.
+const spin = (ms) => { const until = performance.now() + ms; let x = 0; while (performance.now() < until) x += Math.sqrt(x + 1); return x; };
+class Car { update() { return spin(6); } }
+class CarManager { update() { return spin(3); } }
+class TrainConsist { update() { return spin(1.5); } }
+const parts = [new Car(), new CarManager(), new TrainConsist()];
+function frame() { requestAnimationFrame(frame); for (const p of parts) p.update(); }
+requestAnimationFrame(frame);
+</script></body>

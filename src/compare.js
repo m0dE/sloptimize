@@ -34,7 +34,7 @@ import { stableFile } from './footprint.js';
 import { runBucket, emptyTally, foldTally, ratesOf } from './runs.js';
 import { runConditions, compareConditions } from './conditions.js';
 import { phaseSpans, spanTable, oneOf, sectionVerdict } from './spans.js';
-import { threadRows } from './threads.js';
+import { threadRows, taskReadable } from './threads.js';
 
 function median(vals) {
   if (vals.length === 0) return undefined;
@@ -72,7 +72,9 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
   // one 600-frame ring a minute. The fuller one wins.
   put('frame median ms', bucket?.frame?.medianMs ?? median(nums([...beats.map((b) => b.medianFrameMs), ...profiles.map((p) => p.frame?.medianMs)])));
   put('frame p95 ms', bucket?.frame?.p95Ms ?? median(nums([...beats.map((b) => b.p95Ms), ...profiles.map((p) => p.frame?.p95Ms)])));
-  put('frame body ms', median(nums(profiles.map((p) => p.frame?.bodyMs))));
+  // The host's own frame body: a tier-1 profile's, or a tier-0 run's
+  // __sloptimizeFrame — the number an unattached measurement can be set beside.
+  put('frame body ms', bucket?.frame?.bodyMs ?? median(nums(profiles.map((p) => p.frame?.bodyMs))));
   put('draw calls', bucket?.frame?.calls ?? median(nums(beats.map((b) => b.calls))));
   put('triangles', median(nums(beats.map((b) => b.triangles))));
   const times = records.map((r) => Date.parse(r.at)).filter(Number.isFinite);
@@ -114,11 +116,13 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
       if (e.calls > 0) { put(`section ${k} calls`, e.calls); put(`section ${k} ms/call`, e.perCall); }
     }
   }
-  // Threads (SPEC §3.18): each one's busy share and ms of the frame, so a
-  // sim that moved into a worker is a row of its own, not a disappearance.
+  // Threads (SPEC §3.18): each one's busy share, main's ms of the frame and
+  // a worker's ms a task, so a sim that moved into a worker is a row of its
+  // own, not a disappearance — and a worker on its own loop is read per tick.
   for (const t of bucket ? threadRows(bucket, m['frame median ms']) : []) {
     put(`thread ${t.name} busy %`, +(t.busy * 100).toFixed(1));
     if (t.perFrameMs !== undefined) put(`thread ${t.name} ms/frame`, t.perFrameMs);
+    if (taskReadable(t.task)) put(`thread ${t.name} ms/task`, t.task.meanMs);
   }
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;

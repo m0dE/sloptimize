@@ -7,11 +7,14 @@
 // the .sloptimize/ files. attach.mjs drives it over a raw WebSocket;
 // sloptimize/electron drives it over webContents.debugger. Same records,
 // same files, same cluster identity either way.
-import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold, hotLines } from './runs.js';
 import { createTickLog } from './ticks.js';
+import { findPeriod, periodText } from './periodic.js';
+import { enclosingClasses, sharedNames, qualifiedName } from './qualify.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -198,6 +201,15 @@ export function sliceFrame(chunks, span, offsetMs) {
 // `unattributed: 'below-floor' | 'cooldown'` and the next minted record
 // carries `skippedSinceLast`. Detection itself is untouched — every hitch
 // the page emits lands in perf.jsonl.
+//   cadence    gated hitches that recur on a clock are one cause on a
+//              timer (a field run: 70–78 ms, exactly 15.0 s apart, every
+//              one below the floor). No rotation is spent on them: each
+//              gated frame is cut out of the chunks the window roll stops
+//              anyway (as a hitch's own samples, below), kept as a few
+//              samples, and when a period holds (periodic.js) the members'
+//              samples are POOLED — a dozen 75 ms frames are as
+//              attributable as one 900 ms stall — and written as one
+//              `hitch-pattern` record (again as it doubles, and at stop).
 //
 // ── A hitch's OWN samples ────────────────────────────────────────────────────
 // A rotation cannot cut a frame where it ends: a CDP Profiler.stop waits for
@@ -479,6 +491,74 @@ export function createIncidentPipeline(opts) {
   /** The interval between rotations the restart cost allows. */
   const budgeted = (ms) => Math.max(ms, restartMs / RESTART_BUDGET);
 
+  // Gated hitches, for cadence (header: cadence): the newest GATED_KEEP,
+  // each with its own samples once a rolled chunk covers its frame.
+  const gatedRecent = [];
+  const GATED_KEEP = 240;
+  let patternSaid = null;   // { periodMs, occurrences } of the last pattern written
+  /** A frame's samples, detached from the chunk: the leaf nodes they hit,
+   *  so a held chunk is not kept alive by the hitches cut from it. */
+  function detach(parts) {
+    const nodes = new Map(), samples = [], timeDeltas = [];
+    for (const { profile, idx } of parts) {
+      const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+      for (const i of idx) {
+        const n = byId.get(profile.samples[i]);
+        if (!n) continue;
+        const key = `${profile.startTime}:${n.id}`;
+        let id = nodes.get(key)?.id;
+        if (id === undefined) { id = nodes.size + 1; nodes.set(key, { id, callFrame: n.callFrame }); }
+        samples.push(id); timeDeltas.push(profile.timeDeltas?.[i] ?? 0);
+      }
+    }
+    return { nodes: [...nodes.values()], samples, timeDeltas };
+  }
+  /** Cut every gated frame a held chunk now covers; then look for a cadence. */
+  function resolveGated(final = false) {
+    if (!gatedRecent.length) return;
+    const lastEnd = held.length ? held[held.length - 1].endTime : -Infinity;
+    for (const g of gatedRecent) {
+      if (g.slice !== undefined) continue;
+      if (!clock || !g.frameSpan) { if (final || !clock) g.slice = null; continue; }
+      if (!final && lastEnd < (g.frameSpan[1] + clock.offsetMs) * 1000) continue;   // not stopped yet
+      const cut = sliceFrame(held, g.frameSpan, clock.offsetMs);
+      g.slice = cut.sampledMs >= 0.5 * g.frameMs ? detach(cut.parts) : null;
+      g.sampledMs = cut.sampledMs;
+    }
+    writePattern(final);
+  }
+  function writePattern(final) {
+    const found = findPeriod(gatedRecent.map((g) => g.t));
+    if (!found) return;
+    const members = found.members.map((i) => gatedRecent[i]);
+    const same = patternSaid && Math.abs(patternSaid.periodMs - found.periodMs) <= Math.max(50, 0.02 * found.periodMs);
+    if (same && members.length < 2 * patternSaid.occurrences && !(final && members.length > patternSaid.occurrences)) return;
+    const sliced = members.filter((g) => g.slice);
+    const ms = members.map((g) => g.frameMs).sort((a, b) => a - b);
+    const gates = {};
+    for (const g of members) gates[g.gate] = (gates[g.gate] ?? 0) + 1;
+    const phases = new Map();
+    for (const g of members) phases.set(g.phase, (phases.get(g.phase) ?? 0) + 1);
+    const phase = [...phases].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const rec = { type: 'hitch-pattern', at: new Date(now()).toISOString(), periodMs: found.periodMs, occurrences: members.length,
+      spanSec: +(found.spanMs / 1000).toFixed(1), frameMs: { min: ms[0], median: ms[ms.length >> 1], max: ms.at(-1) }, gates, tier: 0 };
+    if (phase !== undefined) rec.phase = phase;
+    if (sliced.length >= 3) {
+      const parts = sliced.map((g) => ({ profile: g.slice, idx: g.slice.samples.map((_, i) => i) }));
+      const totalMs = sliced.reduce((a, g) => a + g.frameMs, 0);
+      rec.pooled = { hitches: sliced.length, frameMs: +totalMs.toFixed(1), sampledMs: +sliced.reduce((a, g) => a + g.sampledMs, 0).toFixed(1) };
+      rec.topFrames = topFramesFromProfile(parts);
+      for (const f of rec.topFrames) f.share = +(f.selfMs / totalMs).toFixed(3);
+      const sampled = sampledBreakdown(parts);
+      if (sampled) rec.sampled = sampled;
+      if (!(rec.topFrames[0]?.share >= minShare)) rec.unattributed = 'low-share';
+    } else rec.unattributed = clock ? 'not-sampled' : 'no-clock';
+    patternSaid = { periodMs: found.periodMs, occurrences: members.length };
+    const lead = rec.topFrames?.[0];
+    log(`hitch pattern ${periodText(found.periodMs)} — ${members.length} hitches of ${ms[0]}–${ms.at(-1)} ms${lead && !rec.unattributed ? `, pooled: ${lead.fn}@${lead.url} ${Math.round(lead.share * 100)}%` : ''}`);
+    appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(stamp(rec)) + '\n');
+  }
+
   function arm() {
     disarm();
     if (!(windowMs > 0)) return;
@@ -627,11 +707,54 @@ export function createIncidentPipeline(opts) {
     if (workers.size) await rotateWorkers(true);
     if (!profiling) { writeRun(true); return; }
     profiling = false;
-    try { const { profile } = await send('Profiler.stop') ?? {}; foldChunk(profile); } catch { /* target gone */ }
+    try {
+      const { profile } = await send('Profiler.stop') ?? {};
+      foldChunk(profile);
+      if (profile?.samples) held.push(profile);
+    } catch { /* target gone */ }
+    try { resolveGated(true); } catch (e) { log(`hitch pattern not written: ${e?.message ?? e}`); }
     // The anchor goes too: a page left profiling pays for it.
     if (anchorTitle) { try { await send('Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(anchorTitle)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
+    // Same-named functions of one script, told apart (qualify.js) — after the
+    // measurement, so the source reads cost the run nothing.
+    // The run is written first: a caller that stops waiting must not lose it.
     run?.setRecorder(recorderJSON());
     writeRun(true);
+    if (opts.qualify !== false) {
+      try { if (await qualifyFns(Date.now() + 3000)) writeRun(true); } catch (e) { log(`function names not qualified: ${e?.message ?? e}`); }
+    }
+  }
+  /** A script's source: through the page (any scheme it can load, an app://
+   *  included), else from disk (file://) or over HTTP. Null when unreadable. */
+  async function sourceOf(url, limitMs = 2000) {
+    const bounded = (p, ms) => { let t; return Promise.race([p, new Promise((r) => { t = setT(() => r(null), ms); t?.unref?.(); })]).finally(() => clearT(t)); };
+    try {
+      const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), limitMs);
+      if (typeof r?.result?.value === 'string') return r.result.value;
+    } catch { /* the page is gone */ }
+    try {
+      if (url.startsWith('file:')) return readFileSync(fileURLToPath(url), 'utf8');
+      if (/^https?:/.test(url)) { const res = await bounded(fetch(url), limitMs); if (res?.ok) return await res.text(); }
+    } catch { /* unreadable */ }
+    return null;
+  }
+  /** @returns {Promise<boolean>} anything renamed. Sources past `deadline` are not read. */
+  async function qualifyFns(deadline = Infinity) {
+    if (!run) return false;
+    const shared = sharedNames([run.fnRows()]);
+    if (!shared.size) return false;
+    const names = new Map();   // `${url}\t${line}\t${col}\t${fn}` → qualified
+    let n = 0;
+    for (const [url, fns] of [...shared].slice(0, 20)) {
+      const rows = run.fnRows().filter(([fn, u]) => u === url && fns.has(fn));
+      const uniq = [...new Map(rows.map((r) => [`${r[2]}\t${r[3]}\t${r[0]}`, r])).values()];
+      const src = Date.now() < deadline ? await sourceOf(url, Math.max(200, Math.min(2000, deadline - Date.now()))) : null;
+      const cls = src ? enclosingClasses(src, uniq.map(([, , line, col]) => [line, col])) : uniq.map(() => null);
+      uniq.forEach(([fn, u, line, col], k) => { names.set(`${u}\t${line}\t${col}\t${fn}`, qualifiedName(fn, cls[k], line)); n++; });
+    }
+    run.renameFns((fn, url, line, col) => names.get(`${url}\t${line}\t${col}\t${fn}`));
+    if (n) log(`${n} same-named functions qualified by class or line (${[...shared.values()].flatMap((x) => [...x]).slice(0, 5).join(', ')}${shared.size > 5 ? ', …' : ''})`);
+    return n > 0;
   }
   /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
    *  measures UNREAD time. */
@@ -670,6 +793,7 @@ export function createIncidentPipeline(opts) {
         while (held.length > KEEP_CHUNKS && n > KEEP_SAMPLES) n -= held.shift().samples.length;
       }
       foldChunk(profile);
+      try { resolveGated(); } catch (e) { log(`hitch pattern skipped: ${e?.message ?? e}`); }
       return profile;
     } catch { return null; }
   }
@@ -764,7 +888,7 @@ export function createIncidentPipeline(opts) {
       // The page's half — display cadence, device, GPU — merged into the
       // run's block and written whole. Not phase-stamped: a run's conditions
       // are the run's, and a --phase filter must not drop them.
-      for (const k of ['display', 'device', 'gpu']) if (rec[k] !== undefined) conditions[k] = rec[k];
+      for (const k of ['display', 'device', 'gpu', 'three']) if (rec[k] !== undefined) conditions[k] = rec[k];
       if (regime === 'unknown' && typeof rec.gpu === 'string' && rec.gpu) {
         regime = SOFTWARE_GPU.test(rec.gpu) ? 'software' : 'hardware';
         conditions.regime = regime;
@@ -788,6 +912,7 @@ export function createIncidentPipeline(opts) {
     // A new document has its own time origin: map its clock afresh.
     if (rec.type === 'armed') {
       clock = null; clockTries = 0; held.length = 0; edges.length = 0; reanchored = false;
+      for (const g of gatedRecent) if (g.slice === undefined) g.slice = null;   // the old document's clock
       // A navigation ends console-started profiles (measured: the first
       // restart after attach's reload walked a 400 MB heap, 1082 ms). The
       // main profile survives it, so anchoring the new document is cheap.
@@ -833,6 +958,9 @@ export function createIncidentPipeline(opts) {
         rec.profileWindow = 'none';
         rec.unattributed = gated;
         appendFileSync(join(dir, 'perf.jsonl'), JSON.stringify(rec) + '\n');
+        // Kept for cadence (header): its samples are cut when a roll covers it.
+        gatedRecent.push({ t, frameSpan: Array.isArray(rec.frameSpan) && rec.frameSpan.length === 2 ? rec.frameSpan : null, frameMs: rec.frameMs, phase: rec.phase, gate: gated });
+        if (gatedRecent.length > GATED_KEEP) gatedRecent.shift();
         return;
       }
       // Attribute: grab the current profiler chunk and take the heaviest

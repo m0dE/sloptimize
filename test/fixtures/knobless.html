@@ -1,0 +1,10 @@
+<!doctype html><title>knobless</title><body>
+<script>
+// A sim whose size comes from its launch line (?cars=N), not a page knob:
+// `sweep --exec "… {value} …"` sets it per level.
+const n = Number(new URLSearchParams(location.search).get('cars') ?? 1000);
+const xs = new Float64Array(n);
+function stepCars() { for (let k = 0; k < 40; k++) for (let i = 0; i < n; i++) xs[i] = Math.sqrt(xs[i] + i * k); }
+function frame() { requestAnimationFrame(frame); stepCars(); }
+requestAnimationFrame(frame);
+</script></body>

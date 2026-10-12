@@ -69,6 +69,11 @@ export const CONDITION_FIELDS = [
   { key: 'minHitchMs', label: 'hitch floor', material: false, unit: ' ms', get: (c) => num(c.recorder?.minHitchMs),
     why: 'it changes which frames count as hitches' },
   { key: 'slots', label: 'instance-slot watch', material: false, get: (c) => (typeof c.recorder?.slots === 'boolean' ? c.recorder.slots : undefined) },
+  // three.js's renderer.debug.checkShaderErrors (on by default): every link
+  // is followed by a synchronous status read, so compiles block where they
+  // would otherwise overlap — shader-compile hitches differ with it.
+  { key: 'checkShaderErrors', label: 'three checkShaderErrors', material: false, get: (c) => (typeof c.three?.checkShaderErrors === 'boolean' ? c.three.checkShaderErrors : undefined),
+    why: 'with it on, each program link waits on a synchronous compile-status read' },
 ];
 
 /** An ANGLE string carries driver build numbers that change on update. */

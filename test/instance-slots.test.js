@@ -18,7 +18,7 @@ const scene = (...kids) => ({ isScene: true, visible: true, children: kids });
 const move = (mesh, from, to) => { for (let i = from; i < to; i++) mesh.instanceMatrix.array[i * 16 + 12] += 1; };
 
 test('slots the game stops writing go stale while the rest move; static meshes say nothing; a clear is said once', () => {
-  const w = createSlotWatch();
+  const w = createSlotWatch({ budgetMs: Infinity });   // the budget is its own test
   const m = cars(100), still = cars(50, 'rocks');
   w.observe(scene(m, still));
   let t = 0, rows = w.check(t);
@@ -47,7 +47,7 @@ test('slots the game stops writing go stale while the rest move; static meshes s
 });
 
 test('a paused game (nothing active) is not a finding and not a clear; hidden meshes are not drawn', () => {
-  const w = createSlotWatch();
+  const w = createSlotWatch({ budgetMs: Infinity });   // the budget is its own test
   const m = cars(10), hidden = cars(10, 'pool');
   hidden.visible = false;
   w.observe(scene(m, { visible: false, children: [cars(10, 'nested')] }, hidden));
@@ -107,4 +107,80 @@ test('--no-slots: the recorder defines no __THREE_DEVTOOLS__ and runs no checks'
   let ts = 0;
   for (let f = 0; f < 800; f++) { ts += 16; const cb = rafs.pop(); rafs.length = 0; cb(ts); }
   assert.equal(emitted.filter((e) => e.type === 'instance-slots').length, 0);
+});
+
+test('a check stops at its budget and the next resumes there; a static mesh is visited one check in QUIET_EVERY; the time is kept', async () => {
+  const { QUIET_CHECKS, QUIET_EVERY } = await import('../src/instance-slots.js');
+  // Visits counted by reads of the matrix buffer (the scene walk never reads it).
+  const counted = (m) => { const arr = m.instanceMatrix.array; m.reads = 0; m.instanceMatrix = { get array() { m.reads++; return arr; } }; return m; };
+  // A clock that advances 1 ms per read: each mesh visit past the first costs the budget.
+  let t = 0;
+  const w = createSlotWatch({ budgetMs: 1.5, now: () => (t += 1) });
+  const ms = [cars(10, 'a'), cars(10, 'b'), cars(10, 'c'), cars(10, 'd')].map(counted);
+  w.observe(scene(...ms));
+  const visited = () => ms.filter((m) => m.reads > 0).length;
+  w.check(0);
+  assert.equal(visited(), 2, 'two meshes fit the budget');
+  w.check(1);
+  assert.equal(visited(), 4, 'the next check resumes where the last stopped');
+  const s = w.stats();
+  assert.equal(s.checks, 2);
+  assert.ok(s.ms > 0 && s.maxMs > 0);
+  assert.equal(s.deferred, 2);
+  // Quiet backoff: nothing active for QUIET_CHECKS visits → one check in QUIET_EVERY.
+  const w2 = createSlotWatch({ budgetMs: Infinity });
+  const still = counted(cars(10, 'houses'));
+  w2.observe(scene(still));
+  for (let k = 0; k <= QUIET_CHECKS; k++) w2.check(k);
+  still.reads = 0;
+  for (let k = 0; k < QUIET_EVERY * 3; k++) w2.check(100 + k);
+  assert.equal(still.reads, 3);
+  still.reads = 0;
+  // Movement brings it back to every check.
+  const buf = still.instanceMatrix.array;
+  buf[12] += 1;
+  for (let k = 0; k < QUIET_EVERY; k++) w2.check(200 + k);
+  still.reads = 0;
+  buf[12] += 1;
+  w2.check(300); buf[12] += 1; w2.check(301);
+  assert.equal(still.reads, 2);
+});
+
+test('only the translation is compared: a rotation in place without setMatrixAt is idle, a move is not', async () => {
+  const { changedTranslations } = await import('../src/instance-slots.js');
+  const arr = new Float32Array(32), kept = new Float32Array(6), out = new Uint8Array(2);
+  changedTranslations(arr, kept, 2, 0, out);
+  assert.deepEqual([...out], [0, 0], 'no copy yet: nothing changed');
+  arr[0] = 0.5;            // slot 0 rotated
+  arr[16 + 13] = 2;        // slot 1 moved in y
+  changedTranslations(arr, kept, 2, 2, out);
+  assert.deepEqual([...out], [0, 1]);
+  changedTranslations(arr, kept, 2, 2, out);
+  assert.deepEqual([...out], [0, 0], 'the copy was updated in place');
+});
+
+test('the profile record carries the watch\'s in-page time, and the run file counts it as the recorder\'s', async () => {
+  const rafs = [], emitted = [];
+  let clock = 0;
+  const ctx = {
+    requestAnimationFrame: (cb) => rafs.push(cb), setInterval: () => 0,
+    PerformanceObserver: class { observe() {} }, performance: { now: () => (clock += 0.25) },
+    location: { href: 'x' }, document: { addEventListener() {} }, __sloptimizeEmit: (j) => emitted.push(JSON.parse(j)),
+    EventTarget, CustomEvent, WeakMap, WeakRef, Uint8Array, Uint16Array, Float32Array, Error, JSON, Math, Float64Array, Date, String, Number, Array, Set, Object,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(buildInjectScript(), ctx);
+  ctx.__THREE_DEVTOOLS__.dispatchEvent(new CustomEvent('observe', { detail: scene(cars(20)) }));
+  let ts = 0;
+  for (let f = 0; f < 600; f++) { ts += 16; const cb = rafs.pop(); rafs.length = 0; cb(ts); }
+  const profs = emitted.filter((e) => e.type === 'profile');
+  assert.ok(profs.length >= 4);
+  assert.ok(profs.every((p) => typeof p.recorder?.slotsMs === 'number'));
+  assert.ok(profs.some((p) => p.recorder.slotsMs > 0));
+  const { createRunFold } = await import('../src/runs.js');
+  const run = createRunFold({ session: 's' });
+  for (const p of profs) run.addFrame(p);
+  const j = run.toJSON();
+  assert.ok(j.recorder.page.slotsMs > 0);
+  assert.equal(j.recorder.page.slotsMaxEvery >= 120, true);
 });

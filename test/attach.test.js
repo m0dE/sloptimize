@@ -47,3 +47,11 @@ test('discovery: a port with nothing on it is NothingListening, said at once; --
   assert.equal(await waitForTarget(9222, 5000, { fetch: late, sleep: async (ms) => { t += ms; }, now: () => t }), 'ws://t');
   assert.equal(calls, 3);
 });
+
+test('attach --exec: {port} {tmp} {value} {commit} are filled; an unknown or unset one is refused, never left in the command', async () => {
+  const { fillExec } = await import('../src/attach.mjs');
+  assert.equal(fillExec('electron . --remote-debugging-port={port} --user-data-dir={tmp} --cars={value}', { port: 9222, tmp: '/t/x', value: 3000 }),
+    'electron . --remote-debugging-port=9222 --user-data-dir=/t/x --cars=3000');
+  assert.throws(() => fillExec('run --rev={commit}', { port: 1 }), /\{commit\} has no value here \(known: \{port\}\)/);
+  await assert.rejects((await import('../src/attach.mjs')).attach({ exec: 'x', launch: 'http://y', log: () => {} }), /--exec and --launch are two ways/);
+});

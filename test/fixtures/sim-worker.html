@@ -3,15 +3,19 @@
 // The many-agent endgame: the simulation in a Worker, the page only drawing.
 // The worker is saturated (a 15 ms step every 16 ms); the main thread is
 // light. A page-only profile reads this as healthy.
+// ?step=57&every=75: a decoupled sim on its own loop instead — 57 ms a
+// tick, 75% busy, never saturated (dmitriy's field case).
+const q = new URLSearchParams(location.search);
+const step = Number(q.get('step') ?? 15), every = Number(q.get('every') ?? 16);
 const src = `
 function stepAgents(n) {
-  const until = performance.now() + 15;
+  const until = performance.now() + ${step};
   let x = 0;
   while (performance.now() < until) x += Math.sqrt(x + n);   // the per-agent update
   return x;
 }
 let tick = 0;
-setInterval(() => { stepAgents(9000); postMessage(++tick); }, 16);
+setInterval(() => { stepAgents(9000); postMessage(++tick); }, ${every});
 `;
 const sim = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { name: 'sim' });
 let ticks = 0;

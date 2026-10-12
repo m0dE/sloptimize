@@ -102,3 +102,71 @@ export function createRefreshTracker() {
     },
   };
 }
+
+// ── Frame pacing: a reduced-rate loop is not a stream of hitches ───────────
+// A sim stepped at a reduced rate alternates short and long frames — tier 1
+// on a field build read 5 ms / 60 ms, one long frame in two. The rolling
+// median lands between (15.4 ms) and every long frame clears 2× it: 205
+// "hitches" for one steady pattern, and a median that describes no frame.
+// So a window is checked for PACING: two clusters far apart, the long one
+// tight, and the long frames recurring on a stride. Then it is said once —
+// lows, highs, the stride, the mean and the p95 — and a frame inside the
+// long band is a paced frame, not a hitch. A frame well past the band is
+// still a hitch: a stall on top of the pacing is a stall.
+
+/** Fewest intervals a window needs before pacing is judged. */
+export const PACING_MIN_FRAMES = 60;
+
+/**
+ * @param {ArrayLike<number>} intervals  frame times, oldest first
+ * @returns {{lowMs:number, highMs:number, every:number, longShare:number, meanMs:number, p95Ms:number, medianMs:number, bandMs:[number, number]} | null}
+ */
+export function framePacing(intervals) {
+  const xs = [];
+  for (let i = 0; i < (intervals?.length ?? 0); i++) { const x = +intervals[i]; if (x > 0 && x <= 1000) xs.push(x); }
+  if (xs.length < PACING_MIN_FRAMES) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const n = s.length;
+  // The split: the biggest ratio between neighbours, with at least 15% of
+  // frames on each side of it.
+  let cut = -1, best = 0;
+  for (let i = Math.ceil(0.15 * n) - 1; i < Math.floor(0.85 * n); i++) {
+    const r = s[i + 1] / Math.max(s[i], 0.5);
+    if (r > best) { best = r; cut = i; }
+  }
+  if (cut < 0 || best < 1.6) return null;
+  const lo = s.slice(0, cut + 1), hi = s.slice(cut + 1);
+  const med = (v) => v[v.length >> 1];
+  const lowMs = med(lo), highMs = med(hi);
+  // Long frames must matter (over 25 ms) and stand well apart from the short ones.
+  if (highMs < 25 || highMs / lowMs < 2.5) return null;
+  // A TIGHT long cluster: a steady step, not a scatter of stalls.
+  const p = (v, q) => v[Math.min(v.length - 1, Math.floor(q * v.length))];
+  if (p(hi, 0.9) / p(hi, 0.1) > 1.5) return null;
+  // On a stride: the gaps between long frames agree within one frame.
+  const bar = s[cut + 1];
+  const at = [];
+  for (let i = 0; i < xs.length; i++) if (xs[i] >= bar) at.push(i);
+  const gaps = [];
+  for (let k = 1; k < at.length; k++) gaps.push(at[k] - at[k - 1]);
+  if (gaps.length < 8) return null;
+  const g = [...gaps].sort((a, b) => a - b), every = g[g.length >> 1];
+  let near = 0;
+  for (const d of gaps) if (Math.abs(d - every) <= 1) near++;
+  if (near / gaps.length < 0.8) return null;
+  let sum = 0;
+  for (const x of xs) sum += x;
+  return { lowMs: +lowMs.toFixed(1), highMs: +highMs.toFixed(1), every, longShare: +(hi.length / n).toFixed(2), meanMs: +(sum / n).toFixed(1),
+    p95Ms: +p(s, 0.95).toFixed(1), medianMs: +med(s).toFixed(1), bandMs: [+(p(hi, 0.1) * 0.8).toFixed(1), +(p(hi, 0.9) * 1.25).toFixed(1)] };
+}
+
+/** "alternating ~5 / ~60 ms frames (1 long in 2)". */
+export function pacingText(p) {
+  return `${p.every === 2 ? 'alternating' : 'paced'} ~${p.lowMs} / ~${p.highMs} ms frames (1 long in ${p.every}) — mean ${p.meanMs} ms, p95 ${p.p95Ms} ms, median ${p.medianMs} ms`;
+}
+
+/** Has pacing changed enough to be said again? */
+export function pacingMoved(a, b) {
+  if (!a || !b) return a !== b;
+  return a.every !== b.every || Math.abs(a.highMs - b.highMs) > 0.25 * a.highMs || Math.abs(a.lowMs - b.lowMs) > Math.max(2, 0.5 * a.lowMs);
+}

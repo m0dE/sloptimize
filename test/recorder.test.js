@@ -121,10 +121,12 @@ test('the session cap: past it, hitches are counted and the count rides the next
   let t = 0;
   const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
   feed(rec, 120, 8);
-  for (let i = 0; i < 500; i++) { t += 1100; hitch(rec, 60); feed(rec, 3, 8); }   // steady frames keep the median honest
+  // Steady frames keep the median honest — a varying number of them, or a
+  // 60 ms frame every 4th frame is frame PACING (cadence.js), not hitches.
+  for (let i = 0; i < 500; i++) { t += 1100; hitch(rec, 60); feed(rec, 3 + (i % 5) * 2, 8); }
   t += 1100; feed(rec, 1, 8);
   assert.equal(rec.drainRecords().length, 500);
-  for (let i = 0; i < 7; i++) { t += 1100; hitch(rec, 60); feed(rec, 3, 8); }    // over the cap: dropped, counted
+  for (let i = 0; i < 7; i++) { t += 1100; hitch(rec, 60); feed(rec, 3 + (i % 5) * 2, 8); }    // over the cap: dropped, counted
   assert.equal(rec.drainRecords({ final: true }).length, 0);
   assert.equal(rec.emit({ type: 'error', name: 'E', message: 'm', stack: [] }), false);   // the cap is the cap
 });
@@ -187,4 +189,30 @@ test('a usermark carries meta.phase; records without a phase stay clean', () => 
   const recs = rec.drainRecords({ final: true });
   assert.equal(recs.length, 1);
   assert.equal('phase' in recs[0], false);
+});
+
+test('a reduced-rate loop (5 ms / 60 ms frames) is said once as frame pacing, not as a hitch every other frame', async () => {
+  let t = 0;
+  const rec = createRecorder({ budgetFrameMs: 16.7, now: () => t });
+  for (let i = 0; i < 1200; i++) { t += 33; rec.frame({ frameMs: i % 2 ? 60 + (i % 3) : 5 + (i % 2) }); }
+  // A real stall on top of the pacing is still a hitch.
+  t += 2000; rec.frame({ frameMs: 400 });
+  t += 2000; rec.frame({ frameMs: 5 });
+  const recs = rec.drainRecords({ final: true });
+  const hitches = recs.filter((r) => r.type === 'hitch');
+  const pacing = recs.filter((r) => r.type === 'pacing');
+  assert.equal(pacing.length, 1);
+  assert.equal(pacing[0].state, 'on');
+  assert.equal(pacing[0].every, 2);
+  assert.ok(pacing[0].lowMs <= 6 && pacing[0].highMs >= 60);
+  // Before the first judgement (60 frames) the rate limit lets one or two through; after it, only the stall.
+  assert.ok(hitches.length <= 3, `${hitches.length} hitches`);
+  assert.equal(hitches.at(-1).frameMs, 400);
+  const s = rec.summary();
+  assert.ok(Math.abs(s.frame.meanMs - 33) < 2, `mean ${s.frame.meanMs}`);
+  assert.deepEqual(s.frame.pacing, { lowMs: pacing[0].lowMs, highMs: pacing[0].highMs, every: 2 });
+  // Steady frames again: pacing ends, said once.
+  for (let i = 0; i < 400; i++) { t += 16; rec.frame({ frameMs: 16.7 }); }
+  const after = rec.drainRecords({ final: true }).filter((r) => r.type === 'pacing');
+  assert.deepEqual(after.map((r) => r.state), ['off']);
 });

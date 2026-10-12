@@ -14,7 +14,7 @@
 // process registered. One JSON record per call; the node side owns files,
 // clustering, and the profiler.
 
-/* global classifyHitch, createSlotWatch, createRefreshTracker, browserDevice, __sloptimizeEmit, __sloptimizeOpts */
+/* global classifyHitch, createSlotWatch, createRefreshTracker, framePacing, pacingMoved, browserDevice, __sloptimizeEmit, __sloptimizeOpts */
 
 const RING = 600;
 // The absolute floor for detection: a frame is a hitch above 2× the rolling
@@ -62,6 +62,17 @@ function died(kind, obj) {
 // three.js renderers, through the devtools hook (below): their own
 // renderer.info.memory is the engine's count of the same leak.
 const renderers = [];
+let threeRevision;
+/** three's own settings that change what a frame costs: `debug.checkShaderErrors`
+ *  (on by default) makes every link wait on a synchronous status read. */
+function readThree() {
+  for (const ref of renderers) {
+    const r = ref.deref?.();
+    const v = r?.debug?.checkShaderErrors;
+    if (typeof v === 'boolean') return { checkShaderErrors: v, ...(threeRevision ? { revision: threeRevision } : {}) };
+  }
+  return undefined;
+}
 
 // Per-frame graphics-API counters, reset at each rAF boundary.
 const gpu = { draws: 0, triangles: 0, creates: 0, uploadKB: 0 };
@@ -269,6 +280,7 @@ if (SLOTS_ON) try {
     hook = new EventTarget();
     globalThis.__THREE_DEVTOOLS__ = hook;
   }
+  hook.addEventListener('register', (e) => { try { if (typeof e.detail?.revision === 'string') threeRevision = e.detail.revision.slice(0, 12); } catch { /* not ours */ } });
   hook.addEventListener('observe', (e) => {
     try { if (e.detail?.isWebGLRenderer && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
     try { slotWatch.observe(e.detail); } catch { /* not ours to break */ }
@@ -458,12 +470,14 @@ function updateConditions() {
   const rec = { type: 'conditions', at: new Date().toISOString(), tier: 0 };
   if (display) rec.display = display;
   if (gpuName) rec.gpu = gpuName;
-  if (!rec.display && !rec.gpu) return;
+  const three = readThree();
+  if (three) rec.three = three;
+  if (!rec.display && !rec.gpu && !rec.three) return;
   // The device is read every window (a few property reads) so a resized
   // window or a moved-to-another-screen dpr lands in the run's block.
   try { rec.device = browserDevice(globalThis); } catch { /* no navigator */ }
   const d = rec.device ?? {};
-  const sig = JSON.stringify([rec.display?.refreshHz, rec.display?.cadence, rec.display?.confirmed, rec.gpu, d.vw, d.vh, d.dpr]);
+  const sig = JSON.stringify([rec.display?.refreshHz, rec.display?.cadence, rec.display?.confirmed, rec.gpu, d.vw, d.vh, d.dpr, rec.three?.checkShaderErrors]);
   if (sig === conditionsSent) return;
   conditionsSent = sig;
   emit(rec);
@@ -494,6 +508,24 @@ globalThis.__sloptimizeClock = function (name, t, perSecond = 1) {
   clockLast = v;
 };
 
+// ── The host's own frame timer (SPEC §3.2b) ────────────────────────────────
+// `__sloptimizeFrame(ms)`, once a frame, with what the app's own timer read
+// for its frame body. An attached run's frame is a rAF interval —
+// vsync-quantized, recorder included — and can never be set beside the
+// app's own numbers; this one can. Per window: median, p95, mean.
+const bodies = [];
+globalThis.__sloptimizeFrame = function (ms) {
+  const v = Number(ms);
+  if (Number.isFinite(v) && v >= 0 && bodies.length < 4 * PROFILE_EVERY) bodies.push(v);
+};
+function takeBodies() {
+  if (!bodies.length) return undefined;
+  const s = bodies.splice(0).sort((a, b) => a - b);
+  let sum = 0;
+  for (const x of s) sum += x;
+  return { bodyMs: +s[s.length >> 1].toFixed(2), bodyP95Ms: +s[Math.min(s.length - 1, Math.floor(0.95 * s.length))].toFixed(2), bodyMeanMs: +(sum / s.length).toFixed(2), bodyFrames: s.length };
+}
+
 /** This window's counters (and clock advance), resetting both. */
 function takeCounters() {
   if (!tally.size && clockName === undefined) return undefined;
@@ -517,8 +549,13 @@ function ringPct(p) {
 // MEAN frame, not whichever single frame the timer landed on.
 const PROFILE_EVERY = 120;
 // The slot watch, offset half a window from the profile so the two never
-// share a frame.
-const SLOTS_EVERY = 120, SLOTS_AT = 60;
+// share a frame — and every 120 frames only while it is cheap: a check that
+// costs more than SLOTS_SHARE of the frames since the last one doubles the
+// interval (up to 16×), and a cheap one halves it back. Its time rides each
+// profile record (`recorder.slotsMs`), so the report counts it as the
+// recorder's cost instead of the game's.
+const SLOTS_EVERY = 120, SLOTS_AT = 60, SLOTS_SHARE = 0.005;
+let slotsEvery = SLOTS_EVERY, slotsDue = SLOTS_AT, slotsMsWin = 0, slotsWinFrames = 0;
 const win = { frames: 0, draws: 0, tris: 0, ms: 0, max: 0, over: new Array(16).fill(0) };
 // Frames over FIXED bars, per window: the absolute count a hitch budget needs.
 // Detection is relative (2× the rolling median), so a build that is uniformly
@@ -527,6 +564,19 @@ const win = { frames: 0, draws: 0, tris: 0, ms: 0, max: 0, over: new Array(16).f
 const OVER_BARS = [50, 100, 200, 500, 1000];
 const beat = { frames: 0, draws: 0, tris: 0 };
 const BEAT_MS = 60_000;
+// Frame pacing (cadence.js): a reduced-rate loop's long frames are its step,
+// said once as a `pacing` record, not emitted as a hitch per long frame.
+let pacing = null, pacingSeen = null, pacedWin = 0;
+function updatePacing() {
+  const p = framePacing(lastIntervals(120));
+  // Said only when two windows agree: one straddling a change describes neither side.
+  const agreed = !pacingMoved(pacingSeen, p);
+  pacingSeen = p;
+  if (!agreed) return;
+  if (!pacingMoved(pacing, p)) { if (p) pacing = p; return; }
+  pacing = p;
+  emit(p ? { type: 'pacing', at: new Date().toISOString(), state: 'on', ...p, tier: 0 } : { type: 'pacing', at: new Date().toISOString(), state: 'off', tier: 0 });
+}
 
 // ── The frame loop: detection lives HERE (SPEC v2 §2) ───────────────────────
 function tick(ts) {
@@ -549,7 +599,10 @@ function tick(ts) {
   beat.frames++; beat.draws += draws; beat.tris += tris;
 
   const median = rollingMedian();
-  if (frameMs > ABS_HITCH_MS || (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS))) {
+  if (frameNo % 60 === 0) updatePacing();
+  const paced = pacing !== null && frameMs <= pacing.bandMs[1] && frameMs <= ABS_HITCH_MS;
+  if (paced && frameMs > Math.max(2 * median, MIN_HITCH_MS)) pacedWin++;
+  else if (frameMs > ABS_HITCH_MS || (count > 60 && frameMs > Math.max(2 * median, MIN_HITCH_MS))) {
     emit({
       type: 'hitch', at: new Date().toISOString(), frame: frameNo, phase: phaseOver(frameFrom, ts),
       frameMs: +frameMs.toFixed(1), medianMs: +median.toFixed(2),
@@ -579,20 +632,34 @@ function tick(ts) {
     emit({ type: 'profile', at: new Date().toISOString(),
       // maxMs: the window's longest frame — the exact worst, whatever the
       // relative hitch bar recorded.
-      frame: { medianMs: +median.toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2), maxMs: +win.max.toFixed(1) },
+      // meanMs beside the median: a paced loop's median describes no frame.
+      frame: { medianMs: +median.toFixed(2), meanMs: +(win.ms / win.frames).toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2), maxMs: +win.max.toFixed(1),
+        ...(pacing ? { pacing: { lowMs: pacing.lowMs, highMs: pacing.highMs, every: pacing.every }, paced: pacedWin } : {}),
+        ...(takeBodies() ?? {}) },
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       ...(takeCounters() ?? {}),
+      // The recorder's own in-page time this window: the instance-slot watch.
+      ...(SLOTS_ON ? { recorder: { slotsMs: +slotsMsWin.toFixed(2), slotsEvery } } : {}),
       tier: 0 });
-    win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0);
+    slotsMsWin = 0;
+    win.frames = 0; win.draws = 0; win.tris = 0; win.ms = 0; win.max = 0; win.over.fill(0); pacedWin = 0;
     updateConditions();
     snapshotSpan();
     flushTicks();
   }
-  if (SLOTS_ON && frameNo % SLOTS_EVERY === SLOTS_AT) {
+  slotsWinFrames++;
+  if (SLOTS_ON && --slotsDue <= 0) {
     let rows = [];
-    try { rows = slotWatch.check(performance.now()); } catch { /* a mesh we could not read */ }
+    const t0 = performance.now();
+    try { rows = slotWatch.check(t0); } catch { /* a mesh we could not read */ }
+    const ms = performance.now() - t0;
+    slotsMsWin += ms;
+    const share = ms / Math.max(1, slotsWinFrames * median);
+    if (share > SLOTS_SHARE && slotsEvery < 16 * SLOTS_EVERY) slotsEvery *= 2;
+    else if (share < SLOTS_SHARE / 4 && slotsEvery > SLOTS_EVERY) slotsEvery /= 2;
+    slotsDue = slotsEvery; slotsWinFrames = 0;
     for (const r of rows) emit({ type: 'instance-slots', at: new Date().toISOString(), ...r, tier: 0 });
   }
 }
