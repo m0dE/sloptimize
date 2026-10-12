@@ -300,6 +300,7 @@ export function createRunFold(meta) {
       out.recorder = { ...(recorder ?? {}) };
       if (pageCost.slotsEvery > 0) out.recorder.page = { slotsMs: +pageCost.slotsMs.toFixed(1), slotsMaxEvery: pageCost.slotsEvery };
     }
+    if (qualify) out.qualify = qualify;
     out.phases = {};
     for (const [k, b] of phases) {
       const p = { samples: b.samples, idle: b.idle, program: b.program, gc: b.gc };
@@ -334,6 +335,9 @@ export function createRunFold(meta) {
 
   /** The run's conditions block (conditions.js), replaced whole. */
   function setConditions(c) { conditions = c && typeof c === 'object' ? { ...c } : null; }
+  /** Same-named functions told apart, and the scripts that could not be read. */
+  let qualify = null;
+  function setQualify(q) { qualify = q && typeof q === 'object' ? { ...q } : null; }
   /** What the recorder itself cost the page: its profiler restarts. */
   let recorder = null;
   function setRecorder(r) { recorder = r && typeof r === 'object' ? { ...r } : null; }
@@ -357,7 +361,7 @@ export function createRunFold(meta) {
     }
   }
 
-  return { addProfile, addFrame, setConditions, setRecorder, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
+  return { addProfile, addFrame, setConditions, setRecorder, setQualify, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */

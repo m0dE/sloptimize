@@ -20,4 +20,9 @@ console.log(`  ${[...total].filter(([, s]) => s > 0).map(([f, s]) => `${f} ${s}`
 check(['Car.update', 'CarManager.update', 'TrainConsist.update'].every((f) => total.has(f)), 'each update named by its class');
 check(!total.has('update'), 'no bare `update` row left');
 check((total.get('Car.update') ?? 0) > (total.get('CarManager.update') ?? 0), 'the 6 ms one is heavier than the 3 ms one');
+const wk = new Map();
+for (const p of Object.values(run.phases)) for (const [fn, , , , , n] of p.threads?.['worker[sim]']?.fns ?? []) wk.set(fn, (wk.get(fn) ?? 0) + n);
+console.log(`  worker: ${[...wk].filter(([, s]) => s > 0).map(([f, s]) => `${f} ${s}`).join(' · ')}`);
+check(wk.has('Agent.update') && wk.has('Spawner.update') && !wk.has('update'), 'the worker\'s two update()s named by class');
+check(!run.qualify?.unread, `every source read (${JSON.stringify(run.qualify)})`);
 process.exit(fail ? 1 : 0);

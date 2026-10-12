@@ -345,8 +345,20 @@ export function createIncidentPipeline(opts) {
    *  edge (a rotation waits out the page's task: one per edge put the record
    *  chain a frame behind per edge). Otherwise, the whole chunk to the phase
    *  the page was last heard in (≤ one window misfiled at an edge). */
-  function foldChunk(profile, thread) {
+  // Which script each sampled URL is, and on which session (a worker's own):
+  // its source is read through the debugger at stop (qualify.js), which
+  // reaches app:// bundles and worker scripts a fetch cannot.
+  const scripts = new Map();   // url → { scriptId, sid }
+  const scriptStarts = new Map();   // `${sid}:${scriptId}` → [line, column]
+  function noteScripts(profile, sid) {
+    for (const n of profile?.nodes ?? []) {
+      const f = n.callFrame;
+      if (f?.url && f.scriptId && f.scriptId !== '0' && !scripts.has(f.url)) scripts.set(f.url, { scriptId: f.scriptId, sid });
+    }
+  }
+  function foldChunk(profile, thread, sid = null) {
     if (!run || !profile) return;
+    noteScripts(profile, sid);
     if (!clock || !edges.length || !Array.isArray(profile.samples) || typeof profile.startTime !== 'number') {
       run.addProfile(profile, pagePhase, now(), thread);
     } else {
@@ -460,7 +472,7 @@ export function createIncidentPipeline(opts) {
         const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
         clearT(timer);
         const profile = res?.[0]?.profile;
-        if (profile) foldChunk(profile, w.name);
+        if (profile) foldChunk(profile, w.name, sid);
         if (res && !final) {
           const ms = Math.max(0, tStart - tStop);
           if (ms > cost.maxWorkerRestartMs) cost.maxWorkerRestartMs = ms;
@@ -576,7 +588,12 @@ export function createIncidentPipeline(opts) {
   // same URLs, a few frames of counts — must not be read as the new one's.
   const scriptCtx = new Map();   // scriptId → executionContextId
   let mainFrame = null, docCtx = null;
-  function onEvent(method, params) {
+  function onEvent(method, params, sessionId) {
+    // Where each script starts in its document (an inline <script> counts
+    // its lines from the page's top): qualify lines its source up by it.
+    if (method === 'Debugger.scriptParsed' && params?.scriptId && (params.startLine || params.startColumn)) {
+      scriptStarts.set(`${sessionId ?? ''}:${params.scriptId}`, [params.startLine ?? 0, params.startColumn ?? 0]);
+    }
     if (sendTo && method === 'Target.attachedToTarget' && params?.sessionId) { void attachWorker(params); return; }
     if (sendTo && method === 'Target.detachedFromTarget' && params?.sessionId) { workers.delete(params.sessionId); return; }
     if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
@@ -727,8 +744,27 @@ export function createIncidentPipeline(opts) {
   }
   /** A script's source: through the page (any scheme it can load, an app://
    *  included), else from disk (file://) or over HTTP. Null when unreadable. */
+  const debuggerOn = new Set();   // sessions whose Debugger qualify enabled ('' = the page)
   async function sourceOf(url, limitMs = 2000) {
     const bounded = (p, ms) => { let t; return Promise.race([p, new Promise((r) => { t = setT(() => r(null), ms); t?.unref?.(); })]).finally(() => clearT(t)); };
+    // The script itself, through the debugger of the session it ran in.
+    const known = scripts.get(url);
+    if (known) {
+      const via = known.sid ? (m, p) => sendTo(known.sid, m, p) : send;
+      try {
+        if (!debuggerOn.has(known.sid ?? '')) {
+          // Sent together: no `debugger;` statement may pause the app in between.
+          await bounded(Promise.all([via('Debugger.enable'), via('Debugger.setSkipAllPauses', { skip: true })]), limitMs);
+          debuggerOn.add(known.sid ?? '');
+        }
+        const r = await bounded(via('Debugger.getScriptSource', { scriptId: known.scriptId }), limitMs);
+        if (typeof r?.scriptSource === 'string' && r.scriptSource) {
+          // Positions are the document's: pad an inline script to where it starts.
+          const [line, col] = scriptStarts.get(`${known.sid ?? ''}:${known.scriptId}`) ?? [0, 0];
+          return '\n'.repeat(line) + ' '.repeat(col) + r.scriptSource;
+        }
+      } catch { /* not this way */ }
+    }
     try {
       const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), limitMs);
       if (typeof r?.result?.value === 'string') return r.result.value;
@@ -744,12 +780,23 @@ export function createIncidentPipeline(opts) {
     if (!run) return false;
     const shared = sharedNames([run.fnRows()]);
     if (!shared.size) return false;
+    const unread = [];
+    try { return await qualifyShared(shared, deadline, unread); }
+    finally {
+      // Said in the run file: a report must not imply names it could not tell apart.
+      run.setQualify({ shared: [...shared.values()].reduce((a, x) => a + x.size, 0), ...(unread.length ? { unread } : {}) });
+      for (const sid of debuggerOn) { try { await (sid ? sendTo(sid, 'Debugger.disable') : send('Debugger.disable')); } catch { /* gone */ } }
+      debuggerOn.clear();
+    }
+  }
+  async function qualifyShared(shared, deadline, unread) {
     const names = new Map();   // `${url}\t${line}\t${col}\t${fn}` → qualified
     let n = 0;
     for (const [url, fns] of [...shared].slice(0, 20)) {
       const rows = run.fnRows().filter(([fn, u]) => u === url && fns.has(fn));
       const uniq = [...new Map(rows.map((r) => [`${r[2]}\t${r[3]}\t${r[0]}`, r])).values()];
       const src = Date.now() < deadline ? await sourceOf(url, Math.max(200, Math.min(2000, deadline - Date.now()))) : null;
+      if (!src) unread.push(url.split('/').pop().replace(/[?#].*$/, '').slice(0, 80));
       const cls = src ? enclosingClasses(src, uniq.map(([, , line, col]) => [line, col])) : uniq.map(() => null);
       uniq.forEach(([fn, u, line, col], k) => { names.set(`${u}\t${line}\t${col}\t${fn}`, qualifiedName(fn, cls[k], line)); n++; });
     }

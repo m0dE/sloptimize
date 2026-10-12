@@ -206,6 +206,8 @@ if (cmd === 'report') {
     const phBucket = file ? R.runBucket(file, PHASES) : null;
     if (file) {
       const top = R.heaviestSelf(phBucket, 3, file.intervalUs);
+      // Same-named functions the run could not tell apart: said, not implied.
+      if (file.qualify?.unread?.length) console.log(`  ⚠ same-named functions in ${file.qualify.unread.join(', ')} could not be told apart (the source was unreadable at stop) — rows there named fn:line, and compare across builds keys them by line`);
       if (top.length) {
         console.log(`  heaviest self time${PHASES ? ` (${[...PHASES].join(',')})` : ' (whole run)'}:`);
         for (const f of top) {
@@ -257,10 +259,15 @@ if (cmd === 'report') {
   // one under a tenth of the stall is not printed as one (attach's
   // low-share gate; applied here too, to lines written before it existed).
   const { ATTRIBUTE_MIN_SHARE } = await import('../src/incident-pipeline.mjs');
+  // Names as the run file has them (qualify.js): a hitch written mid-run
+  // says `update`; the run, qualified at stop, knows `Car.update`.
+  const { namerFromRun } = await import('../src/qualify.js');
+  const runFile = profile.session ? (await import('../src/runs.js')).readRuns(DIR).find((r) => r.session === profile.session) : null;
+  const named = namerFromRun(runFile);
   const attribution = (h) => {
     const top = h.topFrames?.[0];
     if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
-    const name = `${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
+    const name = `${named(top.fn, top.url)}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
     // A line that carries a share was judged by the recorder (at whatever
     // --min-share it ran with); only older lines are judged here.
     const judged = top.share !== undefined;
@@ -299,7 +306,7 @@ if (cmd === 'report') {
     const gated = Object.entries(r.gates ?? {}).map(([g, n]) => `${n} ${g}`).join(', ');
     const lead = r.topFrames?.[0];
     const who = lead && !r.unattributed
-      ? `pooled over ${r.pooled.hitches} frames (${r.pooled.sampledMs} ms sampled): top ${lead.fn}${lead.url ? `@${lead.url}` : ''} ${lead.selfMs}ms (${pct(Math.min(lead.share, 1))} of those frames)${lead.lines?.length ? ` — ${lead.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : ''}`
+      ? `pooled over ${r.pooled.hitches} frames (${r.pooled.sampledMs} ms sampled): top ${named(lead.fn, lead.url)}${lead.url ? `@${lead.url}` : ''} ${lead.selfMs}ms (${pct(Math.min(lead.share, 1))} of those frames)${lead.lines?.length ? ` — ${lead.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : ''}`
       : lead ? `pooled over ${r.pooled.hitches} frames: no function holds a tenth of them (heaviest ${lead.fn} ${pct(lead.share)}${r.sampled ? `; native ${r.sampled.programMs}ms, gc ${r.sampled.gcMs}ms` : ''})`
         : `not attributed (${r.unattributed})`;
     console.log(`  ↻ hitches ${P.periodText(r.periodMs)} — timer-driven: ${r.occurrences}× ${r.frameMs.min}–${r.frameMs.max} ms over ${r.spanSec} s${gated ? ` (${gated})` : ''}${r.phase ? ` [${r.phase}]` : ''}; ${who}`);

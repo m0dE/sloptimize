@@ -8,4 +8,13 @@ class TrainConsist { update() { return spin(1.5); } }
 const parts = [new Car(), new CarManager(), new TrainConsist()];
 function frame() { requestAnimationFrame(frame); for (const p of parts) p.update(); }
 requestAnimationFrame(frame);
+// The same in a Worker (a blob: script, read at stop through the worker's own debugger).
+const src = `
+const spin = (ms) => { const until = performance.now() + ms; let x = 0; while (performance.now() < until) x += Math.sqrt(x + 1); return x; };
+class Agent { update() { return spin(8); } }
+class Spawner { update() { return spin(4); } }
+const all = [new Agent(), new Spawner()];
+setInterval(() => { for (const a of all) a.update(); }, 20);
+`;
+new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { name: 'sim' });
 </script></body>
