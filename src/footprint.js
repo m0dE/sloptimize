@@ -252,7 +252,9 @@ function baseKey(rec) {
     case 'instance-slots':
       // Drawn slots no longer written (instance-slots.js). The mesh is the
       // site; a record that says the stale slots cleared is not an incident.
-      return rec.stale > 0 ? `instance-slots|${phase}|${String(rec.name ?? '?').replace(/[|,]/g, '_').slice(0, 60)}` : null;
+      // Stale slots all OUT of view (`inView: 0`) are off-screen instances
+      // left unwritten — not a ghost anyone can see, so not an incident.
+      return rec.stale > 0 && rec.inView !== 0 ? `instance-slots|${phase}|${String(rec.name ?? '?').replace(/[|,]/g, '_').slice(0, 60)}` : null;
     case 'jitter':
       return `jitter|${rec.track ?? '?'}|${rec.kind ?? '?'}|${phase}|${topGuess(rec)}|${jumpAxis(rec)}`;
     case 'warm':

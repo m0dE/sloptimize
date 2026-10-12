@@ -67,6 +67,38 @@ export const QUIET_EVERY = 4;
 /** A check's time budget: meshes past it wait for the next check. */
 export const SLOT_BUDGET_MS = 2;
 
+// ── In view, or out of it ───────────────────────────────────────────────────
+// A slot left unwritten is only SEEN while it is in the camera's view. A
+// game that culls by not rewriting off-screen instances leaves them stale
+// on purpose, and that is harmless until the camera reaches one before the
+// game does — then it is a ghost at its last position (the field bug this
+// file began with). So when the recorder knows the camera (the one three's
+// renderer last rendered with), each stale slot's position is tested
+// against its view: `inView` is the count actually on screen.
+
+/** a × b, column-major 4×4 (three's `elements`). */
+function mul4(a, b) {
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+    o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  }
+  return o;
+}
+/** The matrix from a mesh's instance space to the camera's clip space, or null. */
+export function clipMatrix(mesh, camera) {
+  const p = camera?.projectionMatrix?.elements, v = camera?.matrixWorldInverse?.elements, m = mesh?.matrixWorld?.elements;
+  if (!p || !v || !m || p.length < 16 || v.length < 16 || m.length < 16) return null;
+  return mul4(mul4(p, v), m);
+}
+/** Is local point (x, y, z) inside the view (a 10% margin: an instance has a size)? */
+export function inClip(k, x, y, z) {
+  const w = k[3] * x + k[7] * y + k[11] * z + k[15];
+  if (!(w > 0)) return false;
+  const cx = k[0] * x + k[4] * y + k[8] * z + k[12], cy = k[1] * x + k[5] * y + k[9] * z + k[13], cz = k[2] * x + k[6] * y + k[10] * z + k[14];
+  const m = 1.1 * w;
+  return cx >= -m && cx <= m && cy >= -m && cy <= m && cz >= -w && cz <= w;
+}
+
 /** Slots [0, n) whose translation differs between `arr` (16 floats a slot)
  *  and `kept` (KEPT a slot), into `out` (0/1); `kept` is updated in place.
  *  Slots past `known` had no copy yet: unchanged, and copied. */
@@ -85,7 +117,8 @@ export function changedTranslations(arr, kept, n, known, out) {
  *   stats:()=>{ms:number, checks:number, deferred:number, maxMs:number}}}
  *   `check` returns one row per watched mesh that has stale slots or just
  *   stopped having them: `{name, drawn, capacity, active, written, changed,
- *   stale, staleSec}` (`staleSec`: how long the stalest slot has been idle).
+ *   stale, staleSec, inView?}` (`staleSec`: how long the stalest slot has
+ *   been idle; `inView`: stale slots inside the camera's view, when known).
  *   `stats`: the watch's own time, in total and its longest check.
  */
 export function createSlotWatch(opts = {}) {
@@ -138,7 +171,7 @@ export function createSlotWatch(opts = {}) {
     if (st) return st;
     const cap = Math.floor((mesh.instanceMatrix?.array?.length ?? 0) / 16);
     st = { cap, written: new Uint8Array(cap), idle: new Uint16Array(cap), changed: new Uint8Array(cap), kept: new Float32Array(cap * KEPT),
-      known: -1, at: 0, lastStale: 0, quiet: 0, skip: 0 };
+      known: -1, at: 0, lastStale: 0, lastSeen: null, quiet: 0, skip: 0 };
     state.set(mesh, st);
     // The instance's own property, so only this mesh pays; the prototype
     // (bundled, unreachable at tier 0) is never touched.
@@ -153,7 +186,7 @@ export function createSlotWatch(opts = {}) {
   }
 
   /** One mesh's visit: its row, when there is something to say. */
-  function visit(mesh, nowMs) {
+  function visit(mesh, nowMs, camera) {
     const arr = mesh.instanceMatrix?.array;
     if (!arr) return null;
     const st = track(mesh);
@@ -162,14 +195,19 @@ export function createSlotWatch(opts = {}) {
     const drawn = Math.max(0, Math.min(mesh.count ?? 0, st.cap));
     const first = st.known < 0;
     changedTranslations(arr, st.kept, drawn, first ? 0 : st.known, st.changed);
-    let active = 0, written = 0, moved = 0, stale = 0, stalest = 0;
+    let active = 0, written = 0, moved = 0, stale = 0, stalest = 0, inView = 0;
+    const clip = first ? null : clipMatrix(mesh, camera);
     if (!first) {
       for (let i = 0; i < drawn; i++) {
         const w = st.written[i] === 1, c = i < st.known && st.changed[i] === 1;
         if (w) written++;
         if (c) moved++;
         if (w || c || i >= st.known) { if (w || c) active++; st.idle[i] = 0; } else if (st.idle[i] < 65535) st.idle[i]++;
-        if (st.idle[i] >= staleChecks) { stale++; if (st.idle[i] > stalest) stalest = st.idle[i]; }
+        if (st.idle[i] >= staleChecks) {
+          stale++;
+          if (st.idle[i] > stalest) stalest = st.idle[i];
+          if (clip && inClip(clip, arr[i * 16 + 12], arr[i * 16 + 13], arr[i * 16 + 14])) inView++;
+        }
       }
     }
     const sinceMs = nowMs - st.at;
@@ -180,19 +218,24 @@ export function createSlotWatch(opts = {}) {
     st.quiet = active > 0 ? 0 : st.quiet + 1;
     if (first) return null;
     // A mesh where nothing is active is static (or paused) — not a
-    // finding either way. Said when the stale count moves by ≥10%, and
-    // once when it clears: the "after" of a fix.
+    // finding either way. Said when the stale count moves by ≥10%, when
+    // stale slots come into view or all leave it, and once when it clears:
+    // the "after" of a fix.
     const report = active > 0 && stale > 0;
     const cleared = st.lastStale > 0 && stale === 0;
-    if ((report && Math.abs(stale - st.lastStale) >= Math.max(1, 0.1 * st.lastStale)) || cleared) {
+    const seen = clip ? inView > 0 : null;
+    if ((report && (Math.abs(stale - st.lastStale) >= Math.max(1, 0.1 * st.lastStale) || (seen !== null && seen !== st.lastSeen))) || cleared) {
       st.lastStale = stale;
+      st.lastSeen = seen;
       return { name: mesh.name || `InstancedMesh ${String(mesh.uuid ?? '').slice(0, 8)}`, drawn, capacity: st.cap,
-        active, written, changed: moved, stale, staleSec: +((stalest * sinceMs) / 1000).toFixed(1) };
+        active, written, changed: moved, stale, staleSec: +((stalest * sinceMs) / 1000).toFixed(1), ...(clip ? { inView } : {}) };
     }
     return null;
   }
 
-  function check(nowMs) {
+  /** `camera`: the one the scene was last rendered with, when known — stale
+   *  slots are then counted in view or out of it. */
+  function check(nowMs, camera) {
     const t0 = clock();
     // The scene walk is the expensive half: redone every fifth check, and
     // meshes added in between are found then.
@@ -207,7 +250,7 @@ export function createSlotWatch(opts = {}) {
       const mesh = meshes[(cursor + done) % n];
       const st = state.get(mesh);
       if (st && st.quiet >= QUIET_CHECKS && st.skip++ % QUIET_EVERY !== 0) continue;
-      const row = visit(mesh, nowMs);
+      const row = visit(mesh, nowMs, camera);
       if (row) rows.push(row);
     }
     cursor = n ? (cursor + done) % n : 0;

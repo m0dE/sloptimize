@@ -184,3 +184,27 @@ test('the profile record carries the watch\'s in-page time, and the run file cou
   assert.ok(j.recorder.page.slotsMs > 0);
   assert.equal(j.recorder.page.slotsMaxEvery >= 120, true);
 });
+
+test('with the camera known, stale slots are counted in view or out of it; all off-screen is not an incident', () => {
+  // An orthographic camera at the origin looking down −z, x and y in [−10, 10].
+  const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const camera = { isCamera: true, matrixWorldInverse: { elements: I },
+    projectionMatrix: { elements: [0.1, 0, 0, 0, 0, 0.1, 0, 0, 0, 0, -2 / 99.9, 0, 0, 0, -100.1 / 99.9, 1] } };
+  const at = (mesh, i, x) => { mesh.instanceMatrix.array[i * 16 + 12] = x; mesh.instanceMatrix.array[i * 16 + 14] = -5; };
+  const w = createSlotWatch({ budgetMs: Infinity });
+  const seen = cars(10, 'seen'), culled = cars(10, 'culled');
+  for (const m of [seen, culled]) m.matrixWorld = { elements: I };
+  for (let i = 0; i < 10; i++) { at(seen, i, i < 7 ? 0 : 1 + i); at(culled, i, i < 7 ? 0 : 50 + i); }   // 3 stale slots each: on screen, and far off it
+  w.observe(scene(seen, culled));
+  let rows = [];
+  for (let k = 0; k <= STALE_CHECKS + 1; k++) {
+    for (const m of [seen, culled]) for (let i = 0; i < 7; i++) m.instanceMatrix.array[i * 16 + 13] += 0.01;   // the live ones move
+    rows = rows.concat(w.check(k * 1000, camera));
+  }
+  const by = Object.fromEntries(rows.map((r) => [r.name, { type: 'instance-slots', ...r }]));
+  assert.equal(by.seen.stale, 3); assert.equal(by.seen.inView, 3);
+  assert.equal(by.culled.stale, 3); assert.equal(by.culled.inView, 0);
+  assert.equal(footprintKey(by.culled), null, 'off-screen instances left unwritten are not a ghost anyone sees');
+  assert.equal(footprintKey(by.seen), 'instance-slots|?|seen');
+  assert.ok(footprintKey({ ...by.seen, inView: undefined }), 'no camera known: as before');
+});

@@ -345,8 +345,11 @@ if (cmd === 'report') {
   if (slotRecs.size) {
     console.log(`  instance slots (drawn inside .count, per mesh — newest):`);
     for (const r of slotRecs.values()) {
+      const view = r.inView === undefined ? ''
+        : r.inView === 0 ? ` — none in the camera's view: off-screen instances left unwritten (harmless while they stay off screen; a ghost if the camera reaches one before it is rewritten)`
+          : ` — ${r.inView} in the camera's view: drawn on screen at stale positions (ghosts, or static instances)`;
       console.log(r.stale > 0
-        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s — static instances, or ghosts drawn at stale positions (count past the live set?)`
+        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s${view || ' — static instances, or ghosts drawn at stale positions (count past the live set?)'}`
         : `  ◫ ${r.name}: no stale slots any more (${r.drawn} drawn, ${r.active} active) @ ${r.at}`);
     }
   }

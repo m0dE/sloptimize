@@ -63,6 +63,17 @@ function died(kind, obj) {
 // renderer.info.memory is the engine's count of the same leak.
 const renderers = [];
 let threeRevision;
+// The camera three's renderer last rendered with: the slot watch asks
+// whether a stale slot is on screen. The game's renderer instance is
+// wrapped (its own render, never the prototype) when the watch first runs.
+let lastCamera = null;
+function hookRender(r) {
+  const orig = r?.render;
+  if (typeof orig !== 'function' || orig.__sloptimize) return;
+  const w = function (scene, camera) { if (camera && camera.isCamera) lastCamera = camera; return orig.apply(this, arguments); };
+  w.__sloptimize = true;
+  r.render = w;
+}
 /** three's own settings that change what a frame costs: `debug.checkShaderErrors`
  *  (on by default) makes every link wait on a synchronous status read. */
 function readThree() {
@@ -282,7 +293,7 @@ if (SLOTS_ON) try {
   }
   hook.addEventListener('register', (e) => { try { if (typeof e.detail?.revision === 'string') threeRevision = e.detail.revision.slice(0, 12); } catch { /* not ours */ } });
   hook.addEventListener('observe', (e) => {
-    try { if (e.detail?.isWebGLRenderer && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
+    try { if ((e.detail?.isWebGLRenderer || e.detail?.isWebGPURenderer) && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
     try { slotWatch.observe(e.detail); } catch { /* not ours to break */ }
   });
 } catch { /* no EventTarget: no scenes, nothing else changes */ }
@@ -653,7 +664,8 @@ function tick(ts) {
   if (SLOTS_ON && --slotsDue <= 0) {
     let rows = [];
     const t0 = performance.now();
-    try { rows = slotWatch.check(t0); } catch { /* a mesh we could not read */ }
+    for (const ref of renderers) { try { hookRender(ref.deref?.()); } catch { /* not ours to break */ } }
+    try { rows = slotWatch.check(t0, lastCamera); } catch { /* a mesh we could not read */ }
     const ms = performance.now() - t0;
     slotsMsWin += ms;
     const share = ms / Math.max(1, slotsWinFrames * median);
