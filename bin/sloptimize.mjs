@@ -248,8 +248,31 @@ if (cmd === 'report') {
     const lines = top.lines?.length ? ` — ${top.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : '';
     return `  top ${name} (${pct(Math.min(share, 1))} of frame)${lines}`;
   };
+  // Hitches on a clock (periodic.js): the session's hitches by cadence, and
+  // the pipeline's pooled attribution of them (`hitch-pattern`) — a timer's
+  // 75 ms frames are each below the floor and together one cause.
+  const P = await import('../src/periodic.js');
+  const sessionHitches = ledger.filter((r) => r.type === 'hitch' && (!profile.session || r.session === profile.session) && (!PHASES || PHASES.has(r.phase ?? '?')));
+  const cadence = P.findPeriod(sessionHitches.map((r) => Date.parse(r.at)));
+  const onClock = new Set(cadence ? cadence.members.map((i) => sessionHitches[i]) : []);
   for (const h of auto.slice(-5)) {
-    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}`);
+    const tick = [...onClock].some((m) => m.at === h.at && m.frameMs === h.frameMs) ? `  ↻ ${P.periodText(cadence.periodMs)}` : '';
+    console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}${tick}`);
+  }
+  const patterns = new Map();
+  for (const r of ledger) if (r.type === 'hitch-pattern' && (!profile.session || r.session === profile.session)) patterns.set(Math.round(r.periodMs / 250), r);
+  for (const r of patterns.values()) {
+    const gated = Object.entries(r.gates ?? {}).map(([g, n]) => `${n} ${g}`).join(', ');
+    const lead = r.topFrames?.[0];
+    const who = lead && !r.unattributed
+      ? `pooled over ${r.pooled.hitches} frames (${r.pooled.sampledMs} ms sampled): top ${lead.fn}${lead.url ? `@${lead.url}` : ''} ${lead.selfMs}ms (${pct(Math.min(lead.share, 1))} of those frames)${lead.lines?.length ? ` — ${lead.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : ''}`
+      : lead ? `pooled over ${r.pooled.hitches} frames: no function holds a tenth of them (heaviest ${lead.fn} ${pct(lead.share)}${r.sampled ? `; native ${r.sampled.programMs}ms, gc ${r.sampled.gcMs}ms` : ''})`
+        : `not attributed (${r.unattributed})`;
+    console.log(`  ↻ hitches ${P.periodText(r.periodMs)} — timer-driven: ${r.occurrences}× ${r.frameMs.min}–${r.frameMs.max} ms over ${r.spanSec} s${gated ? ` (${gated})` : ''}${r.phase ? ` [${r.phase}]` : ''}; ${who}`);
+  }
+  if (cadence && ![...patterns.values()].some((r) => Math.abs(r.periodMs - cadence.periodMs) <= Math.max(50, 0.02 * cadence.periodMs))) {
+    const ms = cadence.members.map((i) => sessionHitches[i].frameMs).sort((a, b) => a - b);
+    console.log(`  ↻ hitches ${P.periodText(cadence.periodMs)} — timer-driven: ${cadence.members.length}× ${ms[0]}–${ms.at(-1)} ms over ${(cadence.spanMs / 1000).toFixed(1)} s`);
   }
   // A page that armed more than once in one attach session booted more than
   // once under the recorder (it navigated or reloaded itself): its load-phase
