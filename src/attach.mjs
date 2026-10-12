@@ -6,7 +6,8 @@
 // concatenated into one IIFE), the emit binding, and the transport. The
 // profiler, incident CLUSTERING and the .sloptimize/ files live in
 // incident-pipeline.mjs, shared with the Electron in-app attach.
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createIncidentPipeline } from './incident-pipeline.mjs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -134,6 +135,27 @@ async function discoverTarget(port, fetchImpl = fetch) {
   return page.webSocketDebuggerUrl;
 }
 
+// ── A custom launcher (attach --exec) ──────────────────────────────────────
+// `--launch <url>` opens a browser on a page; an Electron harness with a data
+// dir and a spec file is not a URL. `--exec "<cmd>"` runs the app's own
+// launch line for every run (and every sweep level), in a shell, with:
+//   {port}   the DevTools port this run attaches on (--port, default 9222)
+//   {tmp}    a fresh empty directory, removed after the run — a data dir
+//            with no cache or save carried over from the last level
+//   {value}  a sweep level's N (sweep --exec): the launcher can set it,
+//            with no knob in the page
+//   {commit} a timeline step's commit
+// The whole process group is stopped at close: an Electron app is several
+// processes, and one left holding the port fails the next run.
+
+/** The command with its placeholders filled; an unknown one is an error. */
+export function fillExec(cmd, vars) {
+  return String(cmd).replace(/\{(\w+)\}/g, (m, k) => {
+    if (vars[k] === undefined) throw new Error(`--exec: {${k}} has no value here (known: ${Object.keys(vars).filter((x) => vars[x] !== undefined).map((x) => `{${x}}`).join(' ')})`);
+    return String(vars[k]);
+  });
+}
+
 /** Discover, retrying until `waitMs` has passed — for an app still starting. */
 export async function waitForTarget(port, waitMs = 0, { fetch: fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now } = {}) {
   const until = now() + waitMs;
@@ -174,8 +196,19 @@ export async function attach(opts = {}) {
   const WS = opts.WebSocket ?? globalThis.WebSocket;
   // A bad drive script fails before a browser is launched.
   const drive = await loadDrive(opts.drive);
-  let child = null;
-  if (opts.launch) {
+  let child = null, execTmp = null, execTail = '', execExit = null;
+  if (opts.exec) {
+    if (opts.launch) throw new Error('--exec and --launch are two ways to start the target: pick one');
+    execTmp = /\{tmp\}/.test(opts.exec) ? mkdtempSync(join(tmpdir(), 'sloptimize-exec-')) : null;
+    const cmd = fillExec(opts.exec, { port, tmp: execTmp ?? undefined, ...(opts.execVars ?? {}) });
+    child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // The last of what it said, for the error when it dies before attaching.
+    const keep = (b) => { execTail = (execTail + b.toString()).slice(-1500); };
+    child.stdout.on('data', keep); child.stderr.on('data', keep);
+    execExit = new Promise((r) => child.once('exit', (code, signal) => r({ code, signal })));
+    child.once('error', (e) => { execTail += `\n${e.message}`; });
+    log(`exec: ${cmd}`);
+  } else if (opts.launch) {
     const bin = process.env.SLOPTIMIZE_BROWSER
       ?? ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].find(existsSync);
     if (!bin) throw new Error('no browser found — set SLOPTIMIZE_BROWSER');
@@ -185,7 +218,14 @@ export async function attach(opts = {}) {
     log(`launched ${bin} → ${opts.launch}`);
   }
 
-  const wsUrl = opts.wsUrl ?? await waitForTarget(port, opts.waitMs ?? (child ? 15_000 : 0));
+  let wsUrl;
+  try {
+    const found = opts.wsUrl ? Promise.resolve(opts.wsUrl) : waitForTarget(port, opts.waitMs ?? (opts.exec ? 60_000 : child ? 15_000 : 0));
+    // An --exec'd app that exits before its endpoint appears is said as that.
+    wsUrl = execExit ? await Promise.race([found, execExit.then(({ code, signal }) => {
+      throw new Error(`the --exec command exited (${signal ?? `code ${code}`}) before a DevTools endpoint appeared on :${port}${execTail.trim() ? ` — it said: ${execTail.trim().split('\n').slice(-4).join(' | ')}` : ''}`);
+    })]) : await found;
+  } catch (e) { await killChild(); throw e; }
   // The browser's version, for the run's conditions — over HTTP, off the
   // CDP sequence; an explicit wsUrl has no endpoint to ask.
   let browser;
@@ -223,11 +263,24 @@ export async function attach(opts = {}) {
   // `--runs N` launches on the same port and must not find this one. A
   // child that already died of a signal has exitCode null and signalCode set.
   async function killChild() {
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const cleanup = () => { if (execTmp) { try { rmSync(execTmp, { recursive: true, force: true }); } catch { /* still held */ } execTmp = null; } };
+    if (!child || child.exitCode !== null || child.signalCode !== null) { cleanup(); return; }
     const exited = new Promise((r) => child.once('exit', r));
-    child.kill();
+    // An --exec'd command is a process group (a shell, an Electron and its helpers).
+    const kill = (sig) => { try { if (opts.exec && process.platform !== 'win32') process.kill(-child.pid, sig); else child.kill(sig); } catch { /* gone */ } };
+    kill('SIGTERM');
     await Promise.race([exited, new Promise((r) => setTimeout(r, 3000))]);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    if (child.exitCode === null && child.signalCode === null) kill('SIGKILL');
+    // The group's helpers outlive its leader by a moment and still write to
+    // {tmp}: wait until none is left (bounded), then remove it.
+    if (opts.exec && process.platform !== 'win32') {
+      for (let i = 0; i < 30; i++) {
+        try { process.kill(-child.pid, 0); } catch { break; }
+        if (i === 20) kill('SIGKILL');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    cleanup();
   }
   const pipeline = createIncidentPipeline({ dir, log, send, sendTo: sendOn, workers: opts.workers, regime: opts.headless ? 'software' : 'unknown', build: opts.build, attributeMinShare: opts.minShare, coverage: opts.coverage === true, heap: opts.heap,
     conditions: pageKnobs({ headless: !!opts.headless, minHitchMs: opts.minHitchMs, slots: opts.slots, browser, drive: drive?.meta }) });

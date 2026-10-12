@@ -911,7 +911,9 @@ if (cmd === 'sweep') {
   const settleS = nums('--settle', 5, (n) => n >= 0);
   const measureS = nums('--duration', 20, (n) => n > 0);
   const { attach } = await import('../src/attach.mjs');
-  const base = { launch: get('--launch'), port: get('--port') ? Number(get('--port')) : undefined, dir: DIR, headless: args.includes('--headless'), build: get('--build'),
+  const execCmd = get('--exec');
+  const viaLaunch = !!execCmd && /\{value\}/.test(execCmd);
+  const base = { launch: get('--launch'), exec: execCmd, port: get('--port') ? Number(get('--port')) : undefined, dir: DIR, headless: args.includes('--headless'), build: get('--build'),
     waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined, slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), log: () => {} };
   const id = new Date().toISOString().replace(/[:.]/g, '-');
   const saved = { type: 'sweep', v: 1, id, knob, runs, settleS, measureS, ...(base.build ? { build: base.build } : {}), levels: [] };
@@ -921,7 +923,7 @@ if (cmd === 'sweep') {
     for (let i = 0; i < runs; i++) {
       let session;
       try {
-        session = await attach({ ...base, drive: S.levelDrive(knob, value, { settleS, measureS }) });
+        session = await attach({ ...base, execVars: { value }, drive: S.levelDrive(knob, value, { settleS, measureS, viaLaunch }) });
         console.log(`[sweep] ${knob}=${value} run ${i + 1}/${runs} — session ${session.session}`);
         await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
       } catch (e) {
@@ -1182,6 +1184,7 @@ if (cmd === 'attach') {
   if (runsN > 1 && !duration && !drivePath) { console.error('sloptimize attach: --runs needs --duration <s> or --drive <script> to end each run'); process.exit(2); }
   const opts = {
     launch: get('--launch'),
+    exec: get('--exec'),
     port: get('--port') ? Number(get('--port')) : undefined,
     dir: get('--dir') ?? '.sloptimize',
     headless: args.includes('--headless'),
@@ -1251,5 +1254,5 @@ if (cmd === 'attach') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|equivalence|sweep|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url>] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--no-workers] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize equivalence <A> <B> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]] [--json]   (A/B: a build, a session or a ticks/*.jsonl; exit 0 identical · 1 diverged · 3 different sim · 4 no ticks · 5 too few ticks)\n       sloptimize sweep --knob <name> --values a,b,c --launch <url>|--port N [--runs 2] [--settle 5] [--duration 20] [--build <id>] [--frame-budget 16.7] | sweep --show [id]\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|equivalence|sweep|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url> | --exec "<cmd with {port} {tmp}>"] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--no-workers] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize equivalence <A> <B> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]] [--json]   (A/B: a build, a session or a ticks/*.jsonl; exit 0 identical · 1 diverged · 3 different sim · 4 no ticks · 5 too few ticks)\n       sloptimize sweep --knob <name> --values a,b,c --launch <url>|--exec "<cmd with {port} {tmp} {value}>"|--port N [--runs 2] [--settle 5] [--duration 20] [--build <id>] [--frame-budget 16.7] | sweep --show [id]\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);

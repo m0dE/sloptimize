@@ -50,15 +50,18 @@ const T95 = { 1: 12.71, 2: 4.3, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45, 7: 2.36, 8: 
  * game to register the knob, set it, settle, then measure in the `sweep`
  * phase with the knob as the phase's scale (SPEC §3.15).
  */
-export function levelDrive(knob, value, { settleS = 5, measureS = 20 } = {}) {
+export function levelDrive(knob, value, { settleS = 5, measureS = 20, viaLaunch = false } = {}) {
   const k = JSON.stringify(String(knob));
   async function sweepLevel(api) {
-    try {
-      await api.until(`typeof globalThis.__sloptimizeKnobs === 'object' && typeof globalThis.__sloptimizeKnobs[${k}] === 'function'`, { timeoutMs: 60_000 });
-    } catch {
-      throw new Error(`the page never registered knob ${k} — the game calls window.__sloptimizeKnob(${k}, (n) => …set it to n…)`);
+    // `sweep --exec "… {value} …"`: the launcher set the level; no knob to turn.
+    if (!viaLaunch) {
+      try {
+        await api.until(`typeof globalThis.__sloptimizeKnobs === 'object' && typeof globalThis.__sloptimizeKnobs[${k}] === 'function'`, { timeoutMs: 60_000 });
+      } catch {
+        throw new Error(`the page never registered knob ${k} — the game calls window.__sloptimizeKnob(${k}, (n) => …set it to n…), or the launcher sets it: sweep --exec "… {value} …"`);
+      }
+      await api.eval(`globalThis.__sloptimizeKnobs[${k}](${Number(value)})`);
     }
-    await api.eval(`globalThis.__sloptimizeKnobs[${k}](${Number(value)})`);
     await api.phase('sweep-settle');
     await api.wait(settleS * 1000);
     await api.phase(SWEEP_PHASE);
