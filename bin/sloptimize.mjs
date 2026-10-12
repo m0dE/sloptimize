@@ -272,10 +272,14 @@ if (cmd === 'report') {
   // 75 ms frames are each below the floor and together one cause.
   const P = await import('../src/periodic.js');
   const sessionHitches = ledger.filter((r) => r.type === 'hitch' && (!profile.session || r.session === profile.session) && (!PHASES || PHASES.has(r.phase ?? '?')));
-  const cadence = P.findPeriod(sessionHitches.map((r) => Date.parse(r.at)));
-  const onClock = new Set(cadence ? cadence.members.map((i) => sessionHitches[i]) : []);
+  // Each cadence from one kind of hitch: a phase and a band of frame times,
+  // and only when it beats chance — a crowd of hitches always has pairs.
+  const cadences = P.findCadences(sessionHitches.map((r) => ({ t: Date.parse(r.at), ms: r.frameMs, phase: r.phase }))).slice(0, 3);
+  const onClock = new Map();
+  for (const c of cadences) for (const i of c.members) onClock.set(sessionHitches[i], c);
   for (const h of auto.slice(-5)) {
-    const tick = [...onClock].some((m) => m.at === h.at && m.frameMs === h.frameMs) ? `  ↻ ${P.periodText(cadence.periodMs)}` : '';
+    const c = [...onClock].find(([m]) => m.at === h.at && m.frameMs === h.frameMs)?.[1];
+    const tick = c ? `  ↻ ${P.periodText(c.periodMs)}` : '';
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}${tick}`);
   }
   const patterns = new Map();
@@ -289,9 +293,9 @@ if (cmd === 'report') {
         : `not attributed (${r.unattributed})`;
     console.log(`  ↻ hitches ${P.periodText(r.periodMs)} — timer-driven: ${r.occurrences}× ${r.frameMs.min}–${r.frameMs.max} ms over ${r.spanSec} s${gated ? ` (${gated})` : ''}${r.phase ? ` [${r.phase}]` : ''}; ${who}`);
   }
-  if (cadence && ![...patterns.values()].some((r) => Math.abs(r.periodMs - cadence.periodMs) <= Math.max(50, 0.02 * cadence.periodMs))) {
-    const ms = cadence.members.map((i) => sessionHitches[i].frameMs).sort((a, b) => a - b);
-    console.log(`  ↻ hitches ${P.periodText(cadence.periodMs)} — timer-driven: ${cadence.members.length}× ${ms[0]}–${ms.at(-1)} ms over ${(cadence.spanMs / 1000).toFixed(1)} s`);
+  for (const c of cadences) {
+    if ([...patterns.values()].some((r) => Math.abs(r.periodMs - c.periodMs) <= Math.max(50, 0.01 * c.periodMs) && (r.phase ?? '') === (c.phase ?? ''))) continue;
+    console.log(`  ↻ hitches ${P.periodText(c.periodMs)} — timer-driven: ${c.members.length}× ${c.msMin}–${c.msMax} ms over ${(c.spanMs / 1000).toFixed(1)} s${c.phase ? ` [${c.phase}]` : ''}`);
   }
   // A page that armed more than once in one attach session booted more than
   // once under the recorder (it navigated or reloaded itself): its load-phase

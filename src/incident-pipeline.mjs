@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold, hotLines } from './runs.js';
 import { createTickLog } from './ticks.js';
-import { findPeriod, periodText } from './periodic.js';
+import { findCadences, periodText } from './periodic.js';
 import { enclosingClasses, sharedNames, qualifiedName } from './qualify.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
@@ -528,7 +528,8 @@ export function createIncidentPipeline(opts) {
     writePattern(final);
   }
   function writePattern(final) {
-    const found = findPeriod(gatedRecent.map((g) => g.t));
+    // One kind of hitch at a time (periodic.js): a phase, a band of frame times.
+    const found = findCadences(gatedRecent.map((g) => ({ t: g.t, ms: g.frameMs, phase: g.phase })))[0];
     if (!found) return;
     const members = found.members.map((i) => gatedRecent[i]);
     const same = patternSaid && Math.abs(patternSaid.periodMs - found.periodMs) <= Math.max(50, 0.02 * found.periodMs);
