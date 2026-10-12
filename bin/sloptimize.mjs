@@ -66,7 +66,7 @@ function readLedger(limit = Infinity) {
 }
 
 if (cmd === 'report') {
-  const profile = readJson('profile.json');
+  let profile = readJson('profile.json');
   // 80 lines, not 20: heartbeats (1/min while a session is armed) share the
   // ledger and must not crowd the actual incidents out of the report window.
   const hitches = readLedger(80);
@@ -76,6 +76,15 @@ if (cmd === 'report') {
   const census = readJson('census.json');
   // The whole ledger, read once: conditions, rates, spans, memory and reboots all fold it.
   const ledger = readJsonl('perf.jsonl', Infinity);
+  // A session that armed and never drew a frame window (a window hidden or
+  // minimized for the whole run: rAF stops) writes no profile.json — or
+  // leaves an older session's there. Its load, phases and records are still
+  // the run; said as what happened, never "is the runtime running?".
+  const armed = ledger.filter((r) => r.type === 'armed' && r.session).at(-1);
+  if (armed && (!profile || (profile.session && profile.session !== armed.session && Date.parse(armed.at) > Date.parse(profile.at ?? 0)))
+    && !ledger.some((r) => r.type === 'profile' && r.session === armed.session)) {
+    profile = { type: 'profile', tier: 0, session: armed.session, at: armed.at, ...(armed.build ? { build: armed.build } : {}), noFrames: { url: armed.url, records: ledger.filter((r) => r.session === armed.session).length } };
+  }
   // The session's conditions (conditions.js): what every number below was
   // measured under — the display's refresh rate first among them.
   const C = await import('../src/conditions.js');
@@ -122,7 +131,9 @@ if (cmd === 'report') {
   // unattached runs, and nothing said not to.
   // Unless the host handed over its own frame timer (__sloptimizeFrame): then
   // the app's number, measured attached, is the one to set beside its own.
-  if (profile.tier === 0 && profile.frame?.bodyMs !== undefined) {
+  if (profile.noFrames) {
+    console.log(`  ⚠ the page recorded NO frames — the recorder armed at ${profile.at}${profile.noFrames.url ? ` (${profile.noFrames.url})` : ''} and logged ${profile.noFrames.records} records, but no frame window ever completed: a hidden or minimized window stops requestAnimationFrame. What it did log (phases, load, hitches) follows; frame figures need a visible window`);
+  } else if (profile.tier === 0 && profile.frame?.bodyMs !== undefined) {
     console.log(`  the app's own frame body (__sloptimizeFrame): median ${profile.frame.bodyMs}ms  mean ${fmt(profile.frame.bodyMeanMs, 'ms')}  p95 ${fmt(profile.frame.bodyP95Ms, 'ms')} over ${fmt(profile.frame.bodyFrames)} frames — the app's timer, read with the recorder attached: compare THIS with the app's unattached numbers; the rAF figures above are attached-only`);
   } else if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements (window.__sloptimizeFrame(bodyMs) once a frame hands over the app\'s own timer)');
   // three.js compiling with its synchronous error check on (its default):

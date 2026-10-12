@@ -37,3 +37,19 @@ test('report: the host\'s own frame timer replaces "never compare" with the numb
   const bare = runCli('report', '--dir', runDir());
   assert.match(bare, /never with the app's own frame timer .*__sloptimizeFrame\(bodyMs\)/);
 });
+
+test('a session that armed and drew no frames is said as that, with what it did log', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'slop-noframes-'));
+  writeFileSync(join(dir, 'perf.jsonl'), [
+    { type: 'armed', at: '2026-10-12T10:00:00Z', url: 'app://index.html', session: 'N', tier: 0 },
+    { type: 'phase-span', at: '2026-10-12T10:02:00Z', phase: 'load', span: 'x.1', ms: 120000, frames: 0, t0: 0, t1: 120000, next: 'play', session: 'N', tier: 0 },
+    { type: 'heartbeat', at: '2026-10-12T10:01:00Z', tier: 0, programs: 3, session: 'N' },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const out = runCli('report', '--dir', dir);
+  assert.doesNotMatch(out, /no profile\.json/);
+  assert.match(out, /⚠ the page recorded NO frames — the recorder armed at 2026-10-12T10:00:00Z \(app:\/\/index\.html\) and logged 3 records/);
+  assert.match(out, /phases: load 120000 ms/);
+});
