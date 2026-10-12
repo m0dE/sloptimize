@@ -57,7 +57,7 @@ function readLedger(limit = Infinity) {
   const asked = [...PHASES].join(',');
   const why = phases.length === 0
     ? `no record on this ledger carries a phase — tier 1 stamps one per frame, rec.frame({ phase }); a tier-0 page sets window.__sloptimizePhase = 'steady' (--phase ? reads the unstamped)`
-    : `no records in phase ${asked} — phases on this ledger: ${phases.map(([p, n]) => `${p} ×${n}`).join(', ')}${unphased ? `; ${unphased} records carry no phase (--phase ?)` : ''}`;
+    : `no records in phase ${asked} — phases on this ledger: ${phases.map(([p, n]) => `${p} ×${n}`).join(', ')}${unphased ? `; ${unphased} records from before the first phase was set (boot) or from a host that sets none (--phase ? reads them)` : ''}`;
   // --json: an empty match is data — the verb prints its usual empty shape
   // and the reason goes to stderr, where a parser of stdout never trips on it.
   if (json) { console.error(`sloptimize: ${why}`); return []; }
@@ -359,7 +359,7 @@ if (cmd === 'report') {
   const issues = buildIssues(readLedger(), { fixes: readJsonl('fixes.jsonl', Infinity) });
   if (issues.length) {
     console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
-    for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
+    for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase === '?' ? 'before first phase' : i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
   }
   if (census?.hints?.length) {
     console.log(`  census hints (${census.hints.length}):`);
@@ -400,7 +400,7 @@ if (cmd === 'issues') {
   for (const i of issues) {
     if (only && i.id !== only) continue;
     const rc = i.recurs ? `  ⟳ every ${i.recurs.periodSec.toFixed(1)}s ±${i.recurs.jitterSec}` : '';
-    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}${rc}`);
+    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase === '?' ? 'before first phase' : i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}${rc}`);
     if (only || issues.length <= 8) {
       console.log(`      key ${i.key}`);
       if (i.recurs) console.log(`      ⟳ recurs every ${i.recurs.periodSec.toFixed(1)} s ± ${i.recurs.jitterSec} (${i.recurs.occurrences} occurrences${i.recurs.missed ? `, ${i.recurs.missed} missed` : ''}${i.recurs.sessions > 1 ? ` across ${i.recurs.sessions} sessions` : ''}) — a timer, not a player action: look for setInterval / an autosave / a periodic flush`);

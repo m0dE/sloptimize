@@ -180,3 +180,42 @@ Every one of these is now read somewhere specific:
 - `__sloptimizeTick(tick, WorldDigest(...))` from both the main-thread and
   the worker sim makes SIM0 checkable with `sloptimize equivalence`.
 - `__sloptimizeFrame(bodyMs)` puts attached numbers beside the app's own.
+
+## Round 2: dmitriy's re-test of the branch
+
+Fixed:
+- **Fake cadences.** The detector found a "timer" in random hitch times 20
+  of 20 times. A load's reduced-rate frames read as `every 543 ms`, then
+  `1.07 s`, then `321 ms` on three runs, and a 2.6 s stall was lumped with
+  the 15 s autosave. Now:
+  - a cadence comes from one phase and one band of frame times;
+  - its pairs must beat chance by a wide margin;
+  - its members must chain one to three periods apart.
+
+  That gave 0 fakes in 3000 random trials, and the 3 s timer e2e is still
+  found and attributed.
+- **`update` in hitch lines.** Hitch lines are written mid-run and were
+  never qualified, and at stop the source was only fetched. That can fail
+  silently for app:// bundles and worker scripts. Now:
+  - sources are read through the debugger of the session the script ran in;
+  - the report names hitch lines from the run file;
+  - an unreadable source is said, not hidden.
+
+  Real Chromium: a blob: worker's `Agent.update` and `Spawner.update`.
+- **A run with no frames.** It is now said as "the page recorded NO frames —
+  a hidden or minimized window", followed by what the recorder logged.
+- **Culled cars flagged as ghosts.** The slot watch now counts stale slots
+  in the camera's view; stale slots all off screen are not an incident.
+  Real three.js: 20 on-screen ghosts are reported, 20 behind the camera are
+  not.
+- **Worker task is not a tick.** `__sloptimizeTickMs(ms)` is defined in
+  every sampled worker before it runs, and on the page. The game's marks are
+  preferred everywhere: `58 ms/tick × 13.2/s` for a 57 ms tick every 75 ms.
+- **Unphased.** Now displayed as "before first phase". The recorded phase
+  is unchanged, so old and new runs still compare.
+
+Not changed:
+- **One 380 ms restart.** It was intermittent; the tool flagged it itself
+  and it did not recur.
+- **The clock hook.** Game side.
+- **The double boot.** Documented, and handled by the harness.
