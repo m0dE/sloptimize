@@ -18,7 +18,7 @@ const scene = (...kids) => ({ isScene: true, visible: true, children: kids });
 const move = (mesh, from, to) => { for (let i = from; i < to; i++) mesh.instanceMatrix.array[i * 16 + 12] += 1; };
 
 test('slots the game stops writing go stale while the rest move; static meshes say nothing; a clear is said once', () => {
-  const w = createSlotWatch();
+  const w = createSlotWatch({ budgetMs: Infinity });   // the budget is its own test
   const m = cars(100), still = cars(50, 'rocks');
   w.observe(scene(m, still));
   let t = 0, rows = w.check(t);
@@ -47,7 +47,7 @@ test('slots the game stops writing go stale while the rest move; static meshes s
 });
 
 test('a paused game (nothing active) is not a finding and not a clear; hidden meshes are not drawn', () => {
-  const w = createSlotWatch();
+  const w = createSlotWatch({ budgetMs: Infinity });   // the budget is its own test
   const m = cars(10), hidden = cars(10, 'pool');
   hidden.visible = false;
   w.observe(scene(m, { visible: false, children: [cars(10, 'nested')] }, hidden));

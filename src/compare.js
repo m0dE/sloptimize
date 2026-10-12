@@ -72,7 +72,9 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
   // one 600-frame ring a minute. The fuller one wins.
   put('frame median ms', bucket?.frame?.medianMs ?? median(nums([...beats.map((b) => b.medianFrameMs), ...profiles.map((p) => p.frame?.medianMs)])));
   put('frame p95 ms', bucket?.frame?.p95Ms ?? median(nums([...beats.map((b) => b.p95Ms), ...profiles.map((p) => p.frame?.p95Ms)])));
-  put('frame body ms', median(nums(profiles.map((p) => p.frame?.bodyMs))));
+  // The host's own frame body: a tier-1 profile's, or a tier-0 run's
+  // __sloptimizeFrame — the number an unattached measurement can be set beside.
+  put('frame body ms', bucket?.frame?.bodyMs ?? median(nums(profiles.map((p) => p.frame?.bodyMs))));
   put('draw calls', bucket?.frame?.calls ?? median(nums(beats.map((b) => b.calls))));
   put('triangles', median(nums(beats.map((b) => b.triangles))));
   const times = records.map((r) => Date.parse(r.at)).filter(Number.isFinite);

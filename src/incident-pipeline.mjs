@@ -883,7 +883,7 @@ export function createIncidentPipeline(opts) {
       // The page's half — display cadence, device, GPU — merged into the
       // run's block and written whole. Not phase-stamped: a run's conditions
       // are the run's, and a --phase filter must not drop them.
-      for (const k of ['display', 'device', 'gpu']) if (rec[k] !== undefined) conditions[k] = rec[k];
+      for (const k of ['display', 'device', 'gpu', 'three']) if (rec[k] !== undefined) conditions[k] = rec[k];
       if (regime === 'unknown' && typeof rec.gpu === 'string' && rec.gpu) {
         regime = SOFTWARE_GPU.test(rec.gpu) ? 'software' : 'hardware';
         conditions.regime = regime;

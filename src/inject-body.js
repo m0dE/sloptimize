@@ -62,6 +62,17 @@ function died(kind, obj) {
 // three.js renderers, through the devtools hook (below): their own
 // renderer.info.memory is the engine's count of the same leak.
 const renderers = [];
+let threeRevision;
+/** three's own settings that change what a frame costs: `debug.checkShaderErrors`
+ *  (on by default) makes every link wait on a synchronous status read. */
+function readThree() {
+  for (const ref of renderers) {
+    const r = ref.deref?.();
+    const v = r?.debug?.checkShaderErrors;
+    if (typeof v === 'boolean') return { checkShaderErrors: v, ...(threeRevision ? { revision: threeRevision } : {}) };
+  }
+  return undefined;
+}
 
 // Per-frame graphics-API counters, reset at each rAF boundary.
 const gpu = { draws: 0, triangles: 0, creates: 0, uploadKB: 0 };
@@ -269,6 +280,7 @@ if (SLOTS_ON) try {
     hook = new EventTarget();
     globalThis.__THREE_DEVTOOLS__ = hook;
   }
+  hook.addEventListener('register', (e) => { try { if (typeof e.detail?.revision === 'string') threeRevision = e.detail.revision.slice(0, 12); } catch { /* not ours */ } });
   hook.addEventListener('observe', (e) => {
     try { if (e.detail?.isWebGLRenderer && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
     try { slotWatch.observe(e.detail); } catch { /* not ours to break */ }
@@ -458,12 +470,14 @@ function updateConditions() {
   const rec = { type: 'conditions', at: new Date().toISOString(), tier: 0 };
   if (display) rec.display = display;
   if (gpuName) rec.gpu = gpuName;
-  if (!rec.display && !rec.gpu) return;
+  const three = readThree();
+  if (three) rec.three = three;
+  if (!rec.display && !rec.gpu && !rec.three) return;
   // The device is read every window (a few property reads) so a resized
   // window or a moved-to-another-screen dpr lands in the run's block.
   try { rec.device = browserDevice(globalThis); } catch { /* no navigator */ }
   const d = rec.device ?? {};
-  const sig = JSON.stringify([rec.display?.refreshHz, rec.display?.cadence, rec.display?.confirmed, rec.gpu, d.vw, d.vh, d.dpr]);
+  const sig = JSON.stringify([rec.display?.refreshHz, rec.display?.cadence, rec.display?.confirmed, rec.gpu, d.vw, d.vh, d.dpr, rec.three?.checkShaderErrors]);
   if (sig === conditionsSent) return;
   conditionsSent = sig;
   emit(rec);
@@ -493,6 +507,24 @@ globalThis.__sloptimizeClock = function (name, t, perSecond = 1) {
   if (v < clockLast) clockReset = true;   // a new game, a reload: this window has no honest denominator
   clockLast = v;
 };
+
+// ── The host's own frame timer (SPEC §3.2b) ────────────────────────────────
+// `__sloptimizeFrame(ms)`, once a frame, with what the app's own timer read
+// for its frame body. An attached run's frame is a rAF interval —
+// vsync-quantized, recorder included — and can never be set beside the
+// app's own numbers; this one can. Per window: median, p95, mean.
+const bodies = [];
+globalThis.__sloptimizeFrame = function (ms) {
+  const v = Number(ms);
+  if (Number.isFinite(v) && v >= 0 && bodies.length < 4 * PROFILE_EVERY) bodies.push(v);
+};
+function takeBodies() {
+  if (!bodies.length) return undefined;
+  const s = bodies.splice(0).sort((a, b) => a - b);
+  let sum = 0;
+  for (const x of s) sum += x;
+  return { bodyMs: +s[s.length >> 1].toFixed(2), bodyP95Ms: +s[Math.min(s.length - 1, Math.floor(0.95 * s.length))].toFixed(2), bodyMeanMs: +(sum / s.length).toFixed(2), bodyFrames: s.length };
+}
 
 /** This window's counters (and clock advance), resetting both. */
 function takeCounters() {
@@ -602,7 +634,8 @@ function tick(ts) {
       // relative hitch bar recorded.
       // meanMs beside the median: a paced loop's median describes no frame.
       frame: { medianMs: +median.toFixed(2), meanMs: +(win.ms / win.frames).toFixed(2), p95Ms: p95 === undefined ? undefined : +p95.toFixed(2), maxMs: +win.max.toFixed(1),
-        ...(pacing ? { pacing: { lowMs: pacing.lowMs, highMs: pacing.highMs, every: pacing.every }, paced: pacedWin } : {}) },
+        ...(pacing ? { pacing: { lowMs: pacing.lowMs, highMs: pacing.highMs, every: pacing.every }, paced: pacedWin } : {}),
+        ...(takeBodies() ?? {}) },
       render: { calls: Math.round(win.draws / win.frames), triangles: Math.round(win.tris / win.frames), frames: win.frames },
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,

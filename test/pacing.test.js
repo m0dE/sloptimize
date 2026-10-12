@@ -49,3 +49,26 @@ test('tier 0: paced frames are not emitted as hitches; one pacing record; the pr
   assert.deepEqual(prof.frame.pacing, { lowMs: 5, highMs: 60, every: 3 });
   assert.equal(prof.frame.paced, 40, 'the window\'s long frames, absorbed by the pacing instead of filed as hitches');
 });
+
+test('tier 0: __sloptimizeFrame(ms) rides each profile as the body median/p95/mean; three\'s checkShaderErrors rides the conditions', async () => {
+  const rafs = [], emitted = [];
+  const ctx = { requestAnimationFrame: (cb) => rafs.push(cb), setInterval: () => 0, PerformanceObserver: class { observe() {} }, performance: { now: () => 0 },
+    location: { href: 'x' }, document: { addEventListener() {} }, navigator: {}, innerWidth: 800, innerHeight: 600, devicePixelRatio: 1,
+    __sloptimizeEmit: (j) => emitted.push(JSON.parse(j)), EventTarget, CustomEvent, WeakMap, WeakRef,
+    Uint8Array, Uint16Array, Float32Array, Error, JSON, Math, Float64Array, Date, String, Number, Array, Set, Object };
+  vm.createContext(ctx);
+  vm.runInContext(buildInjectScript(), ctx);
+  ctx.__THREE_DEVTOOLS__.dispatchEvent(new CustomEvent('register', { detail: { revision: '170' } }));
+  ctx.__THREE_DEVTOOLS__.dispatchEvent(new CustomEvent('observe', { detail: { isWebGLRenderer: true, debug: { checkShaderErrors: true } } }));
+  let ts = 0;
+  for (let f = 0; f < 241; f++) { ts += 16.7; ctx.__sloptimizeFrame(5 + (f % 10) / 10); const cb = rafs.pop(); rafs.length = 0; cb(ts); }
+  const prof = emitted.filter((e) => e.type === 'profile').at(-1);
+  assert.equal(prof.frame.bodyFrames, 120);
+  assert.ok(prof.frame.bodyMs >= 5 && prof.frame.bodyMs <= 6 && prof.frame.bodyP95Ms >= prof.frame.bodyMs);
+  const cond = emitted.filter((e) => e.type === 'conditions').at(-1);
+  assert.deepEqual(cond?.three, { checkShaderErrors: true, revision: '170' });
+  const { createRunFold } = await import('../src/runs.js');
+  const run = createRunFold({ session: 's' });
+  for (const p of emitted.filter((e) => e.type === 'profile')) run.addFrame(p);
+  assert.ok(run.toJSON().phases['?'].frame.bodyMs >= 5);
+});

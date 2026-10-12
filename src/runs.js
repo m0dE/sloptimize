@@ -35,7 +35,7 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], bodies: [], bodyP95s: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
 }
 /** A worker thread's share of a phase: the same sample fold, no frames —
  *  and its TASKS: a worker on its own loop has no frame to be "per". */
@@ -264,6 +264,8 @@ export function createRunFold(meta) {
     const b = bucket(rec.phase);
     if (typeof rec.frame?.medianMs === 'number') b.medians.push(rec.frame.medianMs);
     if (typeof rec.frame?.p95Ms === 'number') b.p95s.push(rec.frame.p95Ms);
+    // The host's own frame body (__sloptimizeFrame), beside the rAF interval.
+    if (typeof rec.frame?.bodyMs === 'number') { b.bodies.push(rec.frame.bodyMs); if (typeof rec.frame.bodyP95Ms === 'number') b.bodyP95s.push(rec.frame.bodyP95Ms); }
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
     if (typeof rec.frame?.maxMs === 'number' && !(b.maxMs >= rec.frame.maxMs)) b.maxMs = rec.frame.maxMs;
     foldTally(b.tally, rec);
@@ -305,6 +307,7 @@ export function createRunFold(meta) {
         p.frame = { windows: b.medians.length, medianMs: median(b.medians) };
         if (b.p95s.length) p.frame.p95Ms = median(b.p95s);
         if (b.calls.length) p.frame.calls = median(b.calls);
+        if (b.bodies.length) { p.frame.bodyMs = median(b.bodies); if (b.bodyP95s.length) p.frame.bodyP95Ms = median(b.bodyP95s); }
       }
       if (b.over) { p.seconds = +b.seconds.toFixed(3); p.over = b.over; }
       if (b.maxMs !== undefined) p.maxMs = b.maxMs;   // the phase's longest frame, every window counted

@@ -119,7 +119,17 @@ if (cmd === 'report') {
   // 60 Hz) and paying for the instrument. Fine for attached-vs-attached; a
   // field report compared it against the game's own frame timer and against
   // unattached runs, and nothing said not to.
-  if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements');
+  // Unless the host handed over its own frame timer (__sloptimizeFrame): then
+  // the app's number, measured attached, is the one to set beside its own.
+  if (profile.tier === 0 && profile.frame?.bodyMs !== undefined) {
+    console.log(`  the app's own frame body (__sloptimizeFrame): median ${profile.frame.bodyMs}ms  mean ${fmt(profile.frame.bodyMeanMs, 'ms')}  p95 ${fmt(profile.frame.bodyP95Ms, 'ms')} over ${fmt(profile.frame.bodyFrames)} frames — the app's timer, read with the recorder attached: compare THIS with the app's unattached numbers; the rAF figures above are attached-only`);
+  } else if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements (window.__sloptimizeFrame(bodyMs) once a frame hands over the app\'s own timer)');
+  // three.js compiling with its synchronous error check on (its default):
+  // shader-compile hitches then include a status read per link.
+  if (conds?.three?.checkShaderErrors === true) {
+    const compiles = ledger.filter((r) => r.type === 'hitch' && (!profile.session || r.session === profile.session) && r.classification?.[0]?.guess === 'shader-compile').length;
+    console.log(`  ⚠ three.js renderer.debug.checkShaderErrors is on${conds.three.revision ? ` (r${conds.three.revision})` : ''} — each program link waits on a synchronous status read, so compiles cannot overlap the frame${compiles ? `; the ${compiles} shader-compile hitch${compiles === 1 ? '' : 'es'} here include it` : ''}. It is three's default: a production build that sets it false does not pay this — measure with it off before reading compile hitches as the shipped cost`);
+  }
   const vsync = C.vsyncNote(conds, profile.frame?.medianMs);
   if (vsync) console.log(`  ${vsync}`);
   // The game's own throughput (SPEC §3.11), over its own clock when it gave one.

@@ -20,3 +20,20 @@ test('report: frame pacing once, with mean and p95 beside the median', () => {
   assert.match(out, /frame median 15\.4ms {2}mean 32\.8ms {2}p95 61ms/);
   assert.match(out, /frame pacing: alternating ~5\.2 \/ ~60\.4 ms frames \(1 long in 2\) — mean 32\.8 ms, p95 61 ms, median 15\.4 ms — .*not counted as hitches/);
 });
+
+test('report: three\'s checkShaderErrors on is said, with the compile hitches it inflates', () => {
+  const conds = { type: 'conditions', at: '2026-10-12T10:00:01Z', tier: 0, conditions: { instrument: 'attach', mode: 'timing', three: { checkShaderErrors: true, revision: '170' } } };
+  const compile = { type: 'hitch', at: '2026-10-12T10:00:05Z', frameMs: 140, medianMs: 16.7, classification: [{ guess: 'shader-compile', evidence: 'e' }], topFrames: [] };
+  const out = runCli('report', '--dir', runDir({ lines: [conds, compile] }));
+  assert.match(out, /⚠ three\.js renderer\.debug\.checkShaderErrors is on \(r170\) — .*the 1 shader-compile hitch here include it/);
+  const off = runCli('report', '--dir', runDir({ lines: [{ ...conds, conditions: { ...conds.conditions, three: { checkShaderErrors: false } } }] }));
+  assert.doesNotMatch(off, /checkShaderErrors is on/);
+});
+
+test('report: the host\'s own frame timer replaces "never compare" with the number that can be compared', () => {
+  const out = runCli('report', '--dir', runDir({ profile: { frame: { medianMs: 16.7, bodyMs: 6.1, bodyMeanMs: 6.4, bodyP95Ms: 9.2, bodyFrames: 120 } } }));
+  assert.match(out, /the app's own frame body \(__sloptimizeFrame\): median 6\.1ms {2}mean 6\.4ms {2}p95 9\.2ms over 120 frames — .*compare THIS with the app's unattached numbers/);
+  assert.doesNotMatch(out, /never with the app's own frame timer/);
+  const bare = runCli('report', '--dir', runDir());
+  assert.match(bare, /never with the app's own frame timer .*__sloptimizeFrame\(bodyMs\)/);
+});
