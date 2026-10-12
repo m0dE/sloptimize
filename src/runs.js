@@ -335,7 +335,26 @@ export function createRunFold(meta) {
   let recorder = null;
   function setRecorder(r) { recorder = r && typeof r === 'object' ? { ...r } : null; }
 
-  return { addProfile, addFrame, setConditions, setRecorder, toJSON, get empty() { return phases.size === 0; } };
+  /** Every function row the run holds, page and workers: [fn, url, line, col]. */
+  function fnRows() {
+    const out = [];
+    for (const b of phases.values()) {
+      for (const r of b.fns.values()) out.push([r.fn, r.url, r.line, r.col]);
+      for (const t of b.threads.values()) for (const r of t.fns.values()) out.push([r.fn, r.url, r.line, r.col]);
+    }
+    return out;
+  }
+  /** Rename functions in place (qualify.js): `name(fn, url, line, col)` → a
+   *  new name, or undefined to keep it. */
+  function renameFns(name) {
+    for (const b of phases.values()) {
+      for (const fns of [b.fns, ...[...b.threads.values()].map((t) => t.fns)]) {
+        for (const r of fns.values()) { const q = name(r.fn, r.url, r.line, r.col); if (q) r.fn = q; }
+      }
+    }
+  }
+
+  return { addProfile, addFrame, setConditions, setRecorder, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */

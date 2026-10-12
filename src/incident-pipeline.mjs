@@ -7,12 +7,14 @@
 // the .sloptimize/ files. attach.mjs drives it over a raw WebSocket;
 // sloptimize/electron drives it over webContents.debugger. Same records,
 // same files, same cluster identity either way.
-import { mkdirSync, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold, hotLines } from './runs.js';
 import { createTickLog } from './ticks.js';
 import { findPeriod, periodText } from './periodic.js';
+import { enclosingClasses, sharedNames, qualifiedName } from './qualify.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
  *  classification plus the top attributed frame (or creation-stack head);
@@ -713,8 +715,41 @@ export function createIncidentPipeline(opts) {
     try { resolveGated(true); } catch (e) { log(`hitch pattern not written: ${e?.message ?? e}`); }
     // The anchor goes too: a page left profiling pays for it.
     if (anchorTitle) { try { await send('Runtime.evaluate', { expression: `profileEnd(${JSON.stringify(anchorTitle)})`, includeCommandLineAPI: true, silent: true }); } catch { /* gone */ } }
+    // Same-named functions of one script, told apart (qualify.js) — after the
+    // measurement, so the source reads cost the run nothing.
+    if (opts.qualify !== false) { try { await qualifyFns(); } catch (e) { log(`function names not qualified: ${e?.message ?? e}`); } }
     run?.setRecorder(recorderJSON());
     writeRun(true);
+  }
+  /** A script's source: through the page (any scheme it can load, an app://
+   *  included), else from disk (file://) or over HTTP. Null when unreadable. */
+  async function sourceOf(url) {
+    const bounded = (p, ms) => { let t; return Promise.race([p, new Promise((r) => { t = setT(() => r(null), ms); t?.unref?.(); })]).finally(() => clearT(t)); };
+    try {
+      const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), 5000);
+      if (typeof r?.result?.value === 'string') return r.result.value;
+    } catch { /* the page is gone */ }
+    try {
+      if (url.startsWith('file:')) return readFileSync(fileURLToPath(url), 'utf8');
+      if (/^https?:/.test(url)) { const res = await bounded(fetch(url), 5000); if (res?.ok) return await res.text(); }
+    } catch { /* unreadable */ }
+    return null;
+  }
+  async function qualifyFns() {
+    if (!run) return;
+    const shared = sharedNames([run.fnRows()]);
+    if (!shared.size) return;
+    const names = new Map();   // `${url}\t${line}\t${col}\t${fn}` → qualified
+    let n = 0;
+    for (const [url, fns] of [...shared].slice(0, 20)) {
+      const rows = run.fnRows().filter(([fn, u]) => u === url && fns.has(fn));
+      const uniq = [...new Map(rows.map((r) => [`${r[2]}\t${r[3]}\t${r[0]}`, r])).values()];
+      const src = await sourceOf(url);
+      const cls = src ? enclosingClasses(src, uniq.map(([, , line, col]) => [line, col])) : uniq.map(() => null);
+      uniq.forEach(([fn, u, line, col], k) => { names.set(`${u}\t${line}\t${col}\t${fn}`, qualifiedName(fn, cls[k], line)); n++; });
+    }
+    run.renameFns((fn, url, line, col) => names.get(`${url}\t${line}\t${col}\t${fn}`));
+    if (n) log(`${n} same-named functions qualified by class or line (${[...shared.values()].flatMap((x) => [...x]).slice(0, 5).join(', ')}${shared.size > 5 ? ', …' : ''})`);
   }
   /** Stop/start the sampler; the chunk that ended. Re-arms the window: it
    *  measures UNREAD time. */
