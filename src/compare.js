@@ -122,7 +122,8 @@ export function runMetrics(session, records, run, phases = null, conditionLines 
   for (const t of bucket ? threadRows(bucket, m['frame median ms']) : []) {
     put(`thread ${t.name} busy %`, +(t.busy * 100).toFixed(1));
     if (t.perFrameMs !== undefined) put(`thread ${t.name} ms/frame`, t.perFrameMs);
-    if (taskReadable(t.task)) put(`thread ${t.name} ms/task`, t.task.meanMs);
+    if (t.tick) put(`thread ${t.name} ms/tick`, t.tick.meanMs);
+    else if (taskReadable(t.task)) put(`thread ${t.name} ms/task`, t.task.meanMs);
   }
   let fnShares;
   const js = bucket ? bucket.samples - bucket.program - bucket.gc : 0;

@@ -224,7 +224,7 @@ if (cmd === 'report') {
       const rows = T.threadRows(bucket, bucket.frame?.medianMs);
       if (rows.length) {
         // Main per frame; a worker per TASK — a worker on its own loop has no frame.
-        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : r.task ? `${T.taskText(r.task)} ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
+        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : ''}${r.tick ? `${r.perFrameMs !== undefined ? '· ' : ''}${T.tickText(r.tick)} (the game's marks) ` : r.task ? `${T.taskText(r.task)} ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
         const tickHz = ledger.filter((r) => r.type === 'sim' && r.session === profile.session && r.tickHz > 0).at(-1)?.tickHz;
         const v = T.threadVerdict(rows, { clockRate: T.clockRateOf(acc), tickHz });
         if (v) console.log(`    → ${v.text}`);

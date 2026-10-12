@@ -537,6 +537,25 @@ function takeBodies() {
   return { bodyMs: +s[s.length >> 1].toFixed(2), bodyP95Ms: +s[Math.min(s.length - 1, Math.floor(0.95 * s.length))].toFixed(2), bodyMeanMs: +(sum / s.length).toFixed(2), bodyFrames: s.length };
 }
 
+// ── Sim ticks (`__sloptimizeTickMs(ms)`) ───────────────────────────────────
+// Once per sim tick, with what the tick took. A sampled busy stretch is not
+// a tick (one task can run several); the game's mark is. The same function
+// is defined in every worker the attach samples (incident-pipeline.mjs).
+const simTicks = { n: 0, ms: 0, max: 0, hist: {} };
+globalThis.__sloptimizeTickMs = function (ms) {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return;
+  simTicks.n++; simTicks.ms += v; if (v > simTicks.max) simTicks.max = v;
+  const k = v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10;
+  simTicks.hist[k] = (simTicks.hist[k] ?? 0) + 1;
+};
+function takeSimTicks() {
+  if (!simTicks.n) return undefined;
+  const o = { n: simTicks.n, ms: +simTicks.ms.toFixed(2), maxMs: +simTicks.max.toFixed(2), hist: simTicks.hist };
+  simTicks.n = 0; simTicks.ms = 0; simTicks.max = 0; simTicks.hist = {};
+  return o;
+}
+
 /** This window's counters (and clock advance), resetting both. */
 function takeCounters() {
   if (!tally.size && clockName === undefined) return undefined;
@@ -651,6 +670,7 @@ function tick(ts) {
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       ...(takeCounters() ?? {}),
+      ...((() => { const t = takeSimTicks(); return t ? { ticks: t } : {}; })()),
       // The recorder's own in-page time this window: the instance-slot watch.
       ...(SLOTS_ON ? { recorder: { slotsMs: +slotsMsWin.toFixed(2), slotsEvery } } : {}),
       tier: 0 });

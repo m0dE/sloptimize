@@ -236,6 +236,15 @@ const EXPENSIVE_START_MS = 25;
 const ANCHOR_EVERY_MS = 5 * 60_000;
 /** A worker's sampler stop is given this long before its chunk is skipped. */
 const WORKER_STOP_MS = 3000;
+/** Defined in every sampled worker before it runs: `__sloptimizeTickMs(ms)`,
+ *  once per sim tick (the same as the page's, inject-body.js), and the
+ *  rotation's `__sloptimizeTakeTicks()`. */
+const WORKER_TICKS_SRC = `(() => { if (globalThis.__sloptimizeTickMs) return;
+  let b = { n: 0, ms: 0, max: 0, hist: {} };
+  globalThis.__sloptimizeTickMs = (ms) => { const v = Number(ms); if (!Number.isFinite(v) || v < 0) return;
+    b.n++; b.ms += v; if (v > b.max) b.max = v; const k = v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10; b.hist[k] = (b.hist[k] || 0) + 1; };
+  globalThis.__sloptimizeTakeTicks = () => { const o = { n: b.n, ms: b.ms, maxMs: b.max, hist: b.hist }; b = { n: 0, ms: 0, max: 0, hist: {} }; return o; };
+})()`;
 /** A clock mapping is kept only when both reads fell within this. */
 export const CLOCK_MAX_ERROR_MS = 10;
 /** Chunks held for slicing: a frame spans at most the chunk it ended in and
@@ -437,6 +446,8 @@ export function createIncidentPipeline(opts) {
     try {
       if (!WORKER_TYPES.has(targetInfo.type) || !profiling || closing) return;
       const to = (m, p) => sendTo(sessionId, m, p);
+      // Before its first instruction: the sim's tick marks have somewhere to go.
+      try { await to('Runtime.evaluate', { expression: WORKER_TICKS_SRC, silent: true }); } catch { /* marks unavailable */ }
       await to('Profiler.enable');
       await to('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
       // A worker's heap is walked on every profiler start too (header:
@@ -467,12 +478,16 @@ export function createIncidentPipeline(opts) {
       await Promise.all([...workers].map(async ([sid, w]) => {
         let tStop = 0, tStart = 0;
         const calls = [sendTo(sid, 'Profiler.stop').then((r) => { tStop = performance.now(); return r; }),
-          ...(final ? [] : [sendTo(sid, 'Profiler.start').then((r) => { tStart = performance.now(); return r; })])];
+          ...(final ? [] : [sendTo(sid, 'Profiler.start').then((r) => { tStart = performance.now(); return r; })]),
+          // The window's tick marks ride the same batch: no extra wait on the worker's task.
+          sendTo(sid, 'Runtime.evaluate', { expression: 'globalThis.__sloptimizeTakeTicks ? globalThis.__sloptimizeTakeTicks() : null', returnByValue: true, silent: true }).catch(() => null)];
         let timer;
         const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
         clearT(timer);
         const profile = res?.[0]?.profile;
         if (profile) foldChunk(profile, w.name, sid);
+        const marks = res?.at(-1)?.result?.value;
+        if (run && marks?.n > 0) run.addThreadTicks(pagePhase, w.name, marks);
         if (res && !final) {
           const ms = Math.max(0, tStart - tStop);
           if (ms > cost.maxWorkerRestartMs) cost.maxWorkerRestartMs = ms;

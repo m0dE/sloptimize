@@ -69,6 +69,19 @@ export function taskStats(tasks, wallMs, busy = 0) {
 /** Task figures a verb may read as one task's time: whole, resolved, unmerged. */
 export const taskReadable = (t) => !!t && !t.neverIdle && !t.coarse && !t.merged;
 
+/** The game's own tick marks (`__sloptimizeTickMs`, runs.js `ticks`):
+ *  count, ms a tick (mean, p50, p95), ticks a second. */
+export function tickStats(ticks, wallMs) {
+  if (!(ticks?.n > 0)) return undefined;
+  const hist = (ticks.hist instanceof Map ? [...ticks.hist] : Object.entries(ticks.hist ?? {}).map(([k, v]) => [+k, v])).sort((a, b) => a[0] - b[0]);
+  const at = (p) => { let seen = 0; for (const [k, c] of hist) { seen += c; if (seen >= p * ticks.n) return k; } return hist.at(-1)?.[0] ?? 0; };
+  return { n: ticks.n, meanMs: +(ticks.ms / ticks.n).toFixed(1), p50Ms: at(0.5), p95Ms: at(0.95), ...(wallMs > 0 ? { perSec: +(ticks.n / (wallMs / 1000)).toFixed(1) } : {}) };
+}
+/** "57 ms/tick (p95 64) × 17/s". */
+export function tickText(t) {
+  return `${t.p50Ms} ms/tick${t.p95Ms > t.p50Ms ? ` (p95 ${t.p95Ms})` : ''}${t.perSec !== undefined ? ` × ${t.perSec}/s` : ''}`;
+}
+
 /** A task stat in words: "57 ms/task (p95 61) × 14/s", "tasks ≤20 ms", "never idle". */
 export function taskText(t) {
   if (!t) return '';
@@ -92,8 +105,10 @@ export function threadRows(bucket, frameMs) {
     if (!(t.wallMs > 0)) return;
     const busy = Math.min(1, t.busyMs / t.wallMs);
     const task = name === 'main' ? undefined : taskStats(t.tasks, t.wallMs, busy);
+    // The game's own tick marks, when it sends them: the sim's real tick.
+    const tick = tickStats(t.ticks, t.wallMs);
     rows.push({ name, busy: r3(busy), busyMs: +t.busyMs.toFixed(1), wallMs: +t.wallMs.toFixed(1), ...(name === 'main' && frameMs > 0 ? { perFrameMs: +(busy * frameMs).toFixed(1) } : {}),
-      ...(task ? { task } : {}), ...(t.fns ? { fns: t.fns } : {}) });
+      ...(task ? { task } : {}), ...(tick ? { tick } : {}), ...(t.fns ? { fns: t.fns } : {}) });
   };
   row('main', bucket);
   const workers = [];
@@ -114,7 +129,7 @@ export function threadVerdict(rows, { clockRate, tickHz } = {}) {
   if (!main || !workers.length) return null;
   const top = workers[0];
   const pct = (x) => `${Math.round(x * 100)}%`;
-  const tasks = (r) => (r.task && !r.task.merged ? `, ${taskText(r.task)}` : '');
+  const tasks = (r) => (r.tick ? `, ${tickText(r.tick)}` : r.task && !r.task.merged ? `, ${taskText(r.task)}` : '');
   const clocked = typeof clockRate === 'number' && clockRate > 0;
   // Behind is behind, saturated or not: a sim whose tick outgrew its budget
   // falls behind with idle time between ticks.
@@ -132,9 +147,12 @@ export function threadVerdict(rows, { clockRate, tickHz } = {}) {
   // No clock: whether a decoupled sim keeps up is not in the samples. A
   // declared tick rate is the next best evidence.
   const budget = tickHz > 0 ? 1000 / tickHz : undefined;
-  const over = budget !== undefined ? workers.find((r) => taskReadable(r.task) && r.task.p50Ms > budget) : undefined;
+  // The game's tick marks first; a sampled task only when there are none.
+  const per = (r) => (r.tick ? { ms: r.tick.p50Ms, unit: 'tick' } : taskReadable(r.task) ? { ms: r.task.p50Ms, unit: 'task' } : null);
+  const over = budget !== undefined ? workers.find((r) => per(r)?.ms > budget) : undefined;
   if (over) {
-    return { verdict: 'over-tick', thread: over.name, text: `${over.name} takes ${over.task.p50Ms} ms a task against a ${+budget.toFixed(1)} ms tick (${tickHz} Hz) — it cannot keep real time unless a task carries several ticks; __sloptimizeClock('sim', …) settles it` };
+    const o = per(over);
+    return { verdict: 'over-tick', thread: over.name, text: `${over.name} takes ${o.ms} ms a ${o.unit} against a ${+budget.toFixed(1)} ms tick (${tickHz} Hz) — ${o.unit === 'tick' ? 'it cannot keep real time' : 'it cannot keep real time unless a task carries several ticks'}; __sloptimizeClock('sim', …) settles it` };
   }
   return { verdict: 'unjudged', text: `no thread saturated (main ${pct(main.busy)}, ${top.name} ${pct(top.busy)}${tasks(top)}) — cannot judge sim-behind: no __sloptimizeClock; a worker on its own loop can fall behind its clock with idle time to spare` };
 }
