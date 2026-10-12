@@ -909,6 +909,7 @@ if (cmd === 'timeline') {
       const d = st.delta === undefined ? '' : `${st.delta > 0 ? '+' : ''}${+st.delta.toFixed(2)}`;
       console.log(`  ${st.significant ? '◆' : '·'} ${st.sha.slice(0, 10)}  ${v.padStart(9)}  ${d.padStart(8)}  ${(st.subject ?? '').slice(0, 60)}${st.status ? `  [${st.status}]` : ''}`);
     }
+    if (t.warning) console.log(`  ⚠ ${t.warning}`);
     console.log(`  → ${t.shape.text}`);
     if (t.noise) console.log(`    noise floor ${t.noise.floor} (${t.noise.from}); ◆ = a step above it`);
     const sgn = (x) => `${x > 0 ? '+' : ''}${+x.toFixed(2)}`;
@@ -966,9 +967,13 @@ if (cmd === 'timeline') {
     try { git('checkout', '-q', '-f', original); console.log(`[timeline] restored ${original}`); }
     catch (e) { console.error(`sloptimize timeline: could not restore ${original}: ${String(e.stderr || e.message).trim()} — run git checkout ${original}`); }
   };
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
+  // A signal stops the loop BEFORE the session: closing it makes the run
+  // loop fail its step, and nothing may check out or launch the next one.
+  let stopping = false;
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (stopping) return; stopping = true; if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
   try {
     for (const sha of commits) {
+      if (stopping) break;
       const step = { sha, subject: git('log', '-1', '--format=%s', sha), date: git('log', '-1', '--format=%cI', sha), sessions: [] };
       saved.steps.push(step);
       const dirt = git('status', '--porcelain', '--untracked-files=no');
@@ -984,16 +989,18 @@ if (cmd === 'timeline') {
         step.buildS = +((Date.now() - t0) / 1000).toFixed(1);
         if (r.status !== 0) { step.status = 'build-failed'; console.log(`[timeline] ${sha.slice(0, 10)} build failed (exit ${r.status ?? r.signal}) — ${logPath}`); save(); continue; }
       }
-      for (let i = 0; i < runs; i++) {
+      for (let i = 0; i < runs && !stopping; i++) {
         try {
           session = await attach({ launch: launch ? fillExec(launch, { commit: sha }) : undefined, exec: execCmd, execVars: { commit: sha }, port: get('--port') ? Number(get('--port')) : undefined,
             dir: DIR, headless: args.includes('--headless'), build: sha.slice(0, 12), waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined,
             slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), drive: drivePath ?? TL.stepDrive({ settleS, measureS }), log: () => {} });
           await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
-          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
+          // Fully stopped (bounded) before the next commit: its run file holds the measured window.
+          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 60_000))]);
           step.sessions.push(session.session);
           console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}/${runs} — session ${session.session}  ${step.subject.slice(0, 60)}`);
         } catch (e) {
+          if (stopping) break;
           if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
           step.status = `run-failed: ${String(e?.message ?? e).slice(0, 160)}`;
           console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}: ${e?.message ?? e}`);
@@ -1094,7 +1101,8 @@ if (cmd === 'sweep') {
         }
         process.exit(4);
       }
-      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
+      // Fully stopped (bounded) before the next level: its run file holds the measured window.
+      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 60_000))]);
       live = null;
       level.sessions.push(session.session);
     }

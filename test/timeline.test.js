@@ -70,3 +70,14 @@ test('each step settles, then measures in the timeline phase', async () => {
   await stepDrive({ settleS: 2, measureS: 10 })({ phase: async (p) => calls.push(['phase', p]), wait: async (ms) => calls.push(['wait', ms]) });
   assert.deepEqual(calls, [['phase', 'timeline-settle'], ['wait', 2000], ['phase', 'timeline'], ['wait', 10000], ['phase', 'timeline-done']]);
 });
+
+test('a step without the default metric reads unmeasured — the timeline never silently falls back to the frame median', () => {
+  const steps = ['m1', 'm2', 'm3', 'm4'].map((sha, i) => ({ sha, sessions: [sha], busy: [i < 2 ? 2 : 8] }));
+  const all = steps.map((s) => session(s.sha, s.busy[0]));
+  delete all[1].file.phases[TIMELINE_PHASE].busyMs; delete all[1].file.phases[TIMELINE_PHASE].wallMs;   // one run's window unsampled
+  const t = timelineTable(steps.map((s) => ({ sha: s.sha, sessions: s.sessions })), all.flatMap((x) => x.records), all.map((x) => x.file));
+  assert.equal(t.metric, 'main busy ms/frame');
+  assert.match(t.steps[1].status, /no main busy ms\/frame in the measured window/);
+  assert.equal(t.shape.kind, 'cliff');
+  assert.equal(t.warning, undefined);
+});

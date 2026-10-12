@@ -208,3 +208,34 @@ test('with the camera known, stale slots are counted in view or out of it; all o
   assert.equal(footprintKey(by.seen), 'instance-slots|?|seen');
   assert.ok(footprintKey({ ...by.seen, inView: undefined }), 'no camera known: as before');
 });
+
+test('the camera is the one each scene was drawn with: not a post-processing quad\'s, not a mirror\'s nested render', () => {
+  const rafs = [], emitted = [];
+  const ctx = { requestAnimationFrame: (cb) => rafs.push(cb), setInterval: () => 0, PerformanceObserver: class { observe() {} }, performance: { now: () => 0 },
+    location: { href: 'x' }, document: { addEventListener() {} }, __sloptimizeEmit: (j) => emitted.push(JSON.parse(j)),
+    EventTarget, CustomEvent, WeakMap, WeakRef, Uint8Array, Uint16Array, Float32Array, Error, JSON, Math, Float64Array, Date, String, Number, Array, Set, Object };
+  vm.createContext(ctx);
+  vm.runInContext(buildInjectScript(), ctx);
+  const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const ortho = (s) => ({ isCamera: true, matrixWorldInverse: { elements: I }, projectionMatrix: { elements: [s, 0, 0, 0, 0, s, 0, 0, 0, 0, -2 / 99.9, 0, 0, 0, -100.1 / 99.9, 1] } });
+  const main = ortho(0.1);                 // sees x, y in [−10, 10]
+  const quadCam = ortho(1);                // a full-screen quad's [−1, 1] camera
+  const mirrorCam = ortho(1);
+  const m = cars(10, 'cars');
+  m.matrixWorld = { elements: I };
+  for (let i = 0; i < 10; i++) { m.instanceMatrix.array[i * 16 + 12] = i < 7 ? 0 : 5; m.instanceMatrix.array[i * 16 + 14] = -5; }   // 3 stale slots at x = 5: in the main view only
+  const world = scene(m);
+  const renderer = { isWebGLRenderer: true, render(sc, cam) { if (sc === world) this.render({ isScene: true, children: [] }, mirrorCam); } };   // a mirror renders inside the main render
+  ctx.__THREE_DEVTOOLS__.dispatchEvent(new CustomEvent('observe', { detail: world }));
+  ctx.__THREE_DEVTOOLS__.dispatchEvent(new CustomEvent('observe', { detail: renderer }));
+  let ts = 0;
+  for (let f = 0; f < 120 * (STALE_CHECKS + 3); f++) {
+    for (let i = 0; i < 7; i++) m.instanceMatrix.array[i * 16 + 13] += 0.01;
+    renderer.render(world, main);
+    renderer.render({ isMesh: true }, quadCam);   // the composer's last pass: a Mesh, not a Scene
+    ts += 16; const cb = rafs.pop(); rafs.length = 0; cb(ts);
+  }
+  const rec = emitted.filter((e) => e.type === 'instance-slots').at(-1);
+  assert.equal(rec?.stale, 3);
+  assert.equal(rec.inView, 3, 'judged against the main camera, not the quad\'s or the mirror\'s');
+});

@@ -63,17 +63,32 @@ function died(kind, obj) {
 // renderer.info.memory is the engine's count of the same leak.
 const renderers = [];
 let threeRevision;
-// The camera three's renderer last rendered with: the slot watch asks
-// whether a stale slot is on screen. The game's renderer instance is
-// wrapped (its own render, never the prototype) when the watch first runs.
-let lastCamera = null;
+// The camera each SCENE was last drawn with: the slot watch asks whether a
+// stale slot is on screen. The game's renderer instance is wrapped (its own
+// render, never the prototype) when the watch first runs. Only a Scene's
+// render counts (a post-processing pass's full-screen quad renders a Mesh
+// with an orthographic camera), and only the OUTERMOST call (a mirror or a
+// cube camera renders the scene again from inside the main render, with a
+// virtual camera). Held weakly: a disposed scene must not be kept alive.
+const sceneCamera = new WeakMap();   // scene → WeakRef(camera)
+let renderDepth = 0;
 function hookRender(r) {
   const orig = r?.render;
   if (typeof orig !== 'function' || orig.__sloptimize) return;
-  const w = function (scene, camera) { if (camera && camera.isCamera) lastCamera = camera; return orig.apply(this, arguments); };
+  const w = function (scene, camera) {
+    renderDepth++;
+    try { return orig.apply(this, arguments); }
+    finally {
+      renderDepth--;
+      if (renderDepth === 0 && scene && scene.isScene && camera && camera.isCamera && typeof WeakRef === 'function') {
+        try { sceneCamera.set(scene, new WeakRef(camera)); } catch { /* not ours to break */ }
+      }
+    }
+  };
   w.__sloptimize = true;
   r.render = w;
 }
+const cameraOf = (scene) => (scene ? sceneCamera.get(scene)?.deref?.() ?? null : null);
 /** three's own settings that change what a frame costs: `debug.checkShaderErrors`
  *  (on by default) makes every link wait on a synchronous status read. */
 function readThree() {
@@ -446,7 +461,12 @@ globalThis.__sloptimizeKnob = function (name, set) {
 };
 
 // Attach calls this as it stops: the last ticks and the open span are not lost.
-globalThis.__sloptimizeFlush = function () { flushTicks(); snapshotSpan(); };
+globalThis.__sloptimizeFlush = function () {
+  flushTicks(); snapshotSpan();
+  // The last window's sim tick marks (they otherwise ride the next profile record).
+  const t = takeSimTicks();
+  if (t) emit({ type: 'sim-ticks', at: new Date().toISOString(), ticks: t, tier: 0 });
+};
 
 /** The renderer the game's own context reports, once it has one. Read off
  *  the game's context, never a probe context of ours. */
@@ -546,7 +566,7 @@ globalThis.__sloptimizeTickMs = function (ms) {
   const v = Number(ms);
   if (!Number.isFinite(v) || v < 0) return;
   simTicks.n++; simTicks.ms += v; if (v > simTicks.max) simTicks.max = v;
-  const k = v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10;
+  const k = v < 10 ? Math.round(v * 10) / 10 : v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10;
   simTicks.hist[k] = (simTicks.hist[k] ?? 0) + 1;
 };
 function takeSimTicks() {
@@ -685,7 +705,7 @@ function tick(ts) {
     let rows = [];
     const t0 = performance.now();
     for (const ref of renderers) { try { hookRender(ref.deref?.()); } catch { /* not ours to break */ } }
-    try { rows = slotWatch.check(t0, lastCamera); } catch { /* a mesh we could not read */ }
+    try { rows = slotWatch.check(t0, cameraOf); } catch { /* a mesh we could not read */ }
     const ms = performance.now() - t0;
     slotsMsWin += ms;
     const share = ms / Math.max(1, slotsWinFrames * median);

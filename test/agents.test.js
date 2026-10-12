@@ -317,3 +317,16 @@ test('the game\'s own tick marks: a worker\'s __sloptimizeTickMs are taken at ea
   assert.match(threadVerdict(rows, { tickHz: 20 }).text, /worker\[sim\] takes 57 ms a tick against a 50 ms tick \(20 Hz\) — it cannot keep real time;/);
   assert.match(threadVerdict(rows).text, /57 ms\/tick \(p95 66\)/);
 });
+
+test('page tick marks still in the window at stop are flushed into the run', async () => {
+  const dir = tmp();
+  const send = async (m) => (m === 'Profiler.stop' ? { profile: chunk('draw', 300, 2000) } : {});
+  const p = createIncidentPipeline({ dir, send, log: () => {}, session: 'P', windowMs: 0 });
+  await p.start();
+  await p.onRecord({ type: 'sim-ticks', at: new Date().toISOString(), ticks: { n: 3, ms: 1.5, maxMs: 0.6, hist: { 0.4: 1, 0.5: 1, 0.6: 1 } }, tier: 0 });
+  await p.stop();
+  const run = JSON.parse(readFileSync(join(dir, 'runs', 'P.json'), 'utf8'));
+  const ph = Object.values(run.phases)[0];
+  assert.equal(ph.ticks.n, 3);
+  assert.equal(threadRows({ ...runBucket(run), threads: new Map([['w', { busyMs: 1, wallMs: 2, tasks: null, ticks: null }]]) })[0].tick.p50Ms, 0.5, 'sub-millisecond ticks keep a tenth of a ms');
+});

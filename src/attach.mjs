@@ -148,6 +148,23 @@ async function discoverTarget(port, fetchImpl = fetch) {
 // The whole process group is stopped at close: an Electron app is several
 // processes, and one left holding the port fails the next run.
 
+// Every process an attach started and has not yet stopped. Whatever ends
+// this process — a signal while an attach is still starting, a verb's own
+// process.exit — stops them on the way out: an --exec'd group is detached,
+// so the terminal's Ctrl-C never reaches it, and one left behind holds the
+// port the next run needs.
+const liveChildren = new Map();   // child → { group }
+let exitHooked = false;
+function trackChild(child, group) {
+  liveChildren.set(child, { group });
+  child.once('exit', () => { if (!group) liveChildren.delete(child); });
+  if (exitHooked) return;
+  exitHooked = true;
+  process.once('exit', () => {
+    for (const [c, { group: g }] of liveChildren) { try { if (g) process.kill(-c.pid, 'SIGTERM'); else c.kill('SIGTERM'); } catch { /* gone */ } }
+  });
+}
+
 /** The command with its placeholders filled; one with no value here is an error. */
 export const EXEC_VARS = ['port', 'tmp', 'value', 'commit'];
 export function fillExec(cmd, vars) {
@@ -205,6 +222,7 @@ export async function attach(opts = {}) {
     execTmp = /(?<!\$)\{tmp\}/.test(opts.exec) ? mkdtempSync(join(tmpdir(), 'sloptimize-exec-')) : null;
     const cmd = fillExec(opts.exec, { port, tmp: execTmp ?? undefined, ...(opts.execVars ?? {}) });
     child = spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    trackChild(child, process.platform !== 'win32');
     // The last of what it said, for the error when it dies before attaching.
     const keep = (b) => { execTail = (execTail + b.toString()).slice(-1500); };
     child.stdout.on('data', keep); child.stderr.on('data', keep);
@@ -218,6 +236,7 @@ export async function attach(opts = {}) {
     child = spawn(bin, [`--remote-debugging-port=${port}`, '--no-first-run',
       ...(opts.headless ? ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--enable-unsafe-swiftshader', '--use-angle=swiftshader'] : []),
       opts.launch], { stdio: 'ignore' });
+    trackChild(child, false);
     log(`launched ${bin} → ${opts.launch}`);
   }
 
@@ -247,7 +266,9 @@ export async function attach(opts = {}) {
       }
     }
     cleanup();
+    liveChildren.delete(child);
   }
+  let wsRef = null;   // the socket, once open: closed if what follows fails
   // Anything that fails from here on stops what was started: a launched
   // group left holding the port would be attached to by the next run.
   try {
@@ -267,6 +288,7 @@ export async function attach(opts = {}) {
   let browser;
   if (!opts.wsUrl) { try { browser = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json())?.Browser; } catch { /* unknown */ } }
   const ws = new WS(wsUrl);
+  wsRef = ws;
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let seq = 0;
   const pending = new Map();
@@ -364,5 +386,5 @@ export async function attach(opts = {}) {
     build: pipeline.build,
   };
   })();
-  } catch (e) { await killChild(); throw e; }
+  } catch (e) { try { wsRef?.close(); } catch { /* not open */ } await killChild(); throw e; }
 }

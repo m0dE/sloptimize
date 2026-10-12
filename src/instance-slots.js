@@ -141,13 +141,14 @@ export function createSlotWatch(opts = {}) {
    *  resumes on the next check: a scene of 100k nodes is a few checks'
    *  walk, never one long frame. True when a walk completed. */
   let walk = null;
+  const sceneOf = new WeakMap();   // mesh → its scene: the camera is the one that scene was drawn with
   function scanStep(t0) {
     if (!walk) {
       const stack = [];
       for (let k = scenes.length - 1; k >= 0; k--) {
         const root = scenes[k].deref ? scenes[k].deref() : scenes[k];
         if (!root) { scenes.splice(k, 1); continue; }
-        stack.push(root);
+        stack.push(root, root);   // flat pairs: node, then the scene it belongs to
       }
       walk = { stack, found: [] };
     }
@@ -155,11 +156,11 @@ export function createSlotWatch(opts = {}) {
     let n = 0;
     while (stack.length) {
       if ((++n & 1023) === 0 && clock() - t0 > budgetMs) return false;
-      const node = stack.pop();
+      const root = stack.pop(), node = stack.pop();
       if (!node || node.visible === false) continue;
-      if (node.isInstancedMesh) found.push(node);
+      if (node.isInstancedMesh) { found.push(node); sceneOf.set(node, root); }
       const kids = node.children;
-      if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i]);
+      if (kids) for (let i = 0; i < kids.length; i++) stack.push(kids[i], root);
     }
     meshes = found;
     walk = null;
@@ -233,8 +234,9 @@ export function createSlotWatch(opts = {}) {
     return null;
   }
 
-  /** `camera`: the one the scene was last rendered with, when known — stale
-   *  slots are then counted in view or out of it. */
+  /** `camera`: the camera a mesh's scene was last drawn with, when known —
+   *  a function of the scene, or one camera for all — and stale slots are
+   *  then counted in view or out of it. */
   function check(nowMs, camera) {
     const t0 = clock();
     // The scene walk is the expensive half: redone every fifth check, and
@@ -250,7 +252,7 @@ export function createSlotWatch(opts = {}) {
       const mesh = meshes[(cursor + done) % n];
       const st = state.get(mesh);
       if (st && st.quiet >= QUIET_CHECKS && st.skip++ % QUIET_EVERY !== 0) continue;
-      const row = visit(mesh, nowMs, camera);
+      const row = visit(mesh, nowMs, typeof camera === 'function' ? camera(sceneOf.get(mesh)) : camera);
       if (row) rows.push(row);
     }
     cursor = n ? (cursor + done) % n : 0;

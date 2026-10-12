@@ -57,7 +57,7 @@ function addTasks(into, t) {
 // A sampled "task" is a busy stretch between idle samples — one worker task
 // can run several sim ticks, and a field report read 84 ms/task × 5.6/s for
 // a sim stepping 57 ms × 17/s. The game's own mark is the tick. Kept as a
-// histogram: 1 ms buckets to 200 ms, 10 ms beyond.
+// histogram: 0.1 ms buckets to 10 ms, 1 ms to 200 ms, 10 ms beyond.
 export function emptyTicks() { return { n: 0, ms: 0, maxMs: 0, hist: new Map() }; }
 /** Fold `{n, ms, maxMs|max, hist}` (a page window, a worker's take, a run file's) into `into`. */
 export function addTicks(into, t) {
@@ -279,6 +279,8 @@ export function createRunFold(meta) {
     seen(atMs);
   }
 
+  /** The page's marked sim ticks outside a profile record (the last window, at stop). */
+  function addPageTicks(phase, t) { addTicks(bucket(phase).ticks, t); }
   /** A worker's marked sim ticks (`__sloptimizeTickMs`), taken at a rotation. */
   function addThreadTicks(phase, thread, t) {
     const pb = bucket(phase);
@@ -392,7 +394,7 @@ export function createRunFold(meta) {
     }
   }
 
-  return { addProfile, addFrame, addThreadTicks, setConditions, setRecorder, setQualify, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
+  return { addProfile, addFrame, addThreadTicks, addPageTicks, setConditions, setRecorder, setQualify, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */

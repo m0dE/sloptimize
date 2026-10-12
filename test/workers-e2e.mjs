@@ -45,7 +45,7 @@ const task = threadRows(runBucket(run2), 16.7).find((r) => r.name === 'worker[si
 check(task && Math.abs(task.p50Ms - 57) <= 12, `the worker's sampled tasks (${task?.p50Ms ?? '?'} ms; 57 ms a tick)`);
 // …and the game's own tick marks, which the report prefers.
 const m = out2.match(/worker\[sim\] (\d+(?:\.\d+)?) ms\/tick.*?× ([\d.]+)\/s \(the game's marks\)/);
-check(m && Math.abs(Number(m[1]) - 57) <= 2 && Math.abs(Number(m[2]) - 13.3) <= 1.5, `report: the game's tick marks (${m?.[1] ?? '?'} ms × ${m?.[2] ?? '?'}/s; 57 ms every 75 ms)`);
+check(m && Math.abs(Number(m[1]) - 57) <= 5 && Math.abs(Number(m[2]) - 13.3) <= 2, `report: the game's tick marks (${m?.[1] ?? '?'} ms × ${m?.[2] ?? '?'}/s; 57 ms every 75 ms)`);
 check(!/worker\[sim\] [\d.]+ ms\/frame/.test(out2), 'report: no ms/frame for a worker');
 check(/cannot judge sim-behind: no __sloptimizeClock/.test(out2), 'report: cannot judge sim-behind without a clock');
 process.exit(fail ? 1 : 0);

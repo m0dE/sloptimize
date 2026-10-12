@@ -242,7 +242,7 @@ const WORKER_STOP_MS = 3000;
 const WORKER_TICKS_SRC = `(() => { if (globalThis.__sloptimizeTickMs) return;
   let b = { n: 0, ms: 0, max: 0, hist: {} };
   globalThis.__sloptimizeTickMs = (ms) => { const v = Number(ms); if (!Number.isFinite(v) || v < 0) return;
-    b.n++; b.ms += v; if (v > b.max) b.max = v; const k = v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10; b.hist[k] = (b.hist[k] || 0) + 1; };
+    b.n++; b.ms += v; if (v > b.max) b.max = v; const k = v < 10 ? Math.round(v * 10) / 10 : v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10; b.hist[k] = (b.hist[k] || 0) + 1; };
   globalThis.__sloptimizeTakeTicks = () => { const o = { n: b.n, ms: b.ms, maxMs: b.max, hist: b.hist }; b = { n: 0, ms: 0, max: 0, hist: {} }; return o; };
 })()`;
 /** A clock mapping is kept only when both reads fell within this. */
@@ -362,7 +362,9 @@ export function createIncidentPipeline(opts) {
   function noteScripts(profile, sid) {
     for (const n of profile?.nodes ?? []) {
       const f = n.callFrame;
-      if (f?.url && f.scriptId && f.scriptId !== '0' && !scripts.has(f.url)) scripts.set(f.url, { scriptId: f.scriptId, sid });
+      // The latest sighting wins: attach reloads the page after the sampler
+      // starts, and the old document's script of the same URL is gone.
+      if (f?.url && f.scriptId && f.scriptId !== '0') scripts.set(f.url, { scriptId: f.scriptId, sid });
     }
   }
   function foldChunk(profile, thread, sid = null) {
@@ -768,9 +770,10 @@ export function createIncidentPipeline(opts) {
       const via = known.sid ? (m, p) => sendTo(known.sid, m, p) : send;
       try {
         if (!debuggerOn.has(known.sid ?? '')) {
+          // Marked first: whatever happens next, it is disabled at the end.
+          debuggerOn.add(known.sid ?? '');
           // Sent together: no `debugger;` statement may pause the app in between.
           await bounded(Promise.all([via('Debugger.enable'), via('Debugger.setSkipAllPauses', { skip: true })]), limitMs);
-          debuggerOn.add(known.sid ?? '');
         }
         const r = await bounded(via('Debugger.getScriptSource', { scriptId: known.scriptId }), limitMs);
         if (typeof r?.scriptSource === 'string' && r.scriptSource) {
@@ -800,7 +803,8 @@ export function createIncidentPipeline(opts) {
     finally {
       // Said in the run file: a report must not imply names it could not tell apart.
       run.setQualify({ shared: [...shared.values()].reduce((a, x) => a + x.size, 0), ...(unread.length ? { unread } : {}) });
-      for (const sid of debuggerOn) { try { await (sid ? sendTo(sid, 'Debugger.disable') : send('Debugger.disable')); } catch { /* gone */ } }
+      const bounded = (pr) => { let t; return Promise.race([pr, new Promise((r) => { t = setT(r, 1000); t?.unref?.(); })]).finally(() => clearT(t)); };
+      await Promise.all([...debuggerOn].map((sid) => bounded((sid ? sendTo(sid, 'Debugger.disable') : send('Debugger.disable')).catch(() => {}))));
       debuggerOn.clear();
     }
   }
@@ -976,11 +980,15 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') {
       clock = null; clockTries = 0; held.length = 0; edges.length = 0; reanchored = false;
       for (const g of gatedRecent) if (g.slice === undefined) g.slice = null;   // the old document's clock
+      // The old document's scripts are gone with it (workers keep theirs).
+      for (const [u, x] of scripts) if (!x.sid) scripts.delete(u);
+      for (const k of scriptStarts.keys()) if (k.startsWith(':')) scriptStarts.delete(k);
       // A navigation ends console-started profiles (measured: the first
       // restart after attach's reload walked a 400 MB heap, 1082 ms). The
       // main profile survives it, so anchoring the new document is cheap.
       if (profiling && !closing) await anchorPage();
     }
+    if (rec.type === 'sim-ticks') { if (rec.ticks) run?.addPageTicks(rec.phase ?? pagePhase, rec.ticks); return; }
     if (rec.type === 'ticks') {
       try { ticks().ticks(rec.entries); } catch (e) { log(`ticks not written: ${e?.message ?? e}`); }
       return;
