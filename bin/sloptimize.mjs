@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ============================================================
-// sloptimize CLI — report | check | census | history | compare | equivalence | sweep | touched | fix | doctor  (SPEC §8.1)
+// sloptimize CLI — report | check | census | history | compare | equivalence | sweep | timeline | touched | fix | doctor  (SPEC §8.1)
 // ============================================================
 // Files-first: every verb reads `.sloptimize/` in the cwd (or --dir) and
 // says what it cannot know instead of guessing. Exit codes are API:
@@ -9,6 +9,7 @@
 //   compare --fail-on-regression: 0 no significant regression · 1 regressed · 3 incomparable (incl. the machine changed) · 4 unmeasured · 5 too few runs to judge
 //   equivalence: 0 identical / within tolerance · 1 diverged / drifted · 3 refused: different seed, tick rate or save · 4 no tick log · 5 too few common ticks to judge
 //   sweep: 0 measured · 2 bad usage · 4 a level measured nothing
+//   timeline: 0 measured · 2 bad usage (or a dirty working tree) · 4 fewer than two commits measured
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -860,6 +861,125 @@ if (cmd === 'equivalence') {
   process.exit(code);
 }
 
+if (cmd === 'timeline') {
+  // A metric across commits (SPEC §3.19): check out each, build it, launch
+  // and attach it for the same settle-then-measure window, and read the
+  // result as a cliff, a staircase, drift or flat — with the per-step profile
+  // diff. `--show [id]` re-reads a saved timeline. The working tree is
+  // restored to where it was, whatever happens.
+  const TL = await import('../src/timeline.js');
+  const { readRuns } = await import('../src/runs.js');
+  const { mkdirSync, writeFileSync, openSync, closeSync } = await import('node:fs');
+  const { execFileSync, spawnSync } = await import('node:child_process');
+  const get = (flag) => { const i = args.indexOf(flag); return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : undefined; };
+  const tdir = join(DIR, 'timelines');
+  const print = (saved) => {
+    const ledger = readJsonl('perf.jsonl', Infinity);
+    const phases = PHASES ?? (saved.phases ? new Set(saved.phases) : null);
+    const t = TL.timelineTable(saved.steps, ledger, readRuns(DIR), { metric: get('--metric') ?? saved.metric, phases, conditionLines: ledger.filter((r) => r.type === 'conditions') });
+    if (json) { out({ ...saved, table: t }); return t; }
+    console.log(`timeline ${saved.id}: ${saved.steps.length} commits · ${t.metric}${phases ? ` in phase ${[...phases].join(',')}` : ''} · ${saved.runs} run${saved.runs === 1 ? '' : 's'} a commit${saved.measureS ? `, ${saved.settleS}s settle + ${saved.measureS}s measured` : ''}`);
+    for (const st of t.steps) {
+      const v = st.value === undefined ? '—' : String(st.value);
+      const d = st.delta === undefined ? '' : `${st.delta > 0 ? '+' : ''}${+st.delta.toFixed(2)}`;
+      console.log(`  ${st.significant ? '◆' : '·'} ${st.sha.slice(0, 10)}  ${v.padStart(9)}  ${d.padStart(8)}  ${(st.subject ?? '').slice(0, 60)}${st.status ? `  [${st.status}]` : ''}`);
+    }
+    console.log(`  → ${t.shape.text}`);
+    if (t.noise) console.log(`    noise floor ${t.noise.floor} (${t.noise.from}); ◆ = a step above it`);
+    const sgn = (x) => `${x > 0 ? '+' : ''}${+x.toFixed(2)}`;
+    for (const [sha, d] of Object.entries(t.diffs ?? {})) {
+      if (d.fns?.length) console.log(`    at ${sha.slice(0, 10)} moved most (ms/frame): ${d.fns.map((r) => `${r.fn} ${sgn(r.total)} incl.${Math.abs(r.self) >= 0.01 ? ` / ${sgn(r.self)} self` : ''}`).join(' · ')}`);
+      if (d.other?.length) console.log(`    at ${sha.slice(0, 10)} also: ${d.other.map((r) => `${r.metric} ${r.a} → ${r.b}`).join(' · ')}`);
+    }
+    return t;
+  };
+  if (args.includes('--show')) {
+    let files = [];
+    try { files = readdirSync(tdir).filter((f) => f.endsWith('.json')).sort(); } catch { /* none */ }
+    const want = get('--show');
+    const f = want ? files.find((x) => x === `${want}.json`) : files.at(-1);
+    if (!f) { out({ error: 'no timeline' }, `no timeline${want ? ` ${want}` : ''} under ${tdir} — run one: sloptimize timeline --range A..B --build-cmd "<cmd>" --launch <url>`); process.exit(4); }
+    print(JSON.parse(readFileSync(join(tdir, f), 'utf8')));
+    process.exit(0);
+  }
+  const repo = get('--repo') ?? '.';
+  const git = (...a) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const usage = 'sloptimize timeline --commits a,b,c | --range A..B [--every N] [--build-cmd "<cmd {commit}>"] --launch <url> | --exec "<cmd {port} {tmp} {commit}>" [--runs 1] [--settle 5] [--duration 20] [--metric "<name>"] [--drive <script> [--phase p]] [--repo <dir>]';
+  let commits;
+  try {
+    if (get('--commits')) commits = get('--commits').split(',').map((c) => git('rev-parse', '--verify', `${c.trim()}^{commit}`));
+    else if (get('--range')?.includes('..')) {
+      const [a, b] = get('--range').split('..');
+      commits = [git('rev-parse', '--verify', `${a}^{commit}`), ...git('rev-list', '--reverse', `${a}..${b}`).split('\n').filter(Boolean)];
+    }
+  } catch (e) { console.error(`sloptimize timeline: ${String(e.stderr || e.message).trim().split('\n')[0]}`); process.exit(2); }
+  const every = get('--every') !== undefined ? Number(get('--every')) : 1;
+  if (!(Number.isInteger(every) && every >= 1)) { console.error('sloptimize timeline: --every takes a count ≥ 1'); process.exit(2); }
+  if (commits && every > 1) commits = commits.filter((_, i, all) => i % every === 0 || i === all.length - 1);
+  if (!commits || commits.length < 2) { console.error(`sloptimize timeline: two or more commits are needed — ${usage}`); process.exit(2); }
+  const launch = get('--launch'), execCmd = get('--exec'), buildCmd = get('--build-cmd');
+  if (!launch === !execCmd) { console.error(`sloptimize timeline: one of --launch <url> or --exec "<cmd>" starts each commit — ${usage}`); process.exit(2); }
+  const nums = (flag, dflt, ok) => { const v = get(flag); if (v === undefined) return dflt; const n = Number(v); if (!ok(n)) { console.error(`sloptimize timeline: ${flag} ${v} is not valid`); process.exit(2); } return n; };
+  const runs = nums('--runs', 1, (n) => Number.isInteger(n) && n >= 1);
+  const settleS = nums('--settle', 5, (n) => n >= 0);
+  const measureS = nums('--duration', 20, (n) => n > 0);
+  // A checkout must not throw away work: tracked changes refuse the run.
+  if (git('status', '--porcelain', '--untracked-files=no')) { console.error('sloptimize timeline: the working tree has uncommitted changes — commit or stash them first (each step checks out a commit)'); process.exit(2); }
+  let original;
+  try { original = git('symbolic-ref', '-q', '--short', 'HEAD'); } catch { original = git('rev-parse', 'HEAD'); }
+  const { attach, fillExec } = await import('../src/attach.mjs');
+  const drivePath = get('--drive');
+  const id = new Date().toISOString().replace(/[:.]/g, '-');
+  const saved = { type: 'timeline', v: 1, id, repo, runs, ...(drivePath ? { drive: drivePath } : { settleS, measureS, phases: [TL.TIMELINE_PHASE] }),
+    ...(get('--metric') ? { metric: get('--metric') } : {}), ...(buildCmd ? { buildCmd } : {}), launch: launch ?? undefined, exec: execCmd ?? undefined, steps: [] };
+  const save = () => { mkdirSync(tdir, { recursive: true }); writeFileSync(join(tdir, `${id}.json`), JSON.stringify(saved, null, 2)); };
+  let session = null, restored = false;
+  const restore = () => {
+    if (restored) return; restored = true;
+    try { git('checkout', '-q', original); console.log(`[timeline] restored ${original}`); }
+    catch (e) { console.error(`sloptimize timeline: could not restore ${original}: ${String(e.stderr || e.message).trim()} — run git checkout ${original}`); }
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
+  try {
+    for (const sha of commits) {
+      const step = { sha, subject: git('log', '-1', '--format=%s', sha), date: git('log', '-1', '--format=%cI', sha), sessions: [] };
+      saved.steps.push(step);
+      git('checkout', '-q', '--detach', sha);
+      if (buildCmd) {
+        mkdirSync(join(tdir, id), { recursive: true });
+        const logPath = join(tdir, id, `${sha.slice(0, 12)}.build.log`);
+        const fd = openSync(logPath, 'w');
+        const t0 = Date.now();
+        const r = spawnSync(fillExec(buildCmd, { commit: sha }), { shell: true, cwd: repo, stdio: ['ignore', fd, fd] });
+        closeSync(fd);
+        step.buildS = +((Date.now() - t0) / 1000).toFixed(1);
+        if (r.status !== 0) { step.status = 'build-failed'; console.log(`[timeline] ${sha.slice(0, 10)} build failed (exit ${r.status ?? r.signal}) — ${logPath}`); save(); continue; }
+      }
+      for (let i = 0; i < runs; i++) {
+        try {
+          session = await attach({ launch: launch ? fillExec(launch, { commit: sha }) : undefined, exec: execCmd, execVars: { commit: sha }, port: get('--port') ? Number(get('--port')) : undefined,
+            dir: DIR, headless: args.includes('--headless'), build: sha.slice(0, 12), waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined,
+            slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), drive: drivePath ?? TL.stepDrive({ settleS, measureS }), log: () => {} });
+          await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
+          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+          step.sessions.push(session.session);
+          console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}/${runs} — session ${session.session}  ${step.subject.slice(0, 60)}`);
+        } catch (e) {
+          if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
+          step.status = `run-failed: ${String(e?.message ?? e).slice(0, 160)}`;
+          console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}: ${e?.message ?? e}`);
+          break;
+        } finally { session = null; }
+      }
+      save();
+    }
+  } finally { restore(); }
+  save();
+  const t = print(saved);
+  if (!json) console.log(`  saved: ${join(tdir, `${id}.json`)} — re-read with sloptimize timeline --show ${id}`);
+  process.exit(t.shape.kind === 'unmeasured' ? 4 : 0);
+}
+
 if (cmd === 'sweep') {
   // Cost against N (SPEC §3.17): each level of a game knob in its own attached
   // session, every metric of the `sweep` phase against N, with a fitted
@@ -1254,5 +1374,5 @@ if (cmd === 'attach') {
   process.exit(0);
 }
 
-console.log('usage: sloptimize <report|issues|check|census|history|compare|equivalence|sweep|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url> | --exec "<cmd with {port} {tmp}>"] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--no-workers] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize equivalence <A> <B> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]] [--json]   (A/B: a build, a session or a ticks/*.jsonl; exit 0 identical · 1 diverged · 3 different sim · 4 no ticks · 5 too few ticks)\n       sloptimize sweep --knob <name> --values a,b,c --launch <url>|--exec "<cmd with {port} {tmp} {value}>"|--port N [--runs 2] [--settle 5] [--duration 20] [--build <id>] [--frame-budget 16.7] | sweep --show [id]\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
+console.log('usage: sloptimize <report|issues|check|census|history|compare|equivalence|sweep|timeline|touched|fix|doctor|hook-status|watch|attach|ask|serve> [--json] [--dir <path>]... [--phase a,b] [--counters-only] [--interval <s>] [--min-hitch-ms N] [--launch <url> | --exec "<cmd with {port} {tmp}>"] [--port N] [--wait <s>] [--headless] [--build <id>] [--min-share 0.1] [--no-slots] [--no-workers] [--runs N --duration <s>] [--coverage] [--drive <script.mjs>] [--heap-gc] [--heap-snapshots]\n       sloptimize check [--session <id> | --build <id>] [--min-runs N] [--allow-unmeasured] [--counters-only]   (exit 0 pass · 1 breach · 2 bad budgets · 3 incomparable · 4 unmeasured · 5 cannot judge)\n       sloptimize fix --title "…" [--issue "…"] [--solution "…"] [--commit sha] [--files a,b] [--footprints id,id] [--before <build|ISO..ISO>] [--after <build|ISO..ISO>] [--push]\n       sloptimize compare <A> <B> [--phase a,b] [--allow-mismatch] [--fail-on-regression [--min-runs 3]] [--json]      (A/B: a build, a session, <ISO>..<ISO>, or a comma list; exit 3 when measured under different conditions)\n       sloptimize equivalence <A> <B> [--ticks N] [--tolerant [--tolerance 0.02] [--window 60]] [--json]   (A/B: a build, a session or a ticks/*.jsonl; exit 0 identical · 1 diverged · 3 different sim · 4 no ticks · 5 too few ticks)\n       sloptimize sweep --knob <name> --values a,b,c --launch <url>|--exec "<cmd with {port} {tmp} {value}>"|--port N [--runs 2] [--settle 5] [--duration 20] [--build <id>] [--frame-budget 16.7] | sweep --show [id]\n       sloptimize timeline --commits a,b,c | --range A..B [--every N] [--build-cmd "<cmd {commit}>"] --launch <url>|--exec "<cmd {port} {tmp} {commit}>" [--runs 1] [--settle 5] [--duration 20] [--metric <name>] [--repo <dir>] | timeline --show [id]   (a cliff, a staircase, drift or flat, with the per-step profile diff)\n       sloptimize coverage [--session <id> | --build <id>] [--changed a.js,b.ts | --since <rev>] [--map <bundle.map>] [--repo <dir>] [--top N] [--all]   (record with attach --coverage)\n       sloptimize touched [--changed a.js,b.ts | --since <rev>] [--build <id> | --session <id>] [--map <bundle.map>[,…]] [--phase a,b]\n       sloptimize ask <profile|capture <s>|cpuprofile <s> [--map <file.map>]|eval <js>> [--timeout <s>]\n       sloptimize serve [--port 4390] [--static <dir>] [--repo <dir>] [--dir <ledger>]\n       sloptimize issues [--json] [--from ISO] [--to ISO] [--phase a,b] [--fp <id>] [--all] [--cloud [--preset 24h|7d|30d] [--source s] [--kind k] [--key k] [--endpoint url]]');
 process.exit(2);
