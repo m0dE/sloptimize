@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { mintSession } from './cloud-sink.js';
 import { createRunFold, hotLines } from './runs.js';
 import { createTickLog } from './ticks.js';
-import { findPeriod, periodText } from './periodic.js';
+import { findCadences, periodText } from './periodic.js';
 import { enclosingClasses, sharedNames, qualifiedName } from './qualify.js';
 
 /** M-A1 — incident identity. One CAUSE investigates once: cluster key is the
@@ -236,6 +236,15 @@ const EXPENSIVE_START_MS = 25;
 const ANCHOR_EVERY_MS = 5 * 60_000;
 /** A worker's sampler stop is given this long before its chunk is skipped. */
 const WORKER_STOP_MS = 3000;
+/** Defined in every sampled worker before it runs: `__sloptimizeTickMs(ms)`,
+ *  once per sim tick (the same as the page's, inject-body.js), and the
+ *  rotation's `__sloptimizeTakeTicks()`. */
+const WORKER_TICKS_SRC = `(() => { if (globalThis.__sloptimizeTickMs) return;
+  let b = { n: 0, ms: 0, max: 0, hist: {} };
+  globalThis.__sloptimizeTickMs = (ms) => { const v = Number(ms); if (!Number.isFinite(v) || v < 0) return;
+    b.n++; b.ms += v; if (v > b.max) b.max = v; const k = v < 10 ? Math.round(v * 10) / 10 : v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10; b.hist[k] = (b.hist[k] || 0) + 1; };
+  globalThis.__sloptimizeTakeTicks = () => { const o = { n: b.n, ms: b.ms, maxMs: b.max, hist: b.hist }; b = { n: 0, ms: 0, max: 0, hist: {} }; return o; };
+})()`;
 /** A clock mapping is kept only when both reads fell within this. */
 export const CLOCK_MAX_ERROR_MS = 10;
 /** Chunks held for slicing: a frame spans at most the chunk it ended in and
@@ -345,8 +354,22 @@ export function createIncidentPipeline(opts) {
    *  edge (a rotation waits out the page's task: one per edge put the record
    *  chain a frame behind per edge). Otherwise, the whole chunk to the phase
    *  the page was last heard in (≤ one window misfiled at an edge). */
-  function foldChunk(profile, thread) {
+  // Which script each sampled URL is, and on which session (a worker's own):
+  // its source is read through the debugger at stop (qualify.js), which
+  // reaches app:// bundles and worker scripts a fetch cannot.
+  const scripts = new Map();   // url → { scriptId, sid }
+  const scriptStarts = new Map();   // `${sid}:${scriptId}` → [line, column]
+  function noteScripts(profile, sid) {
+    for (const n of profile?.nodes ?? []) {
+      const f = n.callFrame;
+      // The latest sighting wins: attach reloads the page after the sampler
+      // starts, and the old document's script of the same URL is gone.
+      if (f?.url && f.scriptId && f.scriptId !== '0') scripts.set(f.url, { scriptId: f.scriptId, sid });
+    }
+  }
+  function foldChunk(profile, thread, sid = null) {
     if (!run || !profile) return;
+    noteScripts(profile, sid);
     if (!clock || !edges.length || !Array.isArray(profile.samples) || typeof profile.startTime !== 'number') {
       run.addProfile(profile, pagePhase, now(), thread);
     } else {
@@ -425,6 +448,8 @@ export function createIncidentPipeline(opts) {
     try {
       if (!WORKER_TYPES.has(targetInfo.type) || !profiling || closing) return;
       const to = (m, p) => sendTo(sessionId, m, p);
+      // Before its first instruction: the sim's tick marks have somewhere to go.
+      try { await to('Runtime.evaluate', { expression: WORKER_TICKS_SRC, silent: true }); } catch { /* marks unavailable */ }
       await to('Profiler.enable');
       await to('Profiler.setSamplingInterval', { interval: samplingIntervalUs });
       // A worker's heap is walked on every profiler start too (header:
@@ -455,12 +480,16 @@ export function createIncidentPipeline(opts) {
       await Promise.all([...workers].map(async ([sid, w]) => {
         let tStop = 0, tStart = 0;
         const calls = [sendTo(sid, 'Profiler.stop').then((r) => { tStop = performance.now(); return r; }),
-          ...(final ? [] : [sendTo(sid, 'Profiler.start').then((r) => { tStart = performance.now(); return r; })])];
+          ...(final ? [] : [sendTo(sid, 'Profiler.start').then((r) => { tStart = performance.now(); return r; })]),
+          // The window's tick marks ride the same batch: no extra wait on the worker's task.
+          sendTo(sid, 'Runtime.evaluate', { expression: 'globalThis.__sloptimizeTakeTicks ? globalThis.__sloptimizeTakeTicks() : null', returnByValue: true, silent: true }).catch(() => null)];
         let timer;
         const res = await Promise.race([Promise.all(calls), new Promise((r) => { timer = setT(() => r(null), WORKER_STOP_MS); timer?.unref?.(); })]).catch(() => null);
         clearT(timer);
         const profile = res?.[0]?.profile;
-        if (profile) foldChunk(profile, w.name);
+        if (profile) foldChunk(profile, w.name, sid);
+        const marks = res?.at(-1)?.result?.value;
+        if (run && marks?.n > 0) run.addThreadTicks(pagePhase, w.name, marks);
         if (res && !final) {
           const ms = Math.max(0, tStart - tStop);
           if (ms > cost.maxWorkerRestartMs) cost.maxWorkerRestartMs = ms;
@@ -528,7 +557,8 @@ export function createIncidentPipeline(opts) {
     writePattern(final);
   }
   function writePattern(final) {
-    const found = findPeriod(gatedRecent.map((g) => g.t));
+    // One kind of hitch at a time (periodic.js): a phase, a band of frame times.
+    const found = findCadences(gatedRecent.map((g) => ({ t: g.t, ms: g.frameMs, phase: g.phase })))[0];
     if (!found) return;
     const members = found.members.map((i) => gatedRecent[i]);
     const same = patternSaid && Math.abs(patternSaid.periodMs - found.periodMs) <= Math.max(50, 0.02 * found.periodMs);
@@ -575,7 +605,12 @@ export function createIncidentPipeline(opts) {
   // same URLs, a few frames of counts — must not be read as the new one's.
   const scriptCtx = new Map();   // scriptId → executionContextId
   let mainFrame = null, docCtx = null;
-  function onEvent(method, params) {
+  function onEvent(method, params, sessionId) {
+    // Where each script starts in its document (an inline <script> counts
+    // its lines from the page's top): qualify lines its source up by it.
+    if (method === 'Debugger.scriptParsed' && params?.scriptId && (params.startLine || params.startColumn)) {
+      scriptStarts.set(`${sessionId ?? ''}:${params.scriptId}`, [params.startLine ?? 0, params.startColumn ?? 0]);
+    }
     if (sendTo && method === 'Target.attachedToTarget' && params?.sessionId) { void attachWorker(params); return; }
     if (sendTo && method === 'Target.detachedFromTarget' && params?.sessionId) { workers.delete(params.sessionId); return; }
     if (method === 'HeapProfiler.addHeapSnapshotChunk' && snapshot && typeof params?.chunk === 'string') {
@@ -726,8 +761,28 @@ export function createIncidentPipeline(opts) {
   }
   /** A script's source: through the page (any scheme it can load, an app://
    *  included), else from disk (file://) or over HTTP. Null when unreadable. */
+  const debuggerOn = new Set();   // sessions whose Debugger qualify enabled ('' = the page)
   async function sourceOf(url, limitMs = 2000) {
     const bounded = (p, ms) => { let t; return Promise.race([p, new Promise((r) => { t = setT(() => r(null), ms); t?.unref?.(); })]).finally(() => clearT(t)); };
+    // The script itself, through the debugger of the session it ran in.
+    const known = scripts.get(url);
+    if (known) {
+      const via = known.sid ? (m, p) => sendTo(known.sid, m, p) : send;
+      try {
+        if (!debuggerOn.has(known.sid ?? '')) {
+          // Marked first: whatever happens next, it is disabled at the end.
+          debuggerOn.add(known.sid ?? '');
+          // Sent together: no `debugger;` statement may pause the app in between.
+          await bounded(Promise.all([via('Debugger.enable'), via('Debugger.setSkipAllPauses', { skip: true })]), limitMs);
+        }
+        const r = await bounded(via('Debugger.getScriptSource', { scriptId: known.scriptId }), limitMs);
+        if (typeof r?.scriptSource === 'string' && r.scriptSource) {
+          // Positions are the document's: pad an inline script to where it starts.
+          const [line, col] = scriptStarts.get(`${known.sid ?? ''}:${known.scriptId}`) ?? [0, 0];
+          return '\n'.repeat(line) + ' '.repeat(col) + r.scriptSource;
+        }
+      } catch { /* not this way */ }
+    }
     try {
       const r = await bounded(send('Runtime.evaluate', { expression: `fetch(${JSON.stringify(url)}).then((r) => (r.ok ? r.text() : null)).catch(() => null)`, awaitPromise: true, returnByValue: true }), limitMs);
       if (typeof r?.result?.value === 'string') return r.result.value;
@@ -743,12 +798,24 @@ export function createIncidentPipeline(opts) {
     if (!run) return false;
     const shared = sharedNames([run.fnRows()]);
     if (!shared.size) return false;
+    const unread = [];
+    try { return await qualifyShared(shared, deadline, unread); }
+    finally {
+      // Said in the run file: a report must not imply names it could not tell apart.
+      run.setQualify({ shared: [...shared.values()].reduce((a, x) => a + x.size, 0), ...(unread.length ? { unread } : {}) });
+      const bounded = (pr) => { let t; return Promise.race([pr, new Promise((r) => { t = setT(r, 1000); t?.unref?.(); })]).finally(() => clearT(t)); };
+      await Promise.all([...debuggerOn].map((sid) => bounded((sid ? sendTo(sid, 'Debugger.disable') : send('Debugger.disable')).catch(() => {}))));
+      debuggerOn.clear();
+    }
+  }
+  async function qualifyShared(shared, deadline, unread) {
     const names = new Map();   // `${url}\t${line}\t${col}\t${fn}` → qualified
     let n = 0;
     for (const [url, fns] of [...shared].slice(0, 20)) {
       const rows = run.fnRows().filter(([fn, u]) => u === url && fns.has(fn));
       const uniq = [...new Map(rows.map((r) => [`${r[2]}\t${r[3]}\t${r[0]}`, r])).values()];
       const src = Date.now() < deadline ? await sourceOf(url, Math.max(200, Math.min(2000, deadline - Date.now()))) : null;
+      if (!src) unread.push(url.split('/').pop().replace(/[?#].*$/, '').slice(0, 80));
       const cls = src ? enclosingClasses(src, uniq.map(([, , line, col]) => [line, col])) : uniq.map(() => null);
       uniq.forEach(([fn, u, line, col], k) => { names.set(`${u}\t${line}\t${col}\t${fn}`, qualifiedName(fn, cls[k], line)); n++; });
     }
@@ -913,11 +980,15 @@ export function createIncidentPipeline(opts) {
     if (rec.type === 'armed') {
       clock = null; clockTries = 0; held.length = 0; edges.length = 0; reanchored = false;
       for (const g of gatedRecent) if (g.slice === undefined) g.slice = null;   // the old document's clock
+      // The old document's scripts are gone with it (workers keep theirs).
+      for (const [u, x] of scripts) if (!x.sid) scripts.delete(u);
+      for (const k of scriptStarts.keys()) if (k.startsWith(':')) scriptStarts.delete(k);
       // A navigation ends console-started profiles (measured: the first
       // restart after attach's reload walked a 400 MB heap, 1082 ms). The
       // main profile survives it, so anchoring the new document is cheap.
       if (profiling && !closing) await anchorPage();
     }
+    if (rec.type === 'sim-ticks') { if (rec.ticks) run?.addPageTicks(rec.phase ?? pagePhase, rec.ticks); return; }
     if (rec.type === 'ticks') {
       try { ticks().ticks(rec.entries); } catch (e) { log(`ticks not written: ${e?.message ?? e}`); }
       return;

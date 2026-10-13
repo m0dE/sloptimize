@@ -218,6 +218,7 @@ that timer over, so the two are read side by side (SPEC §3.20):
 
 ```js
 window.__sloptimizeFrame(bodyMs);   // once a frame: what the app's own timer read
+self.__sloptimizeTickMs(ms);        // once a sim tick, page or Worker: what the tick took
 ```
 
 A one-off phase — a load, a level transition — is timed as a span from the

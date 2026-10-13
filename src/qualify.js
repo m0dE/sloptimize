@@ -147,3 +147,33 @@ export function sharedNames(rowsList) {
 export function qualifiedName(fn, cls, line0) {
   return cls ? `${cls}.${fn}` : `${fn}:${line0 + 1}`;
 }
+
+/**
+ * The run file's qualified names, for records written DURING the run (a
+ * hitch's `topFrames`, a pattern's): those name a function as V8 did —
+ * `update` at `index.js:85941` — and the run file, qualified at stop, knows
+ * it as `Car.update`. Keyed by bare name and `file:line` as topFrames write
+ * them; a key two qualified names claim is left alone.
+ * @returns {(fn:string, urlLine:string) => string}
+ */
+export function namerFromRun(run) {
+  const names = new Map(), clash = new Set();
+  const visit = (rows) => {
+    for (const [fn, url, line] of rows ?? []) {
+      if (typeof fn !== 'string' || !url) continue;
+      const bare = /^[^.:]+:\d+$/.test(fn) ? fn.slice(0, fn.indexOf(':')) : fn.includes('.') ? fn.slice(fn.lastIndexOf('.') + 1) : null;
+      if (!bare || bare === fn) continue;
+      const k = `${bare}\t${String(url).split('/').slice(-1)[0]}:${line + 1}`;
+      if (names.has(k) && names.get(k) !== fn) clash.add(k);
+      names.set(k, fn);
+    }
+  };
+  for (const p of Object.values(run?.phases ?? {})) {
+    visit(p.fns);
+    for (const t of Object.values(p.threads ?? {})) visit(t.fns);
+  }
+  return (fn, urlLine) => {
+    const k = `${fn}\t${urlLine}`;
+    return (!clash.has(k) && names.get(k)) || fn;
+  };
+}

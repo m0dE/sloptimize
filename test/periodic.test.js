@@ -85,3 +85,36 @@ test('report: the pattern line with its pooled cause, and ↻ on the hitches tha
   const bare = runCli('report', '--dir', runDir({ lines: hitches }));
   assert.match(bare, /↻ hitches every 15\.0 s — timer-driven: 5× 74–76 ms over 60\.0 s/);
 });
+
+test('a cadence must beat chance: random hitches, a load\'s irregular frames and a crowd never read as timer-driven', async () => {
+  const { findCadences } = await import('../src/periodic.js');
+  let seed = 5; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  let fake = 0;
+  for (const [n, span] of [[300, 120000], [150, 60000], [40, 60000], [12, 60000]]) {
+    for (let k = 0; k < 100; k++) if (findPeriod(Array.from({ length: n }, () => rnd() * span))) fake++;
+  }
+  assert.equal(fake, 0, 'the first version found a "period" in 20 of 20 random sets');
+  // A load's reduced-rate frames: 300 long frames at irregular strides.
+  let t = 0; const load = [];
+  for (let k = 0; k < 300; k++) { t += [33, 50, 66, 83][Math.floor(rnd() * 4)]; load.push({ t, ms: 55 + rnd() * 10, phase: 'load' }); }
+  assert.deepEqual(findCadences(load), []);
+});
+
+test('one kind of hitch per cadence: a 2.6 s stall is not an occurrence of the 75 ms autosave, and phases are apart', async () => {
+  const { findCadences } = await import('../src/periodic.js');
+  const ev = [{ t: 2600, ms: 2631, phase: 'play' }, ...[1, 2, 3, 4, 5].map((k) => ({ t: 15000 * k + (k % 2) * 20, ms: 70 + k, phase: 'play' })),
+    ...[1, 2, 3, 4, 5, 6].map((k) => ({ t: 1000 * k, ms: 40, phase: 'load' }))];   // four alone are not enough to beat chance
+  const c = findCadences(ev);
+  assert.equal(c.length, 2);
+  const play = c.find((x) => x.phase === 'play');
+  assert.ok(Math.abs(play.periodMs - 15000) <= 20);
+  assert.deepEqual([play.members.length, play.msMin, play.msMax], [5, 71, 75]);
+  assert.equal(c.find((x) => x.phase === 'load').periodMs, 1000);
+});
+
+test('one timer whose frames snap to 50 and 66.7 ms by turns is one kind of hitch', async () => {
+  const { findCadences } = await import('../src/periodic.js');
+  const ev = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => ({ t: 3000 * k + (k % 3) * 4, ms: k % 2 ? 66.7 : 50 }));
+  const [c] = findCadences(ev);
+  assert.equal(c?.members.length, 8);
+});

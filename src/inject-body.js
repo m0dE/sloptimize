@@ -63,6 +63,32 @@ function died(kind, obj) {
 // renderer.info.memory is the engine's count of the same leak.
 const renderers = [];
 let threeRevision;
+// The camera each SCENE was last drawn with: the slot watch asks whether a
+// stale slot is on screen. The game's renderer instance is wrapped (its own
+// render, never the prototype) when the watch first runs. Only a Scene's
+// render counts (a post-processing pass's full-screen quad renders a Mesh
+// with an orthographic camera), and only the OUTERMOST call (a mirror or a
+// cube camera renders the scene again from inside the main render, with a
+// virtual camera). Held weakly: a disposed scene must not be kept alive.
+const sceneCamera = new WeakMap();   // scene → WeakRef(camera)
+let renderDepth = 0;
+function hookRender(r) {
+  const orig = r?.render;
+  if (typeof orig !== 'function' || orig.__sloptimize) return;
+  const w = function (scene, camera) {
+    renderDepth++;
+    try { return orig.apply(this, arguments); }
+    finally {
+      renderDepth--;
+      if (renderDepth === 0 && scene && scene.isScene && camera && camera.isCamera && typeof WeakRef === 'function') {
+        try { sceneCamera.set(scene, new WeakRef(camera)); } catch { /* not ours to break */ }
+      }
+    }
+  };
+  w.__sloptimize = true;
+  r.render = w;
+}
+const cameraOf = (scene) => (scene ? sceneCamera.get(scene)?.deref?.() ?? null : null);
 /** three's own settings that change what a frame costs: `debug.checkShaderErrors`
  *  (on by default) makes every link wait on a synchronous status read. */
 function readThree() {
@@ -282,7 +308,7 @@ if (SLOTS_ON) try {
   }
   hook.addEventListener('register', (e) => { try { if (typeof e.detail?.revision === 'string') threeRevision = e.detail.revision.slice(0, 12); } catch { /* not ours */ } });
   hook.addEventListener('observe', (e) => {
-    try { if (e.detail?.isWebGLRenderer && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
+    try { if ((e.detail?.isWebGLRenderer || e.detail?.isWebGPURenderer) && renderers.length < 4 && typeof WeakRef === 'function') renderers.push(new WeakRef(e.detail)); } catch { /* not ours to break */ }
     try { slotWatch.observe(e.detail); } catch { /* not ours to break */ }
   });
 } catch { /* no EventTarget: no scenes, nothing else changes */ }
@@ -435,7 +461,12 @@ globalThis.__sloptimizeKnob = function (name, set) {
 };
 
 // Attach calls this as it stops: the last ticks and the open span are not lost.
-globalThis.__sloptimizeFlush = function () { flushTicks(); snapshotSpan(); };
+globalThis.__sloptimizeFlush = function () {
+  flushTicks(); snapshotSpan();
+  // The last window's sim tick marks (they otherwise ride the next profile record).
+  const t = takeSimTicks();
+  if (t) emit({ type: 'sim-ticks', at: new Date().toISOString(), ticks: t, tier: 0 });
+};
 
 /** The renderer the game's own context reports, once it has one. Read off
  *  the game's context, never a probe context of ours. */
@@ -524,6 +555,25 @@ function takeBodies() {
   let sum = 0;
   for (const x of s) sum += x;
   return { bodyMs: +s[s.length >> 1].toFixed(2), bodyP95Ms: +s[Math.min(s.length - 1, Math.floor(0.95 * s.length))].toFixed(2), bodyMeanMs: +(sum / s.length).toFixed(2), bodyFrames: s.length };
+}
+
+// ── Sim ticks (`__sloptimizeTickMs(ms)`) ───────────────────────────────────
+// Once per sim tick, with what the tick took. A sampled busy stretch is not
+// a tick (one task can run several); the game's mark is. The same function
+// is defined in every worker the attach samples (incident-pipeline.mjs).
+const simTicks = { n: 0, ms: 0, max: 0, hist: {} };
+globalThis.__sloptimizeTickMs = function (ms) {
+  const v = Number(ms);
+  if (!Number.isFinite(v) || v < 0) return;
+  simTicks.n++; simTicks.ms += v; if (v > simTicks.max) simTicks.max = v;
+  const k = v < 10 ? Math.round(v * 10) / 10 : v < 200 ? Math.round(v) : 200 + Math.round((v - 200) / 10) * 10;
+  simTicks.hist[k] = (simTicks.hist[k] ?? 0) + 1;
+};
+function takeSimTicks() {
+  if (!simTicks.n) return undefined;
+  const o = { n: simTicks.n, ms: +simTicks.ms.toFixed(2), maxMs: +simTicks.max.toFixed(2), hist: simTicks.hist };
+  simTicks.n = 0; simTicks.ms = 0; simTicks.max = 0; simTicks.hist = {};
+  return o;
 }
 
 /** This window's counters (and clock advance), resetting both. */
@@ -640,6 +690,7 @@ function tick(ts) {
       // `seconds` is visible time: a hidden page re-seeds the clock and draws none.
       window: { frames: win.frames, seconds: +(win.ms / 1000).toFixed(3) }, over,
       ...(takeCounters() ?? {}),
+      ...((() => { const t = takeSimTicks(); return t ? { ticks: t } : {}; })()),
       // The recorder's own in-page time this window: the instance-slot watch.
       ...(SLOTS_ON ? { recorder: { slotsMs: +slotsMsWin.toFixed(2), slotsEvery } } : {}),
       tier: 0 });
@@ -653,7 +704,8 @@ function tick(ts) {
   if (SLOTS_ON && --slotsDue <= 0) {
     let rows = [];
     const t0 = performance.now();
-    try { rows = slotWatch.check(t0); } catch { /* a mesh we could not read */ }
+    for (const ref of renderers) { try { hookRender(ref.deref?.()); } catch { /* not ours to break */ } }
+    try { rows = slotWatch.check(t0, cameraOf); } catch { /* a mesh we could not read */ }
     const ms = performance.now() - t0;
     slotsMsWin += ms;
     const share = ms / Math.max(1, slotsWinFrames * median);

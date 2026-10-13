@@ -250,7 +250,7 @@ test('workers: auto-attached paused, sampled, released — and anything else rel
   p.onEvent('Target.attachedToTarget', { sessionId: 'w1', targetInfo: { type: 'worker', title: 'sim', url: 'blob:x/123' }, waitingForDebugger: true });
   p.onEvent('Target.attachedToTarget', { sessionId: 'f1', targetInfo: { type: 'iframe', url: 'https://ads' }, waitingForDebugger: true });
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(toWorker.filter(([s]) => s === 'w1').map(([, m]) => m), ['Profiler.enable', 'Profiler.setSamplingInterval', 'Runtime.evaluate', 'Profiler.start', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger']);
+  assert.deepEqual(toWorker.filter(([s]) => s === 'w1').map(([, m]) => m), ['Runtime.evaluate', 'Profiler.enable', 'Profiler.setSamplingInterval', 'Runtime.evaluate', 'Profiler.start', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger']);
   assert.deepEqual(toWorker.filter(([s]) => s === 'f1').map(([, m]) => m), ['Runtime.runIfWaitingForDebugger'], 'an iframe is released, never profiled');
   await p.stop();
   const run = JSON.parse(readFileSync(join(dir, 'runs', 'W.json'), 'utf8'));
@@ -293,3 +293,40 @@ test('sweep --show --json keeps each level\'s sessions', () => {
   assert.deepEqual(j.measured.map((l) => l.value), [1000, 3000]);
 });
 
+
+test('the game\'s own tick marks: a worker\'s __sloptimizeTickMs are taken at each rotation, and read as ms/tick over the sampled tasks', async () => {
+  const dir = tmp();
+  let evals = 0;
+  const marks = { n: 34, ms: 34 * 57, maxMs: 66, hist: { 55: 10, 57: 14, 60: 8, 66: 2 } };
+  const sendTo = async (sid, m, p) => {
+    if (m === 'Profiler.stop') return { profile: ticking('stepAgents', 80, 180, 2000) };   // sampled: 84-ish ms "tasks" of several ticks
+    if (m === 'Runtime.evaluate' && /^globalThis.__sloptimizeTakeTicks/.test(p?.expression ?? '')) { evals++; return { result: { value: marks } }; }
+    return {};
+  };
+  const send = async (m) => (m === 'Profiler.stop' ? { profile: chunk('draw', 300, 2000) } : {});
+  const p = createIncidentPipeline({ dir, send, sendTo, log: () => {}, session: 'T', windowMs: 0 });
+  await p.start();
+  p.onEvent('Target.attachedToTarget', { sessionId: 'w1', targetInfo: { type: 'worker', title: 'sim' }, waitingForDebugger: true });
+  await new Promise((r) => setTimeout(r, 10));
+  await p.stop();
+  assert.equal(evals, 1);
+  const run = JSON.parse(readFileSync(join(dir, 'runs', 'T.json'), 'utf8'));
+  const rows = threadRows(runBucket(run), 16.7);
+  const w = rows.find((r) => r.name === 'worker[sim]');
+  assert.deepEqual([w.tick.n, w.tick.p50Ms, w.tick.p95Ms], [34, 57, 66]);
+  assert.match(threadVerdict(rows, { tickHz: 20 }).text, /worker\[sim\] takes 57 ms a tick against a 50 ms tick \(20 Hz\) — it cannot keep real time;/);
+  assert.match(threadVerdict(rows).text, /57 ms\/tick \(p95 66\)/);
+});
+
+test('page tick marks still in the window at stop are flushed into the run', async () => {
+  const dir = tmp();
+  const send = async (m) => (m === 'Profiler.stop' ? { profile: chunk('draw', 300, 2000) } : {});
+  const p = createIncidentPipeline({ dir, send, log: () => {}, session: 'P', windowMs: 0 });
+  await p.start();
+  await p.onRecord({ type: 'sim-ticks', at: new Date().toISOString(), ticks: { n: 3, ms: 1.5, maxMs: 0.6, hist: { 0.4: 1, 0.5: 1, 0.6: 1 } }, tier: 0 });
+  await p.stop();
+  const run = JSON.parse(readFileSync(join(dir, 'runs', 'P.json'), 'utf8'));
+  const ph = Object.values(run.phases)[0];
+  assert.equal(ph.ticks.n, 3);
+  assert.equal(threadRows({ ...runBucket(run), threads: new Map([['w', { busyMs: 1, wallMs: 2, tasks: null, ticks: null }]]) })[0].tick.p50Ms, 0.5, 'sub-millisecond ticks keep a tenth of a ms');
+});

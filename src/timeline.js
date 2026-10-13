@@ -104,15 +104,20 @@ const r3 = (x) => +x.toFixed(3);
 export function timelineTable(steps, records, runFiles, { metric, phases = new Set([TIMELINE_PHASE]), conditionLines = [] } = {}) {
   const per = steps.map((st) => ({ sha: st.sha, subject: st.subject, status: st.status,
     runs: (st.sessions ?? []).map((s) => stepMetrics(s, records, runFiles.find((f) => f.session === s), phases, conditionLines)) }));
-  // The metric: asked for, else the best default every measured step has.
-  const has = (k) => per.filter((p) => p.runs.length).every((p) => p.runs.some((r) => typeof r.metrics[k] === 'number'));
-  metric ??= DEFAULT_METRICS.find(has) ?? 'frame median ms';
+  // The metric: asked for, else the best default most measured steps have —
+  // a step that lacks it reads unmeasured, never a silent switch to a
+  // metric that cannot see the change (a vsync-quantized frame median).
+  const ran = per.filter((p) => p.runs.length);
+  const has = (k) => ran.filter((p) => p.runs.some((r) => typeof r.metrics[k] === 'number')).length;
+  const chosen = metric === undefined;
+  metric ??= DEFAULT_METRICS.find((k) => has(k) >= Math.max(2, ran.length / 2)) ?? 'frame median ms';
   for (const p of per) {
     p.vals = p.runs.map((r) => r.metrics[metric]).filter((v) => typeof v === 'number');
     p.value = p.vals.length ? r3(median(p.vals)) : undefined;
   }
   const measured = per.filter((p) => p.value !== undefined);
-  const out = { metric, steps: per.map((p) => ({ sha: p.sha, subject: p.subject, ...(p.status ? { status: p.status } : {}), value: p.value, runs: p.vals.length })) };
+  const out = { metric, steps: per.map((p) => ({ sha: p.sha, subject: p.subject, ...(p.status ? { status: p.status } : p.runs.length && p.value === undefined ? { status: `no ${metric} in the measured window` } : {}), value: p.value, runs: p.vals.length })) };
+  if (chosen && metric === 'frame median ms') out.warning = 'no step had sampled main-thread work or the app\'s frame timer — this is the rAF frame median, vsync-quantized: work that stays under one refresh period does not move it';
   if (measured.length < 2) return { ...out, shape: { kind: 'unmeasured', text: `${measured.length} of ${per.length} commits measured ${metric} — nothing to read a shape from` } };
   // Steps between MEASURED neighbours: a commit that failed to build is skipped over.
   const deltas = [];

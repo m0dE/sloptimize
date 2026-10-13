@@ -150,8 +150,14 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   hitch (below the floor, or in the cooldown) and, at each window roll,
   cuts its frame out of the chunks just stopped — no rotation of its own —
   keeping the few samples detached from the chunk. When the newest 240
-  gated hitches hold a period (periodic.js: the spacing most of them share
-  with a neighbour, within 2% or 50 ms; ≥4 members spanning ≥3 periods),
+  gated hitches hold a period (periodic.js, `findCadences`: within ONE
+  phase and one band of frame times — split at a 1.3× gap wider than two
+  frames; the pairs one period apart must beat the chance expectation
+  n·2·tol/T by 4σ + 1.5, tol a frame or 0.3% of the period; members must
+  chain one to three periods apart; ≥4 spanning ≥3 periods. The first
+  version had none of these and found a "timer" in 20 of 20 sets of random
+  hitch times; a load's reduced-rate frames read as three different
+  periods on three runs. Now 0 in 3000 random trials),
   the members' samples are POOLED and written as one `hitch-pattern` record
   (`periodMs`, `occurrences`, `frameMs` min/median/max, `gates`, `pooled`,
   `topFrames` with shares of the pooled frames, `sampled`) — again when the
@@ -161,6 +167,17 @@ detect (always on) → classify+attribute → deliver ┬→ agent   (push: wake
   from hitch times. Real Chromium (test/periodic-e2e.mjs): a 70 ms
   setInterval every 3 s, 8 below-floor hitches, found at 3.00 s and
   attributed to its function at 98%.
+- **In view or not**: the recorder wraps the game's renderer instance's
+  own `render` to learn the camera it last rendered with, and the slot
+  watch tests each stale slot's position against that view (clip space,
+  10% margin). Rows carry `inView`; stale slots all OFF screen (a game
+  culling by not rewriting off-screen instances) are not an incident —
+  harmless until the camera reaches one before the game does. Real three.js
+  0.183 (test/ghost-view-e2e.mjs): 20 stale slots on screen read 20 in
+  view and an incident; 20 behind the camera, 0 and none.
+- **A session that drew no frames** (a window hidden or minimized for the
+  whole run) writes no profile.json; `report` says "the page recorded NO
+  frames" and shows what it logged, never "is the runtime running?".
 - **Same-named methods apart**, at stop (SPEC §3.21): `Car.update`, not
   three costs in one `update` row.
 - **A launcher of your own**: `attach --exec "<cmd>"` instead of

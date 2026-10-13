@@ -15,7 +15,9 @@ function stepAgents(n) {
   return x;
 }
 let tick = 0;
-setInterval(() => { stepAgents(9000); postMessage(++tick); }, ${every});
+// ?marks=1: the sim marks each tick (__sloptimizeTickMs, defined by the attach before this runs).
+const marks = ${q.get('marks') === '1'};
+setInterval(() => { const t0 = performance.now(); stepAgents(9000); if (marks && self.__sloptimizeTickMs) self.__sloptimizeTickMs(performance.now() - t0); postMessage(++tick); }, ${every});
 `;
 const sim = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })), { name: 'sim' });
 let ticks = 0;

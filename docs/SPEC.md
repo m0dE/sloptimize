@@ -886,6 +886,16 @@ samples are only `tasks ≤20 ms`; a saturated worker's idle gaps are mostly
 shorter than one sample, so its tasks merge — said as `back-to-back tasks`,
 never as one long task; a worker with only cut runs `never idle`.
 
+A task is still not a TICK: one worker task can run several sim ticks (a
+field run read 84 ms/task × 5.6/s for a sim stepping 57 ms × ~17/s). So
+the attach defines `__sloptimizeTickMs(ms)` in every worker it samples,
+before the worker's first instruction, and on the page: the sim calls it
+once per tick with what the tick took. The marks ride each worker
+rotation's batch, fold into the run file as the thread's `ticks` (a
+histogram, 1 ms buckets to 200 ms), and every reader prefers them:
+`worker[sim] 58 ms/tick (p95 72) × 13.2/s (the game's marks)`, `compare`'s
+`thread <name> ms/tick`, the sweep row, and the `over-tick` verdict.
+
 Each worker's heaviest functions follow, and a verdict:
 - `sim-behind` — the game clock (`__sloptimizeClock`, §3.11) runs under
   0.95× real time, at ANY busy share: a tick that outgrew its budget falls
@@ -973,7 +983,14 @@ script's source is read once (through the page, else file:// or HTTP) and
 each is named by its innermost enclosing class (`Car.update`) or, outside
 one, by line (`update:812`) — a single linear scan aware of strings,
 templates, comments and regex literals (qualify.js). Unshared names stay as
-V8 gave them. A run qualified this way compares against an older one by
+V8 gave them. The source is read with `Debugger.getScriptSource` through
+the session the script ran in (the page's, or a worker's — app:// bundles
+and blob: workers a fetch cannot reach), pauses skipped and the debugger
+disabled after, an inline script padded to where it starts in its
+document; fetch is the fallback. A script that stays unreadable is kept in
+the run file (`qualify.unread`) and `report` says its rows are named by
+line. Hitch and pattern lines, written mid-run with V8's bare name, are
+named from the run file's qualified rows when `report` prints them. A run qualified this way compares against an older one by
 the old bare name only where the name was not shared.
 
 ## 4. Census and attribution

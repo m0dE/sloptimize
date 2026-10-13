@@ -35,12 +35,12 @@ function median(vals) {
 }
 
 function emptyBucket() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], bodies: [], bodyP95s: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally() };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, threads: new Map(), medians: [], p95s: [], calls: [], bodies: [], bodyP95s: [], seconds: 0, over: null, maxMs: undefined, tally: emptyTally(), ticks: emptyTicks() };
 }
 /** A worker thread's share of a phase: the same sample fold, no frames —
  *  and its TASKS: a worker on its own loop has no frame to be "per". */
 function emptyThread() {
-  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, tasks: emptyTasks() };
+  return { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyUs: 0, wallUs: 0, tasks: emptyTasks(), ticks: emptyTicks() };
 }
 /** Busy stretches between idle samples: a decoupled worker's ticks. `hist`
  *  counts them by length in samples; `open` are the ones a chunk edge cut
@@ -53,6 +53,26 @@ function addTasks(into, t) {
   if (max > into.maxUs) into.maxUs = max;
   for (const [k, c] of t.hist instanceof Map ? t.hist : Object.entries(t.hist ?? {})) into.hist.set(+k, (into.hist.get(+k) ?? 0) + c);
 }
+// ── Sim ticks the game marks (`__sloptimizeTickMs(ms)`) ─────────────────────
+// A sampled "task" is a busy stretch between idle samples — one worker task
+// can run several sim ticks, and a field report read 84 ms/task × 5.6/s for
+// a sim stepping 57 ms × 17/s. The game's own mark is the tick. Kept as a
+// histogram: 0.1 ms buckets to 10 ms, 1 ms to 200 ms, 10 ms beyond.
+export function emptyTicks() { return { n: 0, ms: 0, maxMs: 0, hist: new Map() }; }
+/** Fold `{n, ms, maxMs|max, hist}` (a page window, a worker's take, a run file's) into `into`. */
+export function addTicks(into, t) {
+  if (!t || !(t.n > 0)) return into;
+  into.n += t.n; into.ms += t.ms ?? 0;
+  const max = t.maxMs ?? t.max ?? 0;
+  if (max > into.maxMs) into.maxMs = max;
+  for (const [k, c] of t.hist instanceof Map ? t.hist : Object.entries(t.hist ?? {})) into.hist.set(+k, (into.hist.get(+k) ?? 0) + c);
+  return into;
+}
+function ticksJSON(t) {
+  if (!t?.n) return undefined;
+  return { n: t.n, ms: +t.ms.toFixed(1), maxMs: +t.maxMs.toFixed(1), hist: Object.fromEntries([...t.hist].sort((a, b) => a[0] - b[0])) };
+}
+
 function tasksJSON(t) {
   if (!t.n && !t.open) return undefined;
   return { n: t.n, ms: +(t.us / 1000).toFixed(1), maxMs: +(t.maxUs / 1000).toFixed(1), samples: t.samples, open: t.open, hist: Object.fromEntries([...t.hist].sort((a, b) => a[0] - b[0])) };
@@ -259,11 +279,22 @@ export function createRunFold(meta) {
     seen(atMs);
   }
 
+  /** The page's marked sim ticks outside a profile record (the last window, at stop). */
+  function addPageTicks(phase, t) { addTicks(bucket(phase).ticks, t); }
+  /** A worker's marked sim ticks (`__sloptimizeTickMs`), taken at a rotation. */
+  function addThreadTicks(phase, thread, t) {
+    const pb = bucket(phase);
+    const tb = pb.threads.get(thread) ?? pb.threads.set(thread, emptyThread()).get(thread);
+    addTicks(tb.ticks, t);
+  }
+
   /** A tier-0 `profile` record: one 120-frame window's median/p95/calls. */
   function addFrame(rec) {
     const b = bucket(rec.phase);
     if (typeof rec.frame?.medianMs === 'number') b.medians.push(rec.frame.medianMs);
     if (typeof rec.frame?.p95Ms === 'number') b.p95s.push(rec.frame.p95Ms);
+    // Sim ticks the page marked this window (main-thread sims).
+    if (rec.ticks) addTicks(b.ticks, rec.ticks);
     // The host's own frame body (__sloptimizeFrame), beside the rAF interval.
     if (typeof rec.frame?.bodyMs === 'number') { b.bodies.push(rec.frame.bodyMs); if (typeof rec.frame.bodyP95Ms === 'number') b.bodyP95s.push(rec.frame.bodyP95Ms); }
     if (typeof rec.render?.calls === 'number') b.calls.push(rec.render.calls);
@@ -300,6 +331,7 @@ export function createRunFold(meta) {
       out.recorder = { ...(recorder ?? {}) };
       if (pageCost.slotsEvery > 0) out.recorder.page = { slotsMs: +pageCost.slotsMs.toFixed(1), slotsMaxEvery: pageCost.slotsEvery };
     }
+    if (qualify) out.qualify = qualify;
     out.phases = {};
     for (const [k, b] of phases) {
       const p = { samples: b.samples, idle: b.idle, program: b.program, gc: b.gc };
@@ -319,12 +351,14 @@ export function createRunFold(meta) {
       // LINE_FNS heaviest by self time: the functions anyone reads lines of.
       p.fns = fnsJSON(b.fns);
       if (b.wallUs > 0) { p.busyMs = +(b.busyUs / 1000).toFixed(1); p.wallMs = +(b.wallUs / 1000).toFixed(1); }
+      const pt = ticksJSON(b.ticks);
+      if (pt) p.ticks = pt;
       // Worker threads (SPEC §3.18), each folded like the page.
       if (b.threads.size) {
         p.threads = {};
         for (const [name, t] of b.threads) {
-          const tasks = tasksJSON(t.tasks);
-          p.threads[name] = { samples: t.samples, idle: t.idle, program: t.program, gc: t.gc, busyMs: +(t.busyUs / 1000).toFixed(1), wallMs: +(t.wallUs / 1000).toFixed(1), ...(tasks ? { tasks } : {}), fns: fnsJSON(t.fns) };
+          const tasks = tasksJSON(t.tasks), ticks = ticksJSON(t.ticks);
+          p.threads[name] = { samples: t.samples, idle: t.idle, program: t.program, gc: t.gc, busyMs: +(t.busyUs / 1000).toFixed(1), wallMs: +(t.wallUs / 1000).toFixed(1), ...(tasks ? { tasks } : {}), ...(ticks ? { ticks } : {}), fns: fnsJSON(t.fns) };
         }
       }
       out.phases[k] = p;
@@ -334,6 +368,9 @@ export function createRunFold(meta) {
 
   /** The run's conditions block (conditions.js), replaced whole. */
   function setConditions(c) { conditions = c && typeof c === 'object' ? { ...c } : null; }
+  /** Same-named functions told apart, and the scripts that could not be read. */
+  let qualify = null;
+  function setQualify(q) { qualify = q && typeof q === 'object' ? { ...q } : null; }
   /** What the recorder itself cost the page: its profiler restarts. */
   let recorder = null;
   function setRecorder(r) { recorder = r && typeof r === 'object' ? { ...r } : null; }
@@ -357,7 +394,7 @@ export function createRunFold(meta) {
     }
   }
 
-  return { addProfile, addFrame, setConditions, setRecorder, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
+  return { addProfile, addFrame, addThreadTicks, addPageTicks, setConditions, setRecorder, setQualify, fnRows, renameFns, toJSON, get empty() { return phases.size === 0; } };
 }
 
 /** Every run file under `<dir>/runs/`, oldest first; unreadable files skipped. */
@@ -379,7 +416,7 @@ export function readRuns(dir) {
  * (medians do not sum).
  */
 export function runBucket(runs, phases = null) {
-  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyMs: 0, wallMs: 0, threads: new Map(), frame: undefined, tally: emptyTally() };
+  const out = { samples: 0, idle: 0, program: 0, gc: 0, fns: new Map(), busyMs: 0, wallMs: 0, threads: new Map(), frame: undefined, tally: emptyTally(), ticks: emptyTicks() };
   let frameFrom = -1;
   const all = (Array.isArray(runs) ? runs : [runs]).flatMap((run) => Object.entries(run?.phases ?? {}));
   for (const [k, p] of all) {
@@ -389,10 +426,12 @@ export function runBucket(runs, phases = null) {
     if (p.counters) foldTally(out.tally, p.counters);
     foldFns(out.fns, p.fns);
     out.busyMs += p.busyMs ?? 0; out.wallMs += p.wallMs ?? 0;
+    addTicks(out.ticks, p.ticks);
     for (const [name, t] of Object.entries(p.threads ?? {})) {
-      const o = out.threads.get(name) ?? out.threads.set(name, { samples: 0, idle: 0, program: 0, gc: 0, busyMs: 0, wallMs: 0, fns: new Map(), tasks: emptyTasks() }).get(name);
+      const o = out.threads.get(name) ?? out.threads.set(name, { samples: 0, idle: 0, program: 0, gc: 0, busyMs: 0, wallMs: 0, fns: new Map(), tasks: emptyTasks(), ticks: emptyTicks() }).get(name);
       for (const k of ['samples', 'idle', 'program', 'gc', 'busyMs', 'wallMs']) o[k] += t[k] ?? 0;
       addTasks(o.tasks, t.tasks);
+      addTicks(o.ticks, t.ticks);
       foldFns(o.fns, t.fns);
     }
   }

@@ -57,7 +57,7 @@ function readLedger(limit = Infinity) {
   const asked = [...PHASES].join(',');
   const why = phases.length === 0
     ? `no record on this ledger carries a phase — tier 1 stamps one per frame, rec.frame({ phase }); a tier-0 page sets window.__sloptimizePhase = 'steady' (--phase ? reads the unstamped)`
-    : `no records in phase ${asked} — phases on this ledger: ${phases.map(([p, n]) => `${p} ×${n}`).join(', ')}${unphased ? `; ${unphased} records carry no phase (--phase ?)` : ''}`;
+    : `no records in phase ${asked} — phases on this ledger: ${phases.map(([p, n]) => `${p} ×${n}`).join(', ')}${unphased ? `; ${unphased} records from before the first phase was set (boot) or from a host that sets none (--phase ? reads them)` : ''}`;
   // --json: an empty match is data — the verb prints its usual empty shape
   // and the reason goes to stderr, where a parser of stdout never trips on it.
   if (json) { console.error(`sloptimize: ${why}`); return []; }
@@ -66,7 +66,7 @@ function readLedger(limit = Infinity) {
 }
 
 if (cmd === 'report') {
-  const profile = readJson('profile.json');
+  let profile = readJson('profile.json');
   // 80 lines, not 20: heartbeats (1/min while a session is armed) share the
   // ledger and must not crowd the actual incidents out of the report window.
   const hitches = readLedger(80);
@@ -76,6 +76,15 @@ if (cmd === 'report') {
   const census = readJson('census.json');
   // The whole ledger, read once: conditions, rates, spans, memory and reboots all fold it.
   const ledger = readJsonl('perf.jsonl', Infinity);
+  // A session that armed and never drew a frame window (a window hidden or
+  // minimized for the whole run: rAF stops) writes no profile.json — or
+  // leaves an older session's there. Its load, phases and records are still
+  // the run; said as what happened, never "is the runtime running?".
+  const armed = ledger.filter((r) => r.type === 'armed' && r.session).at(-1);
+  if (armed && (!profile || (profile.session && profile.session !== armed.session && Date.parse(armed.at) > Date.parse(profile.at ?? 0)))
+    && !ledger.some((r) => r.type === 'profile' && r.session === armed.session)) {
+    profile = { type: 'profile', tier: 0, session: armed.session, at: armed.at, ...(armed.build ? { build: armed.build } : {}), noFrames: { url: armed.url, records: ledger.filter((r) => r.session === armed.session).length } };
+  }
   // The session's conditions (conditions.js): what every number below was
   // measured under — the display's refresh rate first among them.
   const C = await import('../src/conditions.js');
@@ -122,7 +131,9 @@ if (cmd === 'report') {
   // unattached runs, and nothing said not to.
   // Unless the host handed over its own frame timer (__sloptimizeFrame): then
   // the app's number, measured attached, is the one to set beside its own.
-  if (profile.tier === 0 && profile.frame?.bodyMs !== undefined) {
+  if (profile.noFrames) {
+    console.log(`  ⚠ the page recorded NO frames — the recorder armed at ${profile.at}${profile.noFrames.url ? ` (${profile.noFrames.url})` : ''} and logged ${profile.noFrames.records} records, but no frame window ever completed: a hidden or minimized window stops requestAnimationFrame. What it did log (phases, load, hitches) follows; frame figures need a visible window`);
+  } else if (profile.tier === 0 && profile.frame?.bodyMs !== undefined) {
     console.log(`  the app's own frame body (__sloptimizeFrame): median ${profile.frame.bodyMs}ms  mean ${fmt(profile.frame.bodyMeanMs, 'ms')}  p95 ${fmt(profile.frame.bodyP95Ms, 'ms')} over ${fmt(profile.frame.bodyFrames)} frames — the app's timer, read with the recorder attached: compare THIS with the app's unattached numbers; the rAF figures above are attached-only`);
   } else if (profile.tier === 0) console.log('  timings are rAF intervals with the recorder attached (vsync-quantized, recorder cost included) — compare only with other attached runs, never with the app\'s own frame timer or unattached measurements (window.__sloptimizeFrame(bodyMs) once a frame hands over the app\'s own timer)');
   // three.js compiling with its synchronous error check on (its default):
@@ -195,6 +206,8 @@ if (cmd === 'report') {
     const phBucket = file ? R.runBucket(file, PHASES) : null;
     if (file) {
       const top = R.heaviestSelf(phBucket, 3, file.intervalUs);
+      // Same-named functions the run could not tell apart: said, not implied.
+      if (file.qualify?.unread?.length) console.log(`  ⚠ same-named functions in ${file.qualify.unread.join(', ')} could not be told apart (the source was unreadable at stop) — rows there named fn:line, and compare across builds keys them by line`);
       if (top.length) {
         console.log(`  heaviest self time${PHASES ? ` (${[...PHASES].join(',')})` : ' (whole run)'}:`);
         for (const f of top) {
@@ -211,7 +224,7 @@ if (cmd === 'report') {
       const rows = T.threadRows(bucket, bucket.frame?.medianMs);
       if (rows.length) {
         // Main per frame; a worker per TASK — a worker on its own loop has no frame.
-        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : r.task ? `${T.taskText(r.task)} ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
+        console.log(`  threads: ${bucket.frame?.medianMs !== undefined ? `frame ${bucket.frame.medianMs} ms · ` : ''}${rows.map((r) => `${r.name} ${r.perFrameMs !== undefined ? `${r.perFrameMs} ms/frame ` : ''}${r.tick ? `${r.perFrameMs !== undefined ? '· ' : ''}${T.tickText(r.tick)} (the game's marks) ` : r.task ? `${T.taskText(r.task)} ` : ''}(${pct(r.busy)} busy)`).join(' · ')}`);
         const tickHz = ledger.filter((r) => r.type === 'sim' && r.session === profile.session && r.tickHz > 0).at(-1)?.tickHz;
         const v = T.threadVerdict(rows, { clockRate: T.clockRateOf(acc), tickHz });
         if (v) console.log(`    → ${v.text}`);
@@ -246,10 +259,15 @@ if (cmd === 'report') {
   // one under a tenth of the stall is not printed as one (attach's
   // low-share gate; applied here too, to lines written before it existed).
   const { ATTRIBUTE_MIN_SHARE } = await import('../src/incident-pipeline.mjs');
+  // Names as the run file has them (qualify.js): a hitch written mid-run
+  // says `update`; the run, qualified at stop, knows `Car.update`.
+  const { namerFromRun } = await import('../src/qualify.js');
+  const runFile = profile.session ? (await import('../src/runs.js')).readRuns(DIR).find((r) => r.session === profile.session) : null;
+  const named = namerFromRun(runFile);
   const attribution = (h) => {
     const top = h.topFrames?.[0];
     if (!top) return h.unattributed ? `  unattributed (${h.unattributed})` : '';
-    const name = `${top.fn}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
+    const name = `${named(top.fn, top.url)}${top.url ? `@${top.url}` : ''} ${top.selfMs}ms`;
     // A line that carries a share was judged by the recorder (at whatever
     // --min-share it ran with); only older lines are judged here.
     const judged = top.share !== undefined;
@@ -272,10 +290,14 @@ if (cmd === 'report') {
   // 75 ms frames are each below the floor and together one cause.
   const P = await import('../src/periodic.js');
   const sessionHitches = ledger.filter((r) => r.type === 'hitch' && (!profile.session || r.session === profile.session) && (!PHASES || PHASES.has(r.phase ?? '?')));
-  const cadence = P.findPeriod(sessionHitches.map((r) => Date.parse(r.at)));
-  const onClock = new Set(cadence ? cadence.members.map((i) => sessionHitches[i]) : []);
+  // Each cadence from one kind of hitch: a phase and a band of frame times,
+  // and only when it beats chance — a crowd of hitches always has pairs.
+  const cadences = P.findCadences(sessionHitches.map((r) => ({ t: Date.parse(r.at), ms: r.frameMs, phase: r.phase }))).slice(0, 3);
+  const onClock = new Map();
+  for (const c of cadences) for (const i of c.members) onClock.set(sessionHitches[i], c);
   for (const h of auto.slice(-5)) {
-    const tick = [...onClock].some((m) => m.at === h.at && m.frameMs === h.frameMs) ? `  ↻ ${P.periodText(cadence.periodMs)}` : '';
+    const c = [...onClock].find(([m]) => m.at === h.at && m.frameMs === h.frameMs)?.[1];
+    const tick = c ? `  ↻ ${P.periodText(c.periodMs)}` : '';
     console.log(`  · ${h.at} ${h.frameMs}ms (median ${h.medianMs}) → ${h.classification?.[0]?.guess}: ${h.classification?.[0]?.evidence}${attribution(h)}${tick}`);
   }
   const patterns = new Map();
@@ -284,14 +306,14 @@ if (cmd === 'report') {
     const gated = Object.entries(r.gates ?? {}).map(([g, n]) => `${n} ${g}`).join(', ');
     const lead = r.topFrames?.[0];
     const who = lead && !r.unattributed
-      ? `pooled over ${r.pooled.hitches} frames (${r.pooled.sampledMs} ms sampled): top ${lead.fn}${lead.url ? `@${lead.url}` : ''} ${lead.selfMs}ms (${pct(Math.min(lead.share, 1))} of those frames)${lead.lines?.length ? ` — ${lead.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : ''}`
+      ? `pooled over ${r.pooled.hitches} frames (${r.pooled.sampledMs} ms sampled): top ${named(lead.fn, lead.url)}${lead.url ? `@${lead.url}` : ''} ${lead.selfMs}ms (${pct(Math.min(lead.share, 1))} of those frames)${lead.lines?.length ? ` — ${lead.lines.map((l) => `:${l.line} ${pct(l.share)}`).join(' · ')}` : ''}`
       : lead ? `pooled over ${r.pooled.hitches} frames: no function holds a tenth of them (heaviest ${lead.fn} ${pct(lead.share)}${r.sampled ? `; native ${r.sampled.programMs}ms, gc ${r.sampled.gcMs}ms` : ''})`
         : `not attributed (${r.unattributed})`;
     console.log(`  ↻ hitches ${P.periodText(r.periodMs)} — timer-driven: ${r.occurrences}× ${r.frameMs.min}–${r.frameMs.max} ms over ${r.spanSec} s${gated ? ` (${gated})` : ''}${r.phase ? ` [${r.phase}]` : ''}; ${who}`);
   }
-  if (cadence && ![...patterns.values()].some((r) => Math.abs(r.periodMs - cadence.periodMs) <= Math.max(50, 0.02 * cadence.periodMs))) {
-    const ms = cadence.members.map((i) => sessionHitches[i].frameMs).sort((a, b) => a - b);
-    console.log(`  ↻ hitches ${P.periodText(cadence.periodMs)} — timer-driven: ${cadence.members.length}× ${ms[0]}–${ms.at(-1)} ms over ${(cadence.spanMs / 1000).toFixed(1)} s`);
+  for (const c of cadences) {
+    if ([...patterns.values()].some((r) => Math.abs(r.periodMs - c.periodMs) <= Math.max(50, 0.01 * c.periodMs) && (r.phase ?? '') === (c.phase ?? ''))) continue;
+    console.log(`  ↻ hitches ${P.periodText(c.periodMs)} — timer-driven: ${c.members.length}× ${c.msMin}–${c.msMax} ms over ${(c.spanMs / 1000).toFixed(1)} s${c.phase ? ` [${c.phase}]` : ''}`);
   }
   // A page that armed more than once in one attach session booted more than
   // once under the recorder (it navigated or reloaded itself): its load-phase
@@ -323,8 +345,11 @@ if (cmd === 'report') {
   if (slotRecs.size) {
     console.log(`  instance slots (drawn inside .count, per mesh — newest):`);
     for (const r of slotRecs.values()) {
+      const view = r.inView === undefined ? ''
+        : r.inView === 0 ? ` — none in the camera's view: off-screen instances left unwritten (harmless while they stay off screen; a ghost if the camera reaches one before it is rewritten)`
+          : ` — ${r.inView} in the camera's view: drawn on screen at stale positions (ghosts, or static instances)`;
       console.log(r.stale > 0
-        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s — static instances, or ghosts drawn at stale positions (count past the live set?)`
+        ? `  ◫ ${r.name}: ${r.drawn} drawn, ${r.active} written/moved in the last window, ${r.stale} untouched for ${r.staleSec}s${view || ' — static instances, or ghosts drawn at stale positions (count past the live set?)'}`
         : `  ◫ ${r.name}: no stale slots any more (${r.drawn} drawn, ${r.active} active) @ ${r.at}`);
     }
   }
@@ -334,7 +359,7 @@ if (cmd === 'report') {
   const issues = buildIssues(readLedger(), { fixes: readJsonl('fixes.jsonl', Infinity) });
   if (issues.length) {
     console.log(`  issues (${issues.length} footprints; top 5 by occurrences — \`sloptimize issues\` for all):`);
-    for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
+    for (const i of issues.slice(0, 5)) console.log(`  ${i.glyph} fp=${i.id} ×${i.count}  ${i.label} [${i.phase === '?' ? 'before first phase' : i.phase}]  last ${agoText(i.lastAgoMs)}${i.fixes.length ? `  fixes: ${i.fixes.length}` : ''}`);
   }
   if (census?.hints?.length) {
     console.log(`  census hints (${census.hints.length}):`);
@@ -375,7 +400,7 @@ if (cmd === 'issues') {
   for (const i of issues) {
     if (only && i.id !== only) continue;
     const rc = i.recurs ? `  ⟳ every ${i.recurs.periodSec.toFixed(1)}s ±${i.recurs.jitterSec}` : '';
-    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}${rc}`);
+    console.log(`${i.glyph} fp=${i.id} ×${String(i.count).padEnd(5)} ${i.label.padEnd(44)} [${i.phase === '?' ? 'before first phase' : i.phase}]  last ${agoText(i.lastAgoMs).padEnd(8)} first ${i.first.slice(0, 16)}  builds ${i.builds.length}${i.worst ? `  worst ${+i.worst.value.toFixed(1)}${i.worst.unit}` : ''}${rc}`);
     if (only || issues.length <= 8) {
       console.log(`      key ${i.key}`);
       if (i.recurs) console.log(`      ⟳ recurs every ${i.recurs.periodSec.toFixed(1)} s ± ${i.recurs.jitterSec} (${i.recurs.occurrences} occurrences${i.recurs.missed ? `, ${i.recurs.missed} missed` : ''}${i.recurs.sessions > 1 ? ` across ${i.recurs.sessions} sessions` : ''}) — a timer, not a player action: look for setInterval / an autosave / a periodic flush`);
@@ -884,6 +909,7 @@ if (cmd === 'timeline') {
       const d = st.delta === undefined ? '' : `${st.delta > 0 ? '+' : ''}${+st.delta.toFixed(2)}`;
       console.log(`  ${st.significant ? '◆' : '·'} ${st.sha.slice(0, 10)}  ${v.padStart(9)}  ${d.padStart(8)}  ${(st.subject ?? '').slice(0, 60)}${st.status ? `  [${st.status}]` : ''}`);
     }
+    if (t.warning) console.log(`  ⚠ ${t.warning}`);
     console.log(`  → ${t.shape.text}`);
     if (t.noise) console.log(`    noise floor ${t.noise.floor} (${t.noise.from}); ◆ = a step above it`);
     const sgn = (x) => `${x > 0 ? '+' : ''}${+x.toFixed(2)}`;
@@ -941,9 +967,13 @@ if (cmd === 'timeline') {
     try { git('checkout', '-q', '-f', original); console.log(`[timeline] restored ${original}`); }
     catch (e) { console.error(`sloptimize timeline: could not restore ${original}: ${String(e.stderr || e.message).trim()} — run git checkout ${original}`); }
   };
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
+  // A signal stops the loop BEFORE the session: closing it makes the run
+  // loop fail its step, and nothing may check out or launch the next one.
+  let stopping = false;
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, async () => { if (stopping) return; stopping = true; if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]); restore(); save(); process.exit(130); });
   try {
     for (const sha of commits) {
+      if (stopping) break;
       const step = { sha, subject: git('log', '-1', '--format=%s', sha), date: git('log', '-1', '--format=%cI', sha), sessions: [] };
       saved.steps.push(step);
       const dirt = git('status', '--porcelain', '--untracked-files=no');
@@ -959,16 +989,18 @@ if (cmd === 'timeline') {
         step.buildS = +((Date.now() - t0) / 1000).toFixed(1);
         if (r.status !== 0) { step.status = 'build-failed'; console.log(`[timeline] ${sha.slice(0, 10)} build failed (exit ${r.status ?? r.signal}) — ${logPath}`); save(); continue; }
       }
-      for (let i = 0; i < runs; i++) {
+      for (let i = 0; i < runs && !stopping; i++) {
         try {
           session = await attach({ launch: launch ? fillExec(launch, { commit: sha }) : undefined, exec: execCmd, execVars: { commit: sha }, port: get('--port') ? Number(get('--port')) : undefined,
             dir: DIR, headless: args.includes('--headless'), build: sha.slice(0, 12), waitMs: get('--wait') !== undefined ? Number(get('--wait')) * 1000 : undefined,
             slots: !args.includes('--no-slots'), workers: !args.includes('--no-workers'), drive: drivePath ?? TL.stepDrive({ settleS, measureS }), log: () => {} });
           await Promise.race([session.runDrive(), session.closed.then(() => { throw new Error('target gone'); })]);
-          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
+          // Fully stopped (bounded) before the next commit: its run file holds the measured window.
+          await Promise.race([session.close(), new Promise((r) => setTimeout(r, 60_000))]);
           step.sessions.push(session.session);
           console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}/${runs} — session ${session.session}  ${step.subject.slice(0, 60)}`);
         } catch (e) {
+          if (stopping) break;
           if (session) await Promise.race([session.close(), new Promise((r) => setTimeout(r, 5000))]);
           step.status = `run-failed: ${String(e?.message ?? e).slice(0, 160)}`;
           console.log(`[timeline] ${sha.slice(0, 10)} run ${i + 1}: ${e?.message ?? e}`);
@@ -1069,7 +1101,8 @@ if (cmd === 'sweep') {
         }
         process.exit(4);
       }
-      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 8000))]);
+      // Fully stopped (bounded) before the next level: its run file holds the measured window.
+      await Promise.race([session.close(), new Promise((r) => setTimeout(r, 60_000))]);
       live = null;
       level.sessions.push(session.session);
     }

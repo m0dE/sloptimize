@@ -97,7 +97,8 @@ export function levelMetrics(records, run) {
   // A worker by its tasks (its own loop has no frame), else by its busy share.
   for (const tr of bucket ? threadRows(bucket, m['frame ms']) : []) {
     if (tr.name === 'main') continue;
-    if (taskReadable(tr.task)) m[`thread ${tr.name} ms/task`] = tr.task.meanMs;
+    if (tr.tick) m[`thread ${tr.name} ms/tick`] = tr.tick.meanMs;
+    else if (taskReadable(tr.task)) m[`thread ${tr.name} ms/task`] = tr.task.meanMs;
     else m[`thread ${tr.name} busy %`] = +(tr.busy * 100).toFixed(1);
   }
   return { metrics: m, fns };
